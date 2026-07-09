@@ -72,6 +72,12 @@
   Hermes 端的 compaction／清理（schema 本有 `compacted` 欄位），但未實證。Stage 2 bridge
   以 `event_id`（session + message rowid）去重，訊息數波動不影響正確性；仍建議 Stage 2
   開工時複查一次，確認不是讀錯 profile db（sticky profile 風險，見 Stage 0 報告）。
+- **觀察註記結案（2026-07-09，adapter idempotency gate 實走時查明）**：兩個數字是
+  **不同統計口徑**，不是資料異常、也不是讀錯 profile db。3,156 是 adapter 預設口徑
+  （只計 `active = 1` 的訊息）；Hermes CLI stats 的 5,316 是全量口徑（含 compacted）。
+  已互補驗證：active（3,156）＋ compacted ＝ 全量（5,316）。Stage 0 的 3,753 同樣是
+  當時的 active 口徑快照，數字隨 compaction 移動屬正常行為。Stage 2 對照基準時
+  應註明採用哪個口徑。
 
 ---
 
