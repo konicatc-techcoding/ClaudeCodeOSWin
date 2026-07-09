@@ -1,0 +1,33 @@
+# hermes/config/cron_jobs.yaml — v0.1
+#
+# 這裡只定義「job 叫什麼名字、prompt 是什麼」，不定義「多久跑一次」——
+# 排程時間寫在部署層：目前（Windows/WSL2 環境）是 hermes/systemd/ 的
+# .timer 檔（一個 cron job 對應一個 timer；daily-memory-check 的 N-gate
+# 就是由這條 WSL2 排程每天觸發、經 cron.py 讀取這份設定 enqueue）。
+# hermes/launchd/ 的 plist 是 macOS legacy/reference，不再是 live 排程。
+# cron.py 本身無狀態，每次呼叫只查這份設定、enqueue 一次、結束。
+
+jobs:
+  - name: daily-memory-check
+    prompt: |
+      這是 daily-memory-check 排程任務。請先做 N-gate 判斷，再決定是否分派整併，
+      不要無條件觸發：
+
+      1. 讀取 registry/consolidation_policy.yaml 的 trigger 與 usefulness 區塊。
+         所有門檻數值（累積件數、天數）一律以該檔案為準，不要使用任何寫死或
+         記憶中的數字。
+      2. 檢查 memory/inbox/ 的待處理檔案（只算 inbox/ 頂層檔案，不含 .processed/
+         與 .failed/ 子目錄）：
+         a. 依政策檔的 usefulness 規則統計「useful 的待處理檔案數」；
+         b. 找出最舊待處理檔案距今的天數。
+      3. 對照政策檔 trigger 區塊的門檻（滿足任一條件即達標）：
+         - 未達門檻：不分派整併。在回覆中明確記錄「N-gate 未達門檻，本次略過」，
+           並附上實際數字（useful 待處理數、最舊檔案天數、對照的門檻值），
+           讓 Hermes job log 留下這次略過的紀錄，然後結束。
+         - 已達門檻：分派 knowledge 領域執行 consolidate-memory 整併
+           memory/inbox/ 的新內容進正本，並在回覆中附上觸發依據的數字。
+
+      注意：步驟 1–3 的 N-gate 判斷只讀取中繼資料（政策檔、inbox 檔案清單與
+      frontmatter），不修改 memory/ 底下任何檔案；只有達門檻後由 knowledge
+      執行的整併才會動到檔案。
+    max_attempts: 3

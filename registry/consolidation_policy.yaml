@@ -1,0 +1,56 @@
+# registry/consolidation_policy.yaml — v0.1
+# Memory consolidation 政策的機器可讀版本（參數正本）。
+# daily-memory-check 的 N-gate 判斷、未來 Stage 2 session bridge、
+# consolidate-memory 的呼叫端都應該查這份表，不要各自寫死數值。
+# 人類可讀的理由與完整規則見 ../docs/memory-taxonomy.md 第 4 節。
+#
+# 比照 delegation_policy.yaml 的慣例：要調整數值改這裡，不改文件正文。
+
+version: 0.1
+
+trigger:
+  # 滿足任一條件即觸發 consolidate-memory（分派給 knowledge 執行）
+  min_useful_pending: 5      # inbox 待處理檔案中 usefulness 非 low 的累積達 N 才觸發
+  max_pending_age_days: 7    # 最舊待處理檔案超過此天數，即使不足 N 也觸發
+  manual_always: true        # 互動式 session 明確要求時無條件觸發（既有行為不變）
+
+usefulness:
+  # 正面訊號：含任一即視為 useful（值得落地 inbox / 進入正本）
+  positive_signals:
+    - substantive_decision      # 實質決策：拍板的取捨、含理由的方向選擇
+    - new_fact                  # 新事實：環境眉角、系統狀態變化、實測限制
+    - user_preference_or_correction   # 使用者偏好或糾正（feedback_* 型別）
+    - reusable_conclusion       # 跨 session 可重用的結論
+    - external_reference        # 外部系統參照（reference_* 型別）
+  # 排除訊號：符合任一即不匯入；已在 inbox 的由 consolidate-memory 移 .failed/
+  exclusion_signals:
+    - test_session              # 測試/健康檢查（STAGE0-OK、_hermes_bridge_test 型訊號）
+    - command_trial_and_error   # 指令試誤過程，無結論（結論有價值就只摘結論）
+    - pure_chitchat             # 單純閒聊（對應 delegation policy 的 general_conversation）
+    - too_short                 # 過短且無任何正面訊號（門檻見下）
+    - duplicate_of_canonical    # 已被既有正本涵蓋
+  min_content_chars: 200        # too_short 門檻：內容字元數
+  min_session_messages: 4       # too_short 門檻：session 訊息數（適用 hermes-session 來源）
+
+guardrails:
+  test_session:
+    detect:
+      - underscore_prefix_with_test   # 底線開頭且含 test 字樣的命名模式
+      - known_markers: ["STAGE0-OK", "_hermes_bridge_test"]
+    action_before_import: skip        # 落地前：不寫 inbox
+    action_in_inbox: move_to_failed   # 整併時：移 .failed/ 並在回報註明
+  sensitive:
+    categories: [credentials, api_tokens, passwords, health_data, financial_pii]
+    headless_action: reject_import    # fail-closed：不落地、不節錄，僅 job log 記略過＋session_id
+    interactive_action: human_confirm # 人工確認：遮罩後匯入或整段放棄
+    masking:
+      secrets: full_removal           # 金鑰/token/密碼整段換成 [REDACTED:credential]，不留頭尾
+      personal_data: fact_level_only  # 健康/財務可保留「存在此類討論」，數值與細節移除
+
+inbox_frontmatter:
+  # memory/inbox/ 新增檔案的建議 frontmatter schema（非必要條件，
+  # 無 frontmatter 的檔案照 consolidate-memory 既有流程處理）
+  schema: claudecodeos.inbox.v1
+  fields: [schema, source, session_id, event_id_range, created_at,
+           usefulness, usefulness_reason, sensitivity]
+  # consolidation 狀態刻意不設欄位：由目錄位置（inbox/ | .processed/ | .failed/）表達

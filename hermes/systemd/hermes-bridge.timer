@@ -1,0 +1,13 @@
+# hermes/systemd/hermes-bridge.timer
+# 對應原本 plist 的 StartCalendarInterval Hour=8 Minute=10（每天 08:10）。
+
+[Unit]
+Description=Run hermes-bridge.service every day at 08:10
+
+[Timer]
+OnCalendar=*-*-* 08:10:00
+Unit=hermes-bridge.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

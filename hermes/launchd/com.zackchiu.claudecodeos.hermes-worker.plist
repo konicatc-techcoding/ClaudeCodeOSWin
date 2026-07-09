@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zackchiu.claudecodeos.hermes-worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/zackchiu/dev/ClaudeCodeOS/.venv/bin/python3</string>
+        <string>/Users/zackchiu/dev/ClaudeCodeOS/hermes/worker.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zackchiu/dev/ClaudeCodeOS</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/zackchiu/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 無條件重啟，不是只有 Crashed:true——測試發現 launchd 不把 SIGKILL（kill -9，
+         例如 OOM killer 或人工強殺）算進 "Crashed" 的定義，只用 Crashed:true 的話這種
+         情況不會被拉起來。想要真的「一直保持運作」，交給 ThrottleInterval 擋 crash-loop
+         就好，不要限制只在特定退出方式才重啟。要真的停掉，用 uninstall.sh
+         （launchctl bootout）——那樣 launchd 才知道是刻意要停，不會跟你打架。 -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zackchiu/dev/ClaudeCodeOS/logs/hermes/launchd.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/zackchiu/dev/ClaudeCodeOS/logs/hermes/launchd.stderr.log</string>
+</dict>
+</plist>

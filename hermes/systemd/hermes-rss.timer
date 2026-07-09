@@ -1,0 +1,15 @@
+# hermes/systemd/hermes-rss.timer — 對應原本 plist 的 StartInterval: 1800（每 30 分鐘）
+# systemd timer 的 OnUnitActiveSec 語意是「上次觸發結束後多久再觸發一次」，
+# 跟 launchd 的 StartInterval 語意一致（都是固定間隔，不是 wall-clock 對齊）。
+
+[Unit]
+Description=Run hermes-rss.service every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Unit=hermes-rss.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

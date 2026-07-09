@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "dashboard/app.py",
+        "--server.address=localhost",
+        "--server.headless=true",
+        "--browser.gatherUsageStats=false"
+      ],
+      "port": 8501
+    }
+  ]
+}

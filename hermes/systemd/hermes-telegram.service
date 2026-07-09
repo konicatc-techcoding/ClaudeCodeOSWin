@@ -1,0 +1,26 @@
+# hermes/systemd/hermes-telegram.service — WSL2 等效版本（取代 hermes-telegram.plist）
+#
+# telegram adapter 是常駐輪詢（不是一次性 job），對應原本 plist 的
+# RunAtLoad + KeepAlive:true + ThrottleInterval:10。
+#
+# 安裝前務必先建好 hermes/config/telegram.json（bot_token/allowed_chat_ids），
+# 否則程式會直接結束，配上 Restart=always 會變成每 10 秒 crash-loop 一次。
+
+[Unit]
+Description=Hermes Telegram polling adapter — ClaudeCodeOSWin
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/adapters/telegram.py
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+Restart=always
+RestartSec=10
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/telegram_launchd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/telegram_launchd.stderr.log
+
+[Install]
+WantedBy=default.target

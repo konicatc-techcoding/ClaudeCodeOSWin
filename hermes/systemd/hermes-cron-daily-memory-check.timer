@@ -1,0 +1,15 @@
+# hermes/systemd/hermes-cron-daily-memory-check.timer
+# 對應原本 plist 的 StartCalendarInterval Hour=8 Minute=0（每天 08:00）。
+# OnCalendar 是 wall-clock 對齊的排程，語意跟 StartCalendarInterval 一致
+# （不是「上次執行後隔多久」，是「每天固定時間點」）。
+
+[Unit]
+Description=Run hermes-cron-daily-memory-check.service every day at 08:00
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Unit=hermes-cron-daily-memory-check.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,199 @@
+# registry/capability_lanes.yaml — v0.1
+# Capability Lane：把「capability（工作型態）」對應到「實際執行通道
+# （provider／model／Hermes profile／成本／風險／工具邊界）」的治理中繼資料。
+# 概念說明與欄位定義見 docs/capability-lanes.md。
+#
+# 跟既有 registry 的關係（不取代、不矛盾）：
+# - capability 的「名字」正本仍是 registry/model_router.yaml 的 routes——
+#   本檔每個 lane 的 capability 欄位必須是那裡存在的 key（有一致性測試：
+#   scripts/test_capability_lanes.py）。
+# - agents.yaml 的 default_capability 機制不變：subagent 查 default_capability
+#   → route_model.py 解析 model_router.yaml 執行。本檔不是 route_model.py 的
+#   輸入，執行邏輯完全不變；lane 是給 CoS／subagent／未來 Stage 2 bridge 做
+#   「選哪條通道、允許誰用、成本風險是什麼」判斷用的描述層。
+# - execution: route_model 的 lane，其 provider/model 內容跟 model_router.yaml
+#   的對應 route 一致（openrouter lane 的 model 必須等於 route 的
+#   openrouter_model，一致性測試會查）。要改模型 slug，改 model_router.yaml，
+#   這裡跟著同步——真相來源仍是 model_router.yaml。
+# - execution: hermes_profile 的 lane 是描述既有 Hermes profile（實際存在於
+#   %LOCALAPPDATA%\hermes\profiles\）的通道；模型與工具設定由該 profile 自己的
+#   config 決定，本檔不重複記載、不宣稱。這類 lane 目前沒有任何 runtime 會
+#   自動呼叫（status: reference），Stage 2 bridge 的 selected_capability_lane
+#   欄位會引用這裡的 lane id 做記錄與追蹤。
+#
+# 欄位說明（完整定義見 docs/capability-lanes.md）：
+#   id                lane 唯一識別（本檔內唯一；bridge state 等外部記錄引用這個）
+#   capability        對應 model_router.yaml routes 的 key
+#   execution         route_model | hermes_profile | native
+#   provider          anthropic | openrouter | hermes
+#   model             實際模型 slug；native/hermes_profile lane 可為 null
+#   hermes_profile    （選填）對應的 Hermes profile 名稱
+#   status            active（今天就可走）| reference（描述性，尚未接線）
+#   cost_tier         included | free | paid | unknown（unknown 僅限 status: reference
+#                     的 lane——Hermes profile 的實際模型成本由 profile config 決定，
+#                     尚未盤點前不瞎編）
+#   risk_tier         low | medium | high
+#   allowed_agents    允許使用這條 lane 的 domain agent id（agents.yaml）
+#   intended_use      一句話說明這條 lane 該用在什麼工作
+#   guardrails        使用限制清單（沿用 docs/memory-taxonomy.md 的既有規則用詞）
+#   fallback_lane     （選填）此 lane 不可用時退到哪條 lane
+
+schema: claudecodeos.capability_lanes.v1
+
+lanes:
+  # ---- model_router.yaml 對應的 lanes（今天就可經 route_model.py 走）----
+
+  - id: claude-native
+    capability: claude_native
+    execution: native
+    provider: anthropic
+    model: null            # 由目前的 Claude session 直接處理，不對外呼叫
+    status: active
+    cost_tier: included
+    risk_tier: low
+    allowed_agents: [automation, knowledge, planning, engineering, intelligence]
+    intended_use: 本來就該由 Claude 原生處理的領域工作（automation/knowledge/planning 的預設通道）
+    guardrails:
+      - 遵守 delegation policy 與各 domain 邊界，無額外通道限制
+      - headless 模式下只能新增 memory/inbox/ 檔案，不可編輯正本（ARCHITECTURE.md 第 4 節）
+
+  - id: claude-architecture-reasoning
+    capability: architecture_reasoning
+    execution: native
+    provider: anthropic
+    model: null
+    status: active
+    cost_tier: included
+    risk_tier: low
+    allowed_agents: [engineering]
+    intended_use: 工程／CoS 情境的架構推理（model_router.yaml 註明此命名保留給工程情境，不借給其他領域）
+    guardrails:
+      - 命名邊界：automation/knowledge/planning 請走 claude-native，不借用這條 lane
+
+  - id: openrouter-gpt55-coding
+    capability: complex_coding
+    execution: route_model
+    provider: openrouter
+    model: openai/gpt-5.5          # 與 model_router.yaml routes.complex_coding.openrouter_model 同步
+    status: active
+    cost_tier: paid
+    risk_tier: medium
+    allowed_agents: [engineering]
+    intended_use: 複雜 coding 任務要借用 GPT-5.5 時（engineering 的 default_capability）
+    guardrails:
+      - prompt 檔案必須在專案目錄內（route_model.py resolve_prompt_path 技術強制）
+      - 不得把敏感內容（credentials／API token／密碼、健康資料、財務個資，定義沿用 memory-taxonomy 4.3）放進送出的 prompt
+      - 需要 OPENROUTER_API_KEY；付費 tier，注意用量
+    fallback_lane: claude-native
+
+  - id: openrouter-gemini-google-ecosystem
+    capability: google_ecosystem
+    execution: route_model
+    provider: openrouter
+    model: google/gemini-3-pro     # 與 model_router.yaml routes.google_ecosystem.openrouter_model 同步
+    status: active
+    cost_tier: paid
+    risk_tier: medium
+    allowed_agents: [intelligence, engineering]
+    intended_use: 明確涉及 Google 生態系（需要 Gemini 系模型較擅長的內容）的任務；目前沒有領域以它為 default_capability
+    guardrails:
+      - prompt 檔案必須在專案目錄內（route_model.py 技術強制）
+      - 不得把敏感內容放進送出的 prompt（定義沿用 memory-taxonomy 4.3）
+      - 需要 OPENROUTER_API_KEY
+    fallback_lane: claude-native
+
+  - id: openrouter-nemotron-bulk-research
+    capability: bulk_research
+    execution: route_model
+    provider: openrouter
+    model: nvidia/nemotron-70b-instruct   # 與 model_router.yaml routes.bulk_research.openrouter_model 同步
+    status: active
+    cost_tier: free
+    risk_tier: low
+    allowed_agents: [intelligence]
+    intended_use: 大量、低單價的情報蒐集／內容整理（intelligence 的 default_capability）
+    guardrails:
+      - prompt 檔案必須在專案目錄內（route_model.py 技術強制）
+      - 不得把敏感內容放進送出的 prompt（定義沿用 memory-taxonomy 4.3）
+      - 需要 OPENROUTER_API_KEY；free tier，品質要求高的結論性判斷不要只靠這條 lane
+    fallback_lane: claude-native
+
+  # ---- Hermes profile 對應的 lanes（描述性；模型/工具設定由 profile config 決定）----
+  # 這些 profile 實際存在於 Windows Hermes（%LOCALAPPDATA%\hermes\profiles\）。
+  # ClaudeCodeOS 對 Hermes 資料一律唯讀（HermesSessionAdapter，mode=ro）；
+  # 這些 lane 目前只是登記「有這條通道存在」，沒有任何 runtime 自動走它們。
+
+  - id: hermes-nemocoding
+    capability: complex_coding
+    execution: hermes_profile
+    provider: hermes
+    model: null                    # 由 profile 自身設定決定，本 registry 不重複記載
+    hermes_profile: nemocoding
+    status: reference
+    cost_tier: unknown
+    risk_tier: medium
+    allowed_agents: [engineering]
+    intended_use: Hermes 側的 Nemotron coding profile；session 產出經 Stage 2 bridge／to-inbox 才進入本系統
+    guardrails:
+      - ClaudeCodeOS 不寫入 Hermes 資料；session 內容進入記憶一律走 memory/inbox/ 政策（memory-taxonomy 4.2/4.3）
+      - 自動化呼叫 Hermes CLI 一律明確 --profile（sticky profile 風險，Stage 0 報告既有結論）
+
+  - id: hermes-gptcoding
+    capability: complex_coding
+    execution: hermes_profile
+    provider: hermes
+    model: null
+    hermes_profile: gptcoding
+    status: reference
+    cost_tier: unknown
+    risk_tier: medium
+    allowed_agents: [engineering]
+    intended_use: Hermes 側的 GPT coding profile；同上，產出經 bridge／to-inbox 才進入本系統
+    guardrails:
+      - ClaudeCodeOS 不寫入 Hermes 資料；session 內容進入記憶一律走 memory/inbox/ 政策（memory-taxonomy 4.2/4.3）
+      - 自動化呼叫 Hermes CLI 一律明確 --profile
+
+  - id: hermes-codereviewer
+    capability: complex_coding
+    execution: hermes_profile
+    provider: hermes
+    model: null
+    hermes_profile: codereviewer
+    status: reference
+    cost_tier: unknown
+    risk_tier: medium
+    allowed_agents: [engineering]
+    intended_use: Hermes 側的 code review profile（Stage 0.5 待決：此 profile 去留未定，定案前僅登記）
+    guardrails:
+      - ClaudeCodeOS 不寫入 Hermes 資料；session 內容進入記憶一律走 memory/inbox/ 政策（memory-taxonomy 4.2/4.3）
+      - 自動化呼叫 Hermes CLI 一律明確 --profile
+
+  - id: hermes-financialresearch
+    capability: bulk_research
+    execution: hermes_profile
+    provider: hermes
+    model: null
+    hermes_profile: financialresearch
+    status: reference
+    cost_tier: unknown
+    risk_tier: high
+    allowed_agents: [intelligence]
+    intended_use: Hermes 側的財務研究 profile；產出常含財務個資訊號，落地判斷從嚴
+    guardrails:
+      - session 內容可能含財務個資——headless 匯入一律 fail-closed（memory-taxonomy 4.3），互動式路徑才可遮罩後匯入
+      - ClaudeCodeOS 不寫入 Hermes 資料；自動化呼叫 Hermes CLI 一律明確 --profile
+
+  - id: hermes-intelligence
+    capability: bulk_research
+    execution: hermes_profile
+    provider: hermes
+    model: null
+    hermes_profile: intelligence
+    status: reference
+    cost_tier: unknown
+    risk_tier: medium
+    allowed_agents: [intelligence]
+    intended_use: Hermes 側的情報蒐集 profile；產出經 bridge／to-inbox 才進入本系統
+    guardrails:
+      - ClaudeCodeOS 不寫入 Hermes 資料；session 內容進入記憶一律走 memory/inbox/ 政策（memory-taxonomy 4.2/4.3）
+      - 自動化呼叫 Hermes CLI 一律明確 --profile

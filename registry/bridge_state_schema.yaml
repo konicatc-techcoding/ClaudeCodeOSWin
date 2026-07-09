@@ -1,0 +1,110 @@
+# registry/bridge_state_schema.yaml — v0.1
+# Stage 2 session bridge「處理狀態記錄」的格式定義（schema），說明文件見
+# docs/memory-bridge-state.md。
+#
+# 為什麼放 registry：registry 放的是版本控管的政策/格式**正本**
+# （consolidation_policy.yaml、delegation_policy.yaml 同類）——這份檔案是
+# 「格式契約」，屬 Procedural 層（怎麼記錄），適合 git 管理與測試把關。
+# **實際的 runtime state（一筆一筆的處理記錄）不放這裡、也不進 git**——
+# 儲存載體是 Stage 2 的實作決策（見 docs/memory-bridge-state.md 第 4 節）。
+#
+# 硬邊界（沿用既有規則，本 schema 不放寬任何一條）：
+# - bridge state 不是 Hermes 的記憶資料庫；不建第二份 state.db；
+#   絕不寫回 Hermes 原始資料（adapter read-only 是硬性邊界）。
+# - 只記錄 ClaudeCodeOS 側的處理狀態，用途是去重（idempotent）與可追蹤性。
+# - state.db 是 Episodic 事件來源，不是 canonical memory；本記錄也不是記憶，
+#   只是管線的簿記（bookkeeping）。
+
+schema: claudecodeos.bridge_state.v1
+status: definition-only   # Stage 1 收斂只定義格式；Stage 2 才有寫入者
+
+fields:
+  session_id:
+    type: string
+    required: true
+    description: Hermes session id（沿用 claudecodeos.session.v1 的 session_id）
+
+  source_profile:
+    type: string
+    required: true
+    description: >
+      session 來自哪個 Hermes profile（default/nemocoding/gptcoding/…）。
+      等同指出來源 db（default → %LOCALAPPDATA%\hermes\state.db，
+      profile → profiles/<name>/ 底下的 state.db）。
+
+  session_source:
+    type: string
+    required: true
+    description: Hermes sessions.source 欄位（cli | tui | telegram | cron …），原樣照抄不轉譯
+
+  status:
+    type: enum
+    required: true
+    values: [discovered, skipped, to_inbox, imported, failed, needs_review]
+    description: >
+      discovered＝bridge 偵測到新完結 session、尚未判定；
+      skipped＝依政策略過（memory-taxonomy 4.2 排除訊號，或 4.3 敏感內容
+      fail-closed——headless 遇敏感訊號一律 skip，不落地、不節錄）；
+      to_inbox＝已在 memory/inbox/ 新增檔案（進入 Episodic→Semantic 過渡區，
+      之後由 N-gate 觸發的 consolidate-memory 收尾）；
+      imported＝對應 inbox 檔案已被 consolidate-memory 整併（檔案移入 .processed/）；
+      failed＝處理過程出錯（error 欄位必填）；
+      needs_review＝需要互動式 session 人工確認（例如疑似敏感但值得保留，
+      留給互動式路徑做遮罩後匯入的決策——headless 自己絕不遮罩）。
+
+  memory_type:
+    type: enum
+    required: true
+    values: [procedural, semantic, episodic, none]
+    description: >
+      依 docs/memory-taxonomy.md 三層 taxonomy 的初步歸類（供 consolidation 參考，
+      不是最終判定——最終歸檔由 consolidate-memory 決定）；none＝判定不值得進記憶。
+
+  useful_chat:
+    type: bool
+    required: true
+    description: memory-taxonomy 4.2「useful 判定」的結果（含任一正面訊號＝true）
+
+  selected_capability_lane:
+    type: string
+    required: false
+    description: >
+      這個 session 對應的 capability lane id（registry/capability_lanes.yaml，
+      例如 hermes-gptcoding）。用來追蹤「這是哪條通道產生的工作」；
+      無法對應時省略。
+
+  decision_reason:
+    type: string
+    required: true
+    description: 一句話說明為什麼是這個 status（略過依據哪條排除訊號、落地依據哪個正面訊號）
+
+  inbox_file:
+    type: string
+    required: false
+    description: status 為 to_inbox/imported 時必填——落地的 inbox 檔案相對路徑
+
+  processed_at:
+    type: string
+    required: true
+    description: 最後一次狀態變更時間（UTC ISO 8601）
+
+  error:
+    type: string
+    required: false
+    description: status=failed 時必填——錯誤摘要（不得含 session 敏感內容）
+
+  event_id:
+    type: string
+    required: true
+    description: >
+      去重（idempotency）依據。session 層級沿用 adapter 的 event_id 慣例：
+      "hermes:<session_id>"；訊息層級範圍記錄在 event_id_range。
+      同一 event_id 重跑 bridge 不得重複 enqueue／重複落地。
+
+  event_id_range:
+    type: string
+    required: false
+    description: >
+      對應 claudecodeos.event.v1 的 event_id 範圍
+      （"hermes:<session_id>:<first_rowid>..<last_rowid>"），跟 inbox frontmatter
+      （claudecodeos.inbox.v1）的同名欄位互相對照，供內容層級稽核。

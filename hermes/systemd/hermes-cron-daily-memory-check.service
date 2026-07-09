@@ -1,0 +1,15 @@
+# hermes/systemd/hermes-cron-daily-memory-check.service — WSL2 等效版本
+# （取代 com.zackchiu.claudecodeos.hermes-cron-daily-memory-check.plist 的 ProgramArguments 部分）
+# 一次性執行單元，觸發時機交給搭配的 hermes-cron-daily-memory-check.timer。
+
+[Unit]
+Description=Hermes cron adapter — daily-memory-check (one-shot, triggered by matching .timer)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/adapters/cron.py --job-name daily-memory-check
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/cron_daily-memory-check_launchd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/cron_daily-memory-check_launchd.stderr.log

@@ -1,0 +1,25 @@
+.DS_Store
+*.log
+logs/*
+!logs/.gitkeep
+
+# hermes/config/ 只排除真的是密鑰的檔案（bot token 等）；
+# cron_jobs.yaml、rss_feeds.yaml 這類「有哪些排程/來源」本身不是密鑰，要進版控。
+hermes/config/telegram.json
+hermes/config/.env
+.env
+hermes/state/*
+!hermes/state/.gitkeep
+hermes/jobs.db
+hermes/jobs.db-wal
+hermes/jobs.db-shm
+hermes/sessions/*
+!hermes/sessions/.gitkeep
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

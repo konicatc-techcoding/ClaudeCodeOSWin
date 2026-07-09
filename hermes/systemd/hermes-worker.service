@@ -1,0 +1,35 @@
+# hermes/systemd/hermes-worker.service — WSL2 等效版本（取代 macOS 的 hermes-worker.plist）
+#
+# 對應關係（launchd → systemd）：
+#   RunAtLoad              → WantedBy=default.target（隨 user session 啟動）+ systemctl --user enable
+#   KeepAlive: true        → Restart=always
+#   ThrottleInterval: 10   → RestartSec=10
+#   EnvironmentVariables   → Environment=/EnvironmentFile=
+#   StandardOutPath/Error  → StandardOutput=append:.../StandardError=append:...
+#
+# 安裝方式見 hermes/systemd/install.sh，或參考 WINDOWS_WSL_SETUP.md。
+# 這是 user-level unit（systemctl --user），不需要 root/sudo，跟 launchd 的
+# per-user LaunchAgent 定位對應。前提：WSL2 distro 要開啟 systemd
+# （/etc/wsl.conf 加 [boot] systemd=true，需要 Windows 11 22H2+ 或近期的 WSL 版本）。
+
+[Unit]
+Description=Hermes worker (job queue) — ClaudeCodeOSWin
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/worker.py
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# 無條件重啟，理由跟原本 launchd 版本一致：不要只在特定退出方式才重啟
+# （launchd 版本的註解提到 KeepAlive:{Crashed:true} 不涵蓋 SIGKILL；
+#  systemd 的 Restart=always 沒有這個坑，任何結束方式都會重啟，效果更接近預期）。
+Restart=always
+RestartSec=10
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/launchd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/launchd.stderr.log
+
+[Install]
+WantedBy=default.target

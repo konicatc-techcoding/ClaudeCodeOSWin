@@ -1,0 +1,48 @@
+# registry/agents.yaml — v0.1
+# Chief of Staff 用這份清單決定要把任務分派給哪個 domain subagent。
+# status: active = 已有對應的 .claude/agents/*.md；planned = 尚未建立，CoS 不可分派
+# depends_on: 這個領域的任務通常需要依賴領域先提供上下文。CoS 分派前，
+#   若任務明顯需要既有脈絡（例如涉及歷史決策、既有規劃），應考慮先分派給
+#   依賴領域取得上下文，再連同結果一起交給這個領域——不是每次都要兩階段，
+#   只有任務明顯依賴既有記憶時才需要。
+# default_capability: 這個領域呼叫 scripts/route_model.py 時預設用哪個
+#   capability（見 registry/model_router.yaml）。這是唯一的真相來源——
+#   subagent 檔案本身不寫死 capability 名稱，都是查這裡。只是「預設」，
+#   任務內容明顯不適合預設能力時，subagent 可以換成別的 capability。
+
+agents:
+  - id: intelligence
+    status: active
+    file: .claude/agents/intelligence.md
+    description: 情報蒐集、市場/競品研究、RSS 與新聞內容整理
+    triggers: [manual, rss]
+    default_capability: bulk_research
+
+  - id: engineering
+    status: active
+    file: .claude/agents/engineering.md
+    description: 程式碼變更、code review、技術實作
+    triggers: [manual]
+    default_capability: complex_coding
+
+  - id: automation
+    status: active
+    file: .claude/agents/automation.md
+    description: 重複性工作流程、cron 觸發任務、跨系統整合
+    triggers: [cron, webhook, manual]
+    default_capability: claude_native
+
+  - id: knowledge
+    status: active
+    file: .claude/agents/knowledge.md
+    description: 長期知識庫管理、memory/inbox 整併、reference 管理、consolidate-memory 介面
+    triggers: [manual, cron]
+    default_capability: claude_native
+
+  - id: planning
+    status: active
+    file: .claude/agents/planning.md
+    description: 目標規劃、優先順序決策、階段性規劃（roadmap/priority/stage planning）
+    triggers: [manual]
+    depends_on: [knowledge]
+    default_capability: claude_native

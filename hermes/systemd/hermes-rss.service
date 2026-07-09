@@ -1,0 +1,16 @@
+# hermes/systemd/hermes-rss.service — WSL2 等效版本（取代 hermes-rss.plist 的 ProgramArguments 部分）
+# 一次性執行單元：跑一輪 rss.py 就結束，「多久跑一次」交給搭配的 hermes-rss.timer
+# （對應原本 plist 的 StartInterval: 1800）。這個 .service 本身不設 Restart，
+# 因為它是被 timer 觸發的 oneshot，不是常駐程序。
+
+[Unit]
+Description=Hermes RSS adapter (one-shot, triggered by hermes-rss.timer)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/adapters/rss.py
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/rss_launchd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/rss_launchd.stderr.log

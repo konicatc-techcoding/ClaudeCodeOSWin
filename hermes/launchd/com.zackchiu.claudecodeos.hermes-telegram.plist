@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zackchiu.claudecodeos.hermes-telegram</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/zackchiu/dev/ClaudeCodeOS/.venv/bin/python3</string>
+        <string>/Users/zackchiu/dev/ClaudeCodeOS/hermes/adapters/telegram.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zackchiu/dev/ClaudeCodeOS</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/zackchiu/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zackchiu/dev/ClaudeCodeOS/logs/hermes/telegram_launchd.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/zackchiu/dev/ClaudeCodeOS/logs/hermes/telegram_launchd.stderr.log</string>
+</dict>
+</plist>

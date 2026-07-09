@@ -1,0 +1,65 @@
+# registry/delegation_policy.yaml — v0.1
+# 分派政策的機器可讀版本。CoS、未來的 Hermes 前置分類、未來的 Job Queue
+# 都應該查這份表來決定「誰做」，不是靠模型當下判斷「這任務很小，我自己做」。
+# 人類可讀的說明與決策程序見 ../delegation_policy.md
+
+direct_categories:   # CoS 可以自己處理，不需要分派
+  - id: meta_system_question
+    description: 關於這個系統本身的問題（有哪些領域、架構是什麼、狀態如何）
+  - id: clarification
+    description: 向使用者釐清需求，尚未進入實際執行
+  - id: synthesis
+    description: 整合／摘要已經由 subagent 回傳的結果
+  - id: orientation_read
+    description: >-
+      為了「分類任務」而讀取 registry/ 或 memory/ 等中繼資料——僅限於分類用途，
+      不能拿讀到的內容直接完成使用者要的實質工作
+  - id: general_conversation
+    description: >-
+      跟系統五個領域完全無關的一般對話（閒聊、建議、非任務性問題）。
+      CoS 可以用一般助理身份直接回覆，不需要走分類/分派；
+      但如果對話後續轉為明確的領域任務，要重新分類。
+      新增於 v0.1 integration test（見 ../INTEGRATION_TEST.md 測試 7），
+      修正前 CoS 已經是這樣做，只是政策沒寫清楚。
+  - id: local_diagnosis
+    description: >-
+      僅限於「唯讀判讀」——使用者貼在對話裡的終端機輸出／設定檔內容／log片段，
+      對照專案內既有文件（例如 WINDOWS_WSL_SETUP.md）給出診斷說明與建議的下一步指令。
+      範圍嚴格限定在文字分析：不可以拿來執行任何指令（包含看似無害的檢查指令）、
+      不可以修改任何檔案或系統設定、不可以撰寫或修改程式碼。
+      一旦判讀完成、需要實際執行指令或修改檔案來驗證或修復，
+      那個後續動作必須回到正常分類程序（通常落在 debugging_testing → engineering），
+      不能因為「前面已經分析過了」就順勢自己做掉。
+      這一類的存在理由是「唯讀文字分析」本身的性質，不是「任務很小」——
+      任務規模永遠不能單獨拿來當作 direct_categories 的理由。
+
+delegated_categories:   # 一律分派，任務大小不是判斷依據
+  - id: code_change
+    owner: engineering
+    keywords: [寫程式, 修bug, refactor, 實作, edit, patch]
+  - id: code_review
+    owner: engineering
+    keywords: [review, 審查, PR]
+  - id: debugging_testing
+    owner: engineering
+    keywords: [debug, 測試, test, 跑測試, 除錯, 語法檢查, syntax]
+  - id: external_research
+    owner: intelligence
+    keywords: [查一下, 搜尋, 市場, 競品, 新聞, RSS]
+  - id: knowledge_management
+    owner: knowledge
+    keywords: [知識庫, 文件整理, 檢索, inbox, 整併, reference]
+  - id: planning_prioritization
+    owner: planning   # depends_on: [knowledge] — 見 agents.yaml
+    keywords: [規劃, 優先順序, 排程目標, roadmap, 里程碑, 下一階段]
+  - id: recurring_workflow
+    owner: automation
+    keywords: [排程, cron, 自動化, 每天, 每小時]
+
+fallback:
+  # 任務不屬於上面任何一類、又不是純粹的 direct_categories 時，
+  # 不要用「感覺很小」當理由自己做。
+  rule: >-
+    拒絕使用「任務規模」作為是否分派的判斷依據，沒有例外。
+    無法分類時，先向使用者釐清，或挑最接近的 delegated_categories 分派，
+    並在回覆中註明「這是最接近的分類」。

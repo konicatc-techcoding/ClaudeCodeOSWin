@@ -1,0 +1,9 @@
+# hermes/config/rss_feeds.yaml — v0.1
+#
+# 不是密鑰，會進版控。「多久檢查一次」交給 launchd 的 StartInterval，
+# 不寫在這裡——rss.py 本身無狀態，每次呼叫就是「整批檢查一次所有 feed」。
+
+feeds:
+  - name: hn-frontpage
+    url: "https://hnrss.org/frontpage"
+    prompt_template: "Hacker News 前頁有一篇新文章：「{title}」（{link}）。幫我摘要重點。"
