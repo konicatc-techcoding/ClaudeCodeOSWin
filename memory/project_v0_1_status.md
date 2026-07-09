@@ -33,7 +33,9 @@ Model Router 改成 capability-based：`registry/agents.yaml` 每個領域新增
 
 **2026-07-09（Stage 1 checkpoint：Pre-Bridge Foundation 完成）**：Stage 1 正式標記完成（見 docs/stage1-checkpoint.md，roadmap 已同步更新）。驗證基準：123 tests / 0 失敗、registry 6/6 yaml、WSL 5/5 units active、兩側同步 0 檔案差異、state.db 62 sessions / 3,156 messages（計數口徑差異已結案：3,156 是 adapter 預設的 active-only 口徑，Hermes CLI stats 是全量口徑 5,316；active 3,156 + compacted 2,160 = 5,316 互補驗證，非資料異常——比較基準時要注意口徑）。部署同步機制上線（scripts/sync_to_wsl.sh，telegram.json 等密鑰分側維護不同步；ClaudeCodeOS bot＝控制入口、Hermes profile bots＝對話入口）。**範圍重定義**：原 Stage 1 DoD 1/2（真實 session 實走 to-inbox → consolidate → 正本）未執行、不計入完成，列為 Stage 2 開工 gate 的第一優先；其餘 gate：bridge 側別（初判 WSL 側＋snapshot 阻力小）、bridge state 載體、model_router TODO 佔位值、Stage 0.5 四殘項、`git init`（repo 目前無版控，多項交付因此無獨立 rollback 載體）。
 
+**2026-07-10（Stage 2 三項前置決策拍板；gate 全數解除）**：使用者拍板——(1) **Bridge 側別＝WSL 部署側**（worker/jobs.db/timers/logs 都在 WSL，降低排程與 enqueue 複雜度；state.db 維持唯讀來源，被鎖時走 snapshot/immutable 路徑，絕不寫回）；(2) **Bridge state 載體＝獨立 SQLite `hermes/state/bridge_state.db`**（只記 ClaudeCodeOS 側處理狀態，不是 Hermes memory DB、不是第二份 state.db；hermes/state/ 在 .gitignore 與 sync 排除清單，天然只存在於部署側；memory/inbox 仍只是落地區不當狀態庫）；(3) **Capability Lane 不接自動路由**（capability_lanes.yaml 維持 reference/planning 層，model_router TODO 值不硬接，bridge 穩定後 Stage 2.x/3 再整合）。同日稍早：to-inbox idempotency blocker 已修復（deterministic 檔名 `hermes_session_<id>.md`＋.processed/.failed 掃描＋exit code 3，30 tests）並已同步部署側；真實 session import gate 實走完成（`20260628_004555_13dd7b` → reference_hermes_workspace.md）。Stage 2 開工 gate 全數解除，殘餘 Stage 0.5 四小項為非阻塞。git baseline：03c7a0e → eb08b8d → 51ba85a → 199d741。
+
 尚未動工：
 - Model Router 的 MCP server 版本（目前 script adapter 夠用）
 - Dashboard 要不要開放 Telegram 以外的投遞管道
-- Stage 2 session bridge（schema 已定義；「bridge 跑哪一側」與 bridge state 載體待拍板）
+- Stage 2 session bridge 實作本體（前置決策已全數拍板，見 2026-07-10 條目；實作第一步＝bridge_state schema v1 與拍板欄位清單對齊）
