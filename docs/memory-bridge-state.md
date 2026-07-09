@@ -1,6 +1,7 @@
 # Memory Bridge State — Stage 2 session bridge 的處理狀態記錄（定義，不實作）
 
-日期：2026-07-09　狀態：**格式定稿（v1）／實作待 Stage 2**　負責領域：`engineering`
+日期：2026-07-09　狀態：**格式定稿（v1）／儲存載體已拍板（2026-07-10）／實作待 Stage 2**
+負責領域：`engineering`
 
 這份文件定義未來 Stage 2 session bridge（[hermes-integration-roadmap.md](hermes-integration-roadmap.md)
 Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes 新完結 session，
@@ -9,6 +10,10 @@ Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes �
 （`claudecodeos.bridge_state.v1`）。
 
 **本文件只定義格式，不實作 bridge、不安裝排程**——那是 Stage 2 的工作。
+
+> **決策更新（2026-07-10，使用者拍板）**：儲存載體定案為**獨立 SQLite
+> `hermes/state/bridge_state.db`**（第 4 節）。拍板時的最少欄位清單與本 schema v1
+> 有出入——**對齊工作明文列為 Stage 2 實作的第一步**，本輪不改 schema yaml（第 6 節）。
 
 ## 1. 明確聲明（硬邊界，全部沿用既有規則）
 
@@ -21,6 +26,7 @@ Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes �
 3. bridge state 只記錄 **ClaudeCodeOS 側的處理狀態**：session 內容本身留在
    Episodic 層（state.db），摘要進入 `memory/inbox/`（過渡區），這份記錄兩者都
    不是——它只回答「這個 session 我看過沒、判成什麼、檔案落在哪」。
+   `memory/inbox/` 仍然只是匯入落地區，**不當狀態資料庫**（2026-07-10 拍板重申）。
 4. bridge 是 headless 管線的一部分，寫入權限沿用既有規則：**只能在
    `memory/inbox/` 新增檔案，不能編輯既有檔案、不能碰 `memory/*.md` 正本**
    （ARCHITECTURE.md 第 4 節）。
@@ -43,6 +49,8 @@ Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes �
 | `processed_at` | 最後狀態變更時間（UTC ISO 8601） |
 | `error` | failed 時必填，不得含 session 敏感內容 |
 | `event_id` / `event_id_range` | 去重依據，沿用 adapter 的 `hermes:<session_id>[:<rowid>]` 慣例 |
+
+**注意**：此為 schema v1 現狀；與 2026-07-10 拍板欄位清單的出入與對齊計畫見第 6 節。
 
 ## 3. 狀態機與既有政策的對應
 
@@ -70,25 +78,79 @@ Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes �
   訊息層級的 `event_id_range` 跟 inbox frontmatter（`claudecodeos.inbox.v1`）
   的同名欄位互相對照。
 
-## 4. 儲存載體（建議，**Stage 2 決策**）
+## 4. 儲存載體 — ✅ 已拍板（2026-07-10）：獨立 SQLite `hermes/state/bridge_state.db`
 
-三個候選，共同前提：都在 ClaudeCodeOS 側、都不進 git（runtime state 不是 registry
-內容）、都不碰 Hermes：
+**決策**：bridge state 存放於**獨立 SQLite `hermes/state/bridge_state.db`**。
+它只記 ClaudeCodeOS 的 bridge 處理狀態——**不是 Hermes memory DB、不是第二份
+Hermes state.db**；絕不寫回 Hermes `state.db`。
+
+**與其他決策的一致性（值得明文指出）**：`hermes/state/` 目前在 `.gitignore`
+（runtime 資料）**且**在部署同步的排除清單
+（[deployment-sync-plan.md](deployment-sync-plan.md) §2 第 3 類）——
+`bridge_state.db` 放這裡**天然不會被同步、也不會進版控**，與「bridge 跑在 WSL
+部署側」的側別決策（roadmap Stage 2 設計問題 1，同日拍板）一致：這個檔案只會
+存在於 WSL 部署側，Windows 開發正本不會出現它的過期副本。
+
+當時評估過的三個候選（保留作決策紀錄）：
 
 | 載體 | 優點 | 缺點 |
 |---|---|---|
 | `hermes/jobs.db` 新 table | 沿用既有 `hermes/db.py` 的 SQLite 習慣與備援；一個 db 好觀測 | 把「job 生命週期」跟「bridge 簿記」耦合在同一 schema；dashboard 的 read-only 查詢層要跟著加 |
-| **獨立小 SQLite（`hermes/state/bridge_state.db`）— 建議** | 符合 `hermes/state/` 既有定位（「adapter 自己維護的執行狀態」，跟 rss_seen.json 同類）；schema 演進不影響 jobs.db；可做 UNIQUE(event_id) 硬性去重 | 多一個檔案 |
+| **獨立小 SQLite（`hermes/state/bridge_state.db`）— ✅ 拍板採用** | 符合 `hermes/state/` 既有定位（「adapter 自己維護的執行狀態」，跟 rss_seen.json 同類）；schema 演進不影響 jobs.db；可做 UNIQUE(event_id) 硬性去重 | 多一個檔案 |
 | `hermes/state/bridge_state.jsonl`（append-only） | 最簡單、天生 append | 去重要全檔掃描；狀態更新（discovered→to_inbox）變成多筆記錄要 last-wins 解讀，容易出錯 |
-
-建議 Stage 2 採**獨立小 SQLite**：bridge 的核心需求是「UNIQUE 約束的去重」與
-「單筆狀態更新」，SQLite 直接給，jsonl 要自己搭；而 jobs.db 該保持只屬於 job queue。
-**最終選擇在 Stage 2 實作前拍板，不在本文件定案。**
 
 ## 5. 與 Stage 2 DoD 的對應
 
 - DoD 2「恰好一次」→ `event_id` 去重 + 檔案層級 `open(mode="x")`。
 - DoD 2「明確記錄依政策略過」→ `status=skipped` + `decision_reason`
   （敏感 fail-closed 時 job log 僅記「依政策略過＋session_id」，taxonomy 4.3 既有規則）。
-- DoD 3「bridge 自身狀態存放於 ClaudeCodeOS 側」→ 第 4 節載體皆滿足。
+- DoD 3「bridge 自身狀態存放於 ClaudeCodeOS 側」→ 第 4 節拍板載體滿足。
 - Stage 3 dashboard 觀測「匯入了什麼、略過了什麼」→ 直接讀這份 state（read-only）。
+
+## 6. 拍板記錄（2026-07-10）與 schema 對齊計畫
+
+### 6.1 拍板的最少追蹤欄位清單
+
+使用者拍板時給的「至少追蹤」欄位：`session_id`、`source`、`first_seen_at`、
+`last_seen_at`、`import_status`、`imported_inbox_path`、`processed_path`、
+`error_reason`、`retry_count`、`updated_at`。
+
+### 6.2 與 schema v1 的出入對照
+
+| 拍板欄位 | schema v1 對應 | 出入性質 |
+|---|---|---|
+| `session_id` | `session_id` | 一致 |
+| `source` | `source_profile` ＋ `session_source` | v1 拆成兩欄（profile 與 Hermes source），拍板清單是一欄——對齊時決定合併或保留拆分 |
+| `first_seen_at` | **無** | 新增需求 |
+| `last_seen_at` | **無** | 新增需求 |
+| `import_status` | `status` | 命名出入（enum 值集是否沿用 v1 六值，對齊時定） |
+| `imported_inbox_path` | `inbox_file` | 命名出入 |
+| `processed_path` | **無**（v1 靠目錄位置為唯一真相＋`imported` 狀態） | 新增需求；須維持「目錄位置為準、state 只是追蹤快取」的既有立場（第 3 節） |
+| `error_reason` | `error` | 命名出入 |
+| `retry_count` | **無** | 新增需求；語意須與 job queue 既有 retry（`hermes/db.py` attempts）劃清分工 |
+| `updated_at` | `processed_at` | 命名出入 |
+| —（拍板清單未提） | `memory_type`、`useful_chat`、`selected_capability_lane`、`decision_reason`、`event_id`／`event_id_range` | v1 既有欄位，拍板清單是「至少」不是「僅限」——預設保留，對齊時確認 |
+
+### 6.3 對齊工作 = Stage 2 實作的第一步（本輪不改 schema yaml）
+
+**明文標定：`claudecodeos.bridge_state.v1`（`registry/bridge_state_schema.yaml`）
+與 6.1 拍板欄位清單的對齊，是 Stage 2 實作動工時的第一步工作。**本輪只記錄決策、
+不改 schema，理由：
+
+1. schema yaml 有測試把關（`bridge_state` 測試套件，Stage 1 checkpoint 記錄 7 tests）
+   ——改欄位必須同步改測試並跑過，屬 engineering 實作工作，不是決策記錄。
+2. 出入不只是改名：`source` 合併與否、`retry_count` 與 job queue retry 的分工、
+   `processed_path` 與「目錄位置為唯一真相」立場的相容寫法，都是要在實作時一併
+   定案的語意問題，現在硬改反而先製造第二份不一致。
+3. 對齊產出應是 schema v2（或 v1 修訂）＋測試＋本文件第 2 節鏡像三者同動。
+
+### 6.4 同日相關決策（正本記錄在 roadmap Stage 2，此處只記影響）
+
+- **側別**：bridge 跑 **WSL 部署側**——worker、jobs.db、systemd timers、runtime logs
+  都在 WSL；Windows Hermes 運行導致直讀被鎖時，bridge **必須**用既有 snapshot／
+  `immutable=1` 讀取路徑，不可改寫 Hermes DB。
+- **不接自動路由**：Stage 2 bridge 不依賴 Capability Lane 自動路由；
+  `capability_lanes.yaml` 維持 reference/planning 層。因此本 schema 的
+  `selected_capability_lane` **維持選填的追蹤欄位**（記「這是哪條通道產生的工作」），
+  不承載任何路由行為；lane 活化（OpenRouter／Hermes profile／Gemini 等）留待
+  bridge 穩定後的 Stage 2.x／Stage 3 之後再議。
