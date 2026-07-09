@@ -21,14 +21,17 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import adapter as adapter_module  # noqa: E402
 from adapter import (  # noqa: E402
     EVENT_SCHEMA,
     SESSION_SCHEMA,
     HermesSessionAdapter,
     HermesSessionReadError,
+    InboxAlreadyImportedError,
     validate_event,
 )
 
@@ -212,16 +215,18 @@ class TestInboxOutput(AdapterTestBase):
         self.inbox = self.tmpdir / "inbox"
         self.inbox.mkdir()
 
-    def test_creates_new_file_only(self):
+    def test_creates_new_file_never_overwrites(self):
         path1 = self.adapter.write_inbox_file(self.export, self.inbox)
         content1 = path1.read_text(encoding="utf-8")
-        path2 = self.adapter.write_inbox_file(self.export, self.inbox)
-        # 兩次呼叫 → 兩個不同檔案；第一個檔案內容不被動到
-        self.assertNotEqual(path1, path2)
-        self.assertEqual(path1.read_text(encoding="utf-8"), content1)
-        self.assertIn("hermes_session_20260630_183709_063b4e40", path1.name)
+        # deterministic 檔名（無時間戳）
+        self.assertEqual(path1.name, "hermes_session_20260630_183709_063b4e40.md")
         self.assertIn("Garmin 健康日報", content1)
         self.assertIn("read-only importer", content1)
+        # 第二次呼叫 → 明確擋下，第一個檔案內容不被動到、不產生第二份
+        with self.assertRaises(InboxAlreadyImportedError):
+            self.adapter.write_inbox_file(self.export, self.inbox)
+        self.assertEqual(path1.read_text(encoding="utf-8"), content1)
+        self.assertEqual(len(list(self.inbox.glob("*.md"))), 1)
 
     def test_missing_inbox_dir_raises_instead_of_creating(self):
         with self.assertRaises(FileNotFoundError):
@@ -232,6 +237,147 @@ class TestInboxOutput(AdapterTestBase):
         content = path.read_text(encoding="utf-8")
         self.assertIn("請給我今天的健康日報", content)
         self.assertNotIn("call_abc123", content.split("```json")[0])  # 摘錄區不含 tool id
+
+
+class TestInboxIdempotency(AdapterTestBase):
+    """to-inbox 去重：同 session 重跑不產生重複檔（Stage 2 自動化前提）。"""
+
+    SID = "20260630_183709_063b4e40"
+
+    def setUp(self):
+        super().setUp()
+        self.adapter = HermesSessionAdapter(self.db_path)
+        self.export = self.adapter.export_session(self.SID)
+        self.inbox = self.tmpdir / "inbox"
+        self.inbox.mkdir()
+
+    # (1) 首次匯入建立 inbox 檔案
+    def test_first_import_creates_inbox_file(self):
+        path = self.adapter.write_inbox_file(self.export, self.inbox)
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.name, f"hermes_session_{self.SID}.md")
+
+    # (2) 同 session 第二次匯入不建立第二份——即使系統時間不同
+    def test_second_import_blocked_even_at_different_time(self):
+        self.adapter.write_inbox_file(self.export, self.inbox)
+
+        real_datetime = adapter_module.datetime
+
+        class _LaterDateTime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                # 模擬「另一天再重跑」——舊實作會因時間戳不同而產生重複檔
+                return real_datetime(2027, 3, 15, 12, 34, 56, tzinfo=timezone.utc)
+
+        adapter_module.datetime = _LaterDateTime
+        try:
+            with self.assertRaises(InboxAlreadyImportedError) as ctx:
+                self.adapter.write_inbox_file(self.export, self.inbox)
+        finally:
+            adapter_module.datetime = real_datetime
+        self.assertEqual(ctx.exception.session_id, self.SID)
+        self.assertEqual(len(list(self.inbox.glob("*.md"))), 1)
+
+    # (3) 同 session 已在 .processed/（舊時間戳檔名格式）→ 不重新落地
+    def test_session_in_processed_with_legacy_timestamp_name_blocks_import(self):
+        processed = self.inbox / ".processed"
+        processed.mkdir()
+        legacy = processed / f"20260709T150648Z_hermes_session_{self.SID}.md"
+        legacy.write_text("# 舊格式歸檔（無 frontmatter）\n", encoding="utf-8")
+
+        with self.assertRaises(InboxAlreadyImportedError) as ctx:
+            self.adapter.write_inbox_file(self.export, self.inbox)
+        self.assertEqual(ctx.exception.existing_path, legacy)
+        self.assertEqual(list(self.inbox.glob("*.md")), [])  # 沒有落地
+
+    # (3b) .failed/ 同樣算已處理過
+    def test_session_in_failed_blocks_import(self):
+        failed = self.inbox / ".failed"
+        failed.mkdir()
+        (failed / f"20260701T000000Z_hermes_session_{self.SID}.md").write_text(
+            "x\n", encoding="utf-8")
+        with self.assertRaises(InboxAlreadyImportedError):
+            self.adapter.write_inbox_file(self.export, self.inbox)
+        self.assertEqual(list(self.inbox.glob("*.md")), [])
+
+    # (3c) 歸檔檔名不含 session_id 時，靠 frontmatter 比對也要擋
+    def test_session_in_processed_matched_by_frontmatter(self):
+        processed = self.inbox / ".processed"
+        processed.mkdir()
+        (processed / "2026-07-01T00-00-00Z-some-other-name.md").write_text(
+            "---\nschema: claudecodeos.inbox.v1\nsource: hermes-session\n"
+            f"session_id: {self.SID}\n---\n\n內容\n", encoding="utf-8")
+        with self.assertRaises(InboxAlreadyImportedError):
+            self.adapter.write_inbox_file(self.export, self.inbox)
+        self.assertEqual(list(self.inbox.glob("*.md")), [])
+
+    # (4) 不同 session 各自可建立，互不干擾
+    def test_different_sessions_each_create_their_own_file(self):
+        other_export = self.adapter.export_session("20260706_155721_18145a")
+        p1 = self.adapter.write_inbox_file(self.export, self.inbox)
+        p2 = self.adapter.write_inbox_file(other_export, self.inbox)
+        self.assertNotEqual(p1, p2)
+        self.assertEqual(sorted(p.name for p in self.inbox.glob("*.md")), [
+            f"hermes_session_{self.SID}.md",
+            "hermes_session_20260706_155721_18145a.md",
+        ])
+
+    # (5) force：略過 .processed 掃描可重匯，但仍不覆寫 inbox 既有同名檔
+    def test_force_bypasses_processed_scan_but_never_overwrites(self):
+        processed = self.inbox / ".processed"
+        processed.mkdir()
+        (processed / f"20260709T150648Z_hermes_session_{self.SID}.md").write_text(
+            "x\n", encoding="utf-8")
+        path = self.adapter.write_inbox_file(self.export, self.inbox, force=True)
+        self.assertTrue(path.is_file())
+        content = path.read_text(encoding="utf-8")
+        # 同名檔已在 inbox 本層：force 也不覆寫
+        with self.assertRaises(InboxAlreadyImportedError):
+            self.adapter.write_inbox_file(self.export, self.inbox, force=True)
+        self.assertEqual(path.read_text(encoding="utf-8"), content)
+
+
+class TestInboxFrontmatter(AdapterTestBase):
+    """claudecodeos.inbox.v1 frontmatter（docs/memory-taxonomy.md §5）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.adapter = HermesSessionAdapter(self.db_path)
+        self.export = self.adapter.export_session("20260630_183709_063b4e40")
+        self.inbox = self.tmpdir / "inbox"
+        self.inbox.mkdir()
+
+    def test_frontmatter_fields(self):
+        path = self.adapter.write_inbox_file(self.export, self.inbox)
+        lines = path.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(lines[0], "---")
+        end = lines.index("---", 1)
+        fm = lines[1:end]
+        joined = "\n".join(fm)
+        self.assertIn("schema: claudecodeos.inbox.v1", joined)
+        self.assertIn("source: hermes-session", joined)
+        self.assertIn("session_id: 20260630_183709_063b4e40", joined)
+        self.assertIn("created_at: ", joined)
+        # adapter 不判斷內容價值與敏感度——一律 pending，不假裝判斷完成
+        self.assertIn("usefulness: pending", joined)
+        self.assertIn("sensitivity: pending", joined)
+        # event_id_range 對齊 claudecodeos.event.v1 的去重 key（rowid 101..105）
+        self.assertIn('event_id_range: "hermes:20260630_183709_063b4e40:101..105"',
+                      joined)
+        # 目錄位置是狀態唯一真相：不設 consolidation 狀態欄位
+        self.assertNotIn("status:", joined)
+
+    def test_frontmatter_session_id_helper_reads_own_output(self):
+        path = self.adapter.write_inbox_file(self.export, self.inbox)
+        self.assertEqual(
+            HermesSessionAdapter._frontmatter_session_id(path),
+            "20260630_183709_063b4e40")
+
+    def test_full_flag_disables_truncation(self):
+        long_body = self.adapter.write_inbox_file(
+            self.export, self.inbox, full=True).read_text(encoding="utf-8")
+        self.assertNotIn("…（截斷）", long_body)
+        self.assertIn("全部，工具呼叫略過", long_body)
 
 
 class TestSchemaValidation(AdapterTestBase):

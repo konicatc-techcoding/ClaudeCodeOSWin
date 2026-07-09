@@ -63,21 +63,52 @@ normalized memory/event 格式。**只讀，絕不寫回 Hermes 原始資料。*
 ## 對接 memory/inbox/ 慣例
 
 adapter 本身不主動落地。要落地時由呼叫端呼叫 `write_inbox_file(export, "memory/inbox")`，
-在 `memory/inbox/` **新增**一個 `YYYYMMDDTHHMMSSZ_hermes_session_<id>.md`——完全符合
+在 `memory/inbox/` **新增**一個 `hermes_session_<session_id>.md`——完全符合
 ARCHITECTURE.md 第 4 節「背景管線只能新增 inbox 檔案，不能編輯既有檔案或 `memory/*.md`
 正本」的規則。之後由 `consolidate-memory` skill 把它整併進正本。
 
+### Idempotency（同 session 重跑不產生重複檔）
+
+- **檔名是 deterministic key**：`hermes_session_<session_id>.md`，不含落地時間戳。
+  同 session 任何時間重跑都對到同一個檔名，`open(mode="x")` 天然擋掉重複落地
+  （舊版檔名帶落地時間戳，不同秒重跑會產生 byte-identical 重複檔——已修正）。
+- **落地前掃描歸檔**：檢查 inbox 本層、`.processed/`、`.failed/`，檔名含
+  `hermes_session_<session_id>` 子字串（涵蓋舊時間戳格式的歸檔）**或** frontmatter
+  `session_id` 相符者，都視為已匯入過——已整併的 session 不會重新落地。
+- **已存在時的行為**：Python API 丟 `InboxAlreadyImportedError`（帶 `session_id` 與
+  `existing_path`）；CLI `to-inbox` 印 `already imported：…` 到 stderr 並以
+  **exit code 3** 結束（不靜默成功、不假裝有匯入；0 = 真的新增了檔案）。
+- **人工重匯**：`--force`（API `force=True`）只略過已匯入掃描；exclusive create
+  仍生效——inbox 本層已有同名檔時 force 也不覆寫，要先手動移走舊檔。預設絕不 force。
+
+### Frontmatter（`claudecodeos.inbox.v1`，見 docs/memory-taxonomy.md §5）
+
+落地檔案開頭帶 YAML frontmatter：`schema`、`source: hermes-session`、`session_id`、
+`event_id_range`（對應 `claudecodeos.event.v1` 去重 key 範圍）、`created_at`（落地時間，
+UTC）、`usefulness: pending`、`sensitivity: pending`。**usefulness／sensitivity 一律是
+pending**——adapter 不做內容判斷與敏感偵測，不假裝判斷完成；評定是落地後呼叫端／
+consolidation 的責任（taxonomy §4.2／§4.3）。依政策不設 consolidation 狀態欄位，
+待處理／已處理／失敗由目錄位置（`inbox/`、`.processed/`、`.failed/`）表達。
+
 ## 用法
+
+`--db` 與 `--snapshot` 是**全域 flag，必須放在子指令前面**
+（例：`adapter.py --snapshot list`，不是 `adapter.py list --snapshot`）。
 
 ```bash
 # Windows
-py -3.11 hermes/session_adapter/adapter.py list [--source telegram] [--snapshot]
-py -3.11 hermes/session_adapter/adapter.py export <session_id>
-py -3.11 hermes/session_adapter/adapter.py to-inbox <session_id> [--inbox memory/inbox]
+py -3.11 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] list [--source telegram]
+py -3.11 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] export <session_id>
+py -3.11 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] to-inbox <session_id> \
+    [--inbox memory/inbox] [--force] [--full]
 
 # WSL / macOS（state.db 在 ~/.hermes/ 時自動偵測；也可 --db 指定）
 python3 hermes/session_adapter/adapter.py list
 ```
+
+`to-inbox` 的 exit code：`0` 新增成功；`3` 該 session 已匯入過（未重複落地）；
+其他非零為一般錯誤。`--full` 讓對話摘錄不截斷（預設尾端 30 則、每則 500 字元，
+更聰明的摘錄策略是已知 TODO）。
 
 程式內使用：
 

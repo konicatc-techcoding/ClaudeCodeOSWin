@@ -28,16 +28,32 @@ Read-only 保證（技術上強制，不是自律）：
 4. `write_inbox_file()` 只會在指定的 inbox 目錄「新增」檔案（open mode="x"，
    永不覆寫既有檔案），且拒絕把輸出寫進來源 db 所在目錄。
 
+Idempotency（同一 session 重跑不產生重複檔）：
+- 檔名是 deterministic key：`hermes_session_<session_id>.md`，**不含落地時間戳**
+  ——同 session 不管何時重跑都對到同一個檔名，mode="x" 天然擋掉重複落地。
+- 落地前掃描 inbox 本層、`.processed/`、`.failed/`：檔名含
+  `hermes_session_<session_id>`（涵蓋舊時間戳格式檔名）或 frontmatter 的
+  `session_id` 相符，都視為已匯入過，丟 InboxAlreadyImportedError——
+  已整併歸檔的 session 不會重新落地。
+- 人工重匯用 force=True（CLI `--force`）：只略過已匯入掃描，exclusive create
+  仍然生效——inbox 本層若已有同名檔，force 也不會覆寫。
+
 輸出落地慣例（對齊 ARCHITECTURE.md 第 4 節）：
 - adapter 本身不主動寫任何東西；要落地時由呼叫端呼叫 write_inbox_file()，
-  在 memory/inbox/ 新增一個帶時間戳的新檔案——符合「背景管線只能新增
-  inbox 檔案，不能編輯既有檔案或 memory/*.md 正本」的規則。之後由
+  在 memory/inbox/ 新增 `hermes_session_<session_id>.md`——符合「背景管線
+  只能新增 inbox 檔案，不能編輯既有檔案或 memory/*.md 正本」的規則。之後由
   consolidate-memory skill 整併進正本。
+- 檔案帶 `claudecodeos.inbox.v1` YAML frontmatter（docs/memory-taxonomy.md §5）。
+  usefulness/sensitivity 一律是 pending——adapter 不做內容判斷與敏感偵測，
+  那是落地後呼叫端／consolidation 的責任。
 
-CLI 用法（手動測試/操作用；Windows 用 `py -3.11`，WSL 用 python3）：
-    python3 hermes/session_adapter/adapter.py list [--source telegram] [--db PATH]
-    python3 hermes/session_adapter/adapter.py export <session_id> [--db PATH]
-    python3 hermes/session_adapter/adapter.py to-inbox <session_id> [--inbox DIR] [--db PATH]
+CLI 用法（手動測試/操作用；Windows 用 `py -3.11`，WSL 用 python3；
+`--db`/`--snapshot` 是全域 flag，要放在子指令前面）：
+    python3 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] list [--source telegram]
+    python3 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] export <session_id>
+    python3 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] to-inbox <session_id> \
+        [--inbox DIR] [--force] [--full]
+    # to-inbox：同 session 已匯入過 → stderr 訊息 + exit code 3（不靜默成功）
 """
 import argparse
 import json
@@ -61,6 +77,19 @@ _META_ROLES = {"session_meta"}
 
 class HermesSessionReadError(Exception):
     """來源 db 打不開、不是 SQLite、或缺少預期的 table 時丟出。"""
+
+
+class InboxAlreadyImportedError(Exception):
+    """同一 session 已經落地過（inbox 本層、.processed/ 或 .failed/ 有對應檔案）。
+
+    不是錯誤狀態的「失敗」，而是 idempotency 的明確訊號——呼叫端據此決定
+    回報「already imported」還是用 force 重匯。"""
+
+    def __init__(self, session_id: str, existing_path):
+        self.session_id = session_id
+        self.existing_path = Path(existing_path)
+        super().__init__(
+            f"session {session_id} 已匯入過：{self.existing_path}")
 
 
 def default_state_db_path() -> Path:
@@ -337,10 +366,58 @@ class HermesSessionAdapter:
 
     # ---------- 落地（只新增，永不覆寫；由呼叫端決定要不要用） ----------
 
+    # 已整併/失敗歸檔的子目錄（docs/memory-taxonomy.md：目錄位置是狀態的唯一真相）
+    _ARCHIVE_SUBDIRS = (".processed", ".failed")
+
+    @staticmethod
+    def _frontmatter_session_id(path: Path) -> str | None:
+        """讀檔案開頭的 YAML frontmatter，取 session_id（沒有就 None）。
+        只掃前 50 行，容錯：讀不到、格式不對都當作沒有。"""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                if fh.readline().strip() != "---":
+                    return None
+                for _ in range(50):
+                    line = fh.readline()
+                    if not line or line.strip() == "---":
+                        return None
+                    if line.startswith("session_id:"):
+                        return line.split(":", 1)[1].strip().strip("\"'") or None
+        except OSError:
+            return None
+        return None
+
+    def _find_existing_import(self, inbox_dir: Path, session_id: str) -> Path | None:
+        """在 inbox 本層與 .processed/ / .failed/ 找同 session 的既有落地檔。
+        比對兩種方式（涵蓋舊時間戳檔名與其他來源命名）：
+        1. 檔名含 `hermes_session_<session_id>` 子字串
+           （新格式 hermes_session_<id>.md 與舊格式 <stamp>_hermes_session_<id>.md 都中）
+        2. frontmatter 的 session_id 欄位相符
+        """
+        needle = f"hermes_session_{session_id}"
+        dirs = [inbox_dir] + [inbox_dir / d for d in self._ARCHIVE_SUBDIRS]
+        for directory in dirs:
+            if not directory.is_dir():
+                continue
+            for candidate in sorted(directory.glob("*.md")):
+                if needle in candidate.name:
+                    return candidate
+                if self._frontmatter_session_id(candidate) == session_id:
+                    return candidate
+        return None
+
     def write_inbox_file(self, export: dict, inbox_dir: str | Path,
-                         max_excerpt_events: int = 30) -> Path:
+                         max_excerpt_events: int = 30,
+                         force: bool = False, full: bool = False) -> Path:
         """把 export_session() 的結果寫成 memory/inbox/ 的一個「新」檔案。
-        - open mode="x"：既有檔案永遠不會被覆寫；撞名就加序號。
+
+        Idempotent：檔名是 deterministic key `hermes_session_<session_id>.md`
+        （不含落地時間戳），落地前先掃 inbox 本層 + .processed/ + .failed/，
+        同 session 已存在就丟 InboxAlreadyImportedError，不產生重複檔。
+
+        - force=True：略過已匯入掃描（人工重匯用）；exclusive create 仍生效，
+          inbox 本層有同名檔時照樣丟 InboxAlreadyImportedError，永不覆寫。
+        - full=True：對話摘錄不做則數與字元截斷（完整匯出）。
         - 拒絕寫進來源 state.db 所在目錄（read-only 保證的一部分）。
         """
         inbox_dir = Path(inbox_dir)
@@ -350,26 +427,61 @@ class HermesSessionAdapter:
             raise FileNotFoundError(f"inbox 目錄不存在：{inbox_dir}（不代建目錄，避免寫錯地方）")
 
         session = export["session"]
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        base = f"{stamp}_hermes_session_{session['session_id']}"
-        body = self._render_markdown(export, max_excerpt_events)
+        session_id = session["session_id"]
+        if not force:
+            existing = self._find_existing_import(inbox_dir, session_id)
+            if existing is not None:
+                raise InboxAlreadyImportedError(session_id, existing)
 
-        for attempt in range(1000):
-            name = f"{base}.md" if attempt == 0 else f"{base}_{attempt}.md"
-            path = inbox_dir / name
-            try:
-                with open(path, "x", encoding="utf-8", newline="\n") as fh:
-                    fh.write(body)
-                return path
-            except FileExistsError:
-                continue
-        raise RuntimeError("inbox 檔名重試次數用盡")
+        body = self._render_markdown(export, max_excerpt_events, full=full)
+        path = inbox_dir / f"hermes_session_{session_id}.md"
+        try:
+            with open(path, "x", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+        except FileExistsError:
+            # 掃描與寫入之間的 race、或 force 下同名檔仍在 inbox 本層
+            raise InboxAlreadyImportedError(session_id, path) from None
+        return path
 
     @staticmethod
-    def _render_markdown(export: dict, max_excerpt_events: int) -> str:
+    def _render_frontmatter(export: dict) -> list[str]:
+        """claudecodeos.inbox.v1 frontmatter（docs/memory-taxonomy.md §5）。
+        usefulness/sensitivity 固定 pending：adapter 不做內容判斷與敏感偵測，
+        不假裝判斷完成——那是落地後呼叫端／consolidation 的責任。
+        待處理/已處理狀態依政策不設欄位（目錄位置是唯一真相）。"""
+        session = export["session"]
+        session_id = session["session_id"]
+        raw_ids = [e["metadata"]["raw_message_id"] for e in export["events"]
+                   if isinstance(e.get("metadata"), dict)
+                   and isinstance(e["metadata"].get("raw_message_id"), int)]
+        lines = [
+            "---",
+            "schema: claudecodeos.inbox.v1",
+            "source: hermes-session",
+            f"session_id: {session_id}",
+        ]
+        if raw_ids:
+            lines.append(
+                f'event_id_range: "hermes:{session_id}:{min(raw_ids)}..{max(raw_ids)}"')
+        lines += [
+            "created_at: " + datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "usefulness: pending",
+            "usefulness_reason: adapter 不做內容判斷；待依 memory-taxonomy.md §4.2 評定",
+            "sensitivity: pending",
+            "---",
+            "",
+        ]
+        return lines
+
+    @classmethod
+    def _render_markdown(cls, export: dict, max_excerpt_events: int,
+                         full: bool = False) -> str:
         session = export["session"]
         events = export["events"]
-        lines = [
+        lines = cls._render_frontmatter(export)
+        excerpt_note = ("全部，工具呼叫略過" if full
+                        else f"最多 {max_excerpt_events} 則，工具呼叫略過")
+        lines += [
             f"# Hermes session 匯入 — {session['session_id']}",
             "",
             f"- 來源：hermes/{session['session_source']}",
@@ -382,13 +494,18 @@ class HermesSessionAdapter:
             json.dumps(session, ensure_ascii=False, indent=2),
             "```",
             "",
-            f"## 對話摘錄（只列 message 事件，最多 {max_excerpt_events} 則，工具呼叫略過）",
+            f"## 對話摘錄（只列 message 事件，{excerpt_note}）",
             "",
         ]
+        # TODO(truncation)：預設摘錄「尾端 30 則 + 每則 500 字元」可能截掉
+        # 有價值的上下文；本次主線是 idempotency，暫以 --full 提供完整匯出，
+        # 更聰明的摘錄策略（依 usefulness 訊號挑段落）留待後續。
         message_events = [e for e in events if e["type"] == "message"]
-        for event in message_events[-max_excerpt_events:]:
+        if not full:
+            message_events = message_events[-max_excerpt_events:]
+        for event in message_events:
             excerpt = event["content"].strip().replace("\r\n", "\n")
-            if len(excerpt) > 500:
+            if not full and len(excerpt) > 500:
                 excerpt = excerpt[:500] + "…（截斷）"
             lines.append(f"### [{event['timestamp']}] {event['role']}")
             lines.append("")
@@ -407,6 +524,8 @@ def _cli():
     # Windows console 預設 cp950，session 內容常有 emoji/中文——強制 UTF-8
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
 
     parser = argparse.ArgumentParser(description="Hermes session read-only importer")
     parser.add_argument("--db", default=None, help="state.db 路徑（預設自動偵測）")
@@ -427,6 +546,13 @@ def _cli():
         "--inbox",
         default=str(Path(__file__).resolve().parent.parent.parent / "memory" / "inbox"),
     )
+    p_inbox.add_argument(
+        "--force", action="store_true",
+        help="略過已匯入檢查（.processed/.failed/inbox 掃描）人工重匯；"
+             "仍不覆寫 inbox 既有同名檔")
+    p_inbox.add_argument(
+        "--full", action="store_true",
+        help="對話摘錄不截斷（預設：尾端 30 則、每則 500 字元）")
 
     args = parser.parse_args()
     with HermesSessionAdapter(db_path=args.db, snapshot=args.snapshot) as adapter:
@@ -441,7 +567,15 @@ def _cli():
             print(json.dumps(export, ensure_ascii=False, indent=2))
         elif args.cmd == "to-inbox":
             export = adapter.export_session(args.session_id)
-            path = adapter.write_inbox_file(export, args.inbox)
+            try:
+                path = adapter.write_inbox_file(
+                    export, args.inbox, force=args.force, full=args.full)
+            except InboxAlreadyImportedError as exc:
+                # 明確非零 exit（3）：已匯入過不是成功匯入，不靜默假裝成功
+                print(f"already imported：session {exc.session_id} 已有落地檔 "
+                      f"{exc.existing_path}，未重複落地（人工重匯用 --force）",
+                      file=sys.stderr)
+                sys.exit(3)
             print(f"已新增 inbox 檔案：{path}")
 
 
