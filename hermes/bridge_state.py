@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""hermes/bridge_state.py — v0.1（Stage 2.2）
+
+Stage 2 session bridge 的處理狀態（bookkeeping）SQLite 存取層。
+格式契約正本：registry/bridge_state_schema.yaml（claudecodeos.bridge_state.v1，17 欄）；
+設計說明：docs/memory-bridge-state.md。
+
+這個 DB 是什麼、不是什麼（硬邊界，全部沿用既有決策）：
+
+- **WSL 部署側的本機 runtime state**。預設路徑 `hermes/state/bridge_state.db`——
+  `hermes/state/` 已在 .gitignore 與部署同步排除清單（deployment-sync-plan.md §2
+  第 3 類），所以這個檔案**不進版控、不被同步**，只存在 WSL 部署側；
+  Windows 開發側只有這份程式碼，不該出現實際的 db 檔。
+- **可拋棄（disposable）**：它只是管線簿記，不是任何資料的正本。整個檔案刪掉後，
+  可由 Hermes state.db（session 事件來源，經 read-only session_adapter）＋
+  memory/inbox/ 與其 .processed/.failed 目錄（inbox 檔案狀態的唯一真相）
+  重新 discover/rebuild。
+- **絕不寫回 Hermes state.db**：本模組唯一的 SQLite 連線入口（get_connection）
+  只開 bridge 自己的 db 檔（預設或呼叫端注入的路徑），沒有任何 code path 會開啟
+  Hermes 的資料庫。
+- **不是 Hermes 的 memory DB、也不是第二份 Hermes state.db**：只記 ClaudeCodeOS
+  側「這個 session 處理到哪」的狀態，用途是去重（UNIQUE(event_id)）與可追蹤性。
+
+語義備忘（與其他元件劃清界線）：
+
+- `import_status` 用 schema enum（discovered/skipped/to_inbox/imported/failed/
+  needs_review）——enum 值**不在本模組寫死第二份**，一律從 registry yaml 讀取驗證。
+- `retry_count` 只代表 **bridge 層級**對同一 session 的匯入/discovery 重新嘗試次數
+  （例如前次 failed 後重跑，重跑開始時呼叫 increment_retry_count()）。
+  與 hermes/db.py jobs.attempts（job 執行重試，claim 時 +1、達 max_attempts 進
+  dead_letter）完全不同層、兩者不互通。mark_failed() 不動 retry_count。
+- `error_reason` 只記 bridge 層錯誤摘要，**不得含 session 敏感內容**
+  （schema description 的既有約束）。
+
+CLI（供未來 WSL 部署側手動初始化/檢視用；Windows 開發側不要對預設路徑執行 init）：
+    python3 hermes/bridge_state.py init [--db-path PATH]
+    python3 hermes/bridge_state.py show <event_id> [--db-path PATH]
+    python3 hermes/bridge_state.py list [--import-status X] [--db-path PATH]
+"""
+import argparse
+import contextlib
+import sqlite3
+import sys
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+# 預設路徑常數——實際檔案只該存在 WSL 部署側（見模組 docstring）。
+# 所有 API 都接受 db_path 注入自訂路徑（測試一律注入 temp 路徑）。
+DEFAULT_DB_PATH = ROOT / "hermes" / "state" / "bridge_state.db"
+SCHEMA_PATH = ROOT / "registry" / "bridge_state_schema.yaml"
+
+TABLE_NAME = "bridge_sessions"
+
+# registry yaml type → SQLite 型別對映（int→INTEGER、bool→INTEGER(0/1)、其餘 TEXT）。
+# 測試用這份對映做「CREATE TABLE 與 registry yaml 的程式化對齊比對」。
+SQL_TYPE_BY_SCHEMA_TYPE = {
+    "string": "TEXT",
+    "enum": "TEXT",
+    "bool": "INTEGER",
+    "int": "INTEGER",
+}
+
+# 17 欄與 registry/bridge_state_schema.yaml 一一對應（順序照 yaml）；
+# required → NOT NULL；event_id 做 UNIQUE（去重 key，session 層級
+# "hermes:<session_id>"）。enum 的合法值不寫進 DDL（SQLite 沒有原生 enum，
+# 也避免寫死第二份）——由 upsert/list 從 yaml 讀取驗證。
+CREATE_TABLE_SQL = f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+        session_id                TEXT    NOT NULL,
+        source_profile            TEXT    NOT NULL,
+        session_source            TEXT    NOT NULL,
+        import_status             TEXT    NOT NULL,
+        memory_type               TEXT    NOT NULL,
+        useful_chat               INTEGER NOT NULL,
+        selected_capability_lane  TEXT,
+        decision_reason           TEXT    NOT NULL,
+        imported_inbox_path       TEXT,
+        processed_path            TEXT,
+        first_seen_at             TEXT    NOT NULL,
+        last_seen_at              TEXT    NOT NULL,
+        updated_at                TEXT    NOT NULL,
+        retry_count               INTEGER NOT NULL DEFAULT 0,
+        error_reason              TEXT,
+        event_id                  TEXT    NOT NULL UNIQUE,
+        event_id_range            TEXT
+    )
+"""
+
+_lock = threading.Lock()
+_schema_fields_cache: dict | None = None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def session_event_id(session_id: str) -> str:
+    """session 層級去重 key，沿用 adapter 的 event_id 慣例："hermes:<session_id>"。"""
+    return f"hermes:{session_id}"
+
+
+def load_schema_fields() -> dict:
+    """讀取 registry/bridge_state_schema.yaml 的 fields 區塊（cached）。
+
+    enum 合法值、required 清單都以這份 registry 正本為準，程式內不複製第二份。
+    """
+    global _schema_fields_cache
+    if _schema_fields_cache is None:
+        import yaml  # lazy import：只有需要驗證/比對 schema 時才要求 pyyaml
+
+        doc = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
+        _schema_fields_cache = doc["fields"]
+    return _schema_fields_cache
+
+
+def schema_enum_values(field_name: str) -> set[str]:
+    return set(load_schema_fields()[field_name]["values"])
+
+
+def _validate_enum(field_name: str, value: str):
+    allowed = schema_enum_values(field_name)
+    if value not in allowed:
+        raise ValueError(
+            f"{field_name}={value!r} 不在 registry schema 的合法值內：{sorted(allowed)}"
+        )
+
+
+def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """唯一的 SQLite 連線入口——只開 bridge 自己的 db，絕不開 Hermes 的資料庫。"""
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+@contextlib.contextmanager
+def _db(db_path: Path | str = DEFAULT_DB_PATH):
+    conn = get_connection(db_path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
+def init_db(db_path: Path | str = DEFAULT_DB_PATH):
+    """建立 bridge_sessions table（冪等：CREATE TABLE IF NOT EXISTS，
+    重複呼叫不影響既有資料）。db 檔整個刪掉後再呼叫即可重建（disposable）。"""
+    with _lock, _db(db_path) as conn:
+        conn.execute(CREATE_TABLE_SQL)
+
+
+def ensure_schema(db_path: Path | str = DEFAULT_DB_PATH):
+    """init_db 的語義化別名：呼叫端只想確保 schema 存在時用這個名字。"""
+    init_db(db_path)
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    d["useful_chat"] = bool(d["useful_chat"])  # SQLite INTEGER(0/1) → bool
+    return d
+
+
+def upsert_session_state(
+    *,
+    session_id: str,
+    source_profile: str,
+    session_source: str,
+    import_status: str,
+    memory_type: str,
+    useful_chat: bool,
+    decision_reason: str,
+    selected_capability_lane: str | None = None,
+    imported_inbox_path: str | None = None,
+    processed_path: str | None = None,
+    error_reason: str | None = None,
+    event_id: str | None = None,
+    event_id_range: str | None = None,
+    seen_at: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """以 event_id 為去重 key 的 upsert：同一 event_id 重跑是更新既有列，不新增。
+
+    - event_id 省略時依慣例取 "hermes:<session_id>"。
+    - 首次 insert：first_seen_at = last_seen_at = seen_at（預設現在，UTC ISO 8601），
+      retry_count 從 0 開始。
+    - 再次 upsert（同 event_id）：first_seen_at 保持首次值不變；retry_count 不在
+      upsert 更新清單內（只由 increment_retry_count() 控制）；其餘欄位以本次為準，
+      last_seen_at / updated_at 更新為本次時間。
+    - enum 欄位（import_status / memory_type）對 registry yaml 驗證；
+      failed 必附 error_reason（bridge 層錯誤摘要，不得含 session 敏感內容）；
+      to_inbox / imported 必附 imported_inbox_path（schema 的必填條件）。
+
+    回傳 upsert 後的完整列（dict）。
+    """
+    _validate_enum("import_status", import_status)
+    _validate_enum("memory_type", memory_type)
+    if import_status == "failed" and not error_reason:
+        raise ValueError("import_status=failed 時 error_reason 必填（schema 約束）")
+    if import_status in ("to_inbox", "imported") and not imported_inbox_path:
+        raise ValueError(
+            "import_status 為 to_inbox/imported 時 imported_inbox_path 必填（schema 約束）"
+        )
+
+    if event_id is None:
+        event_id = session_event_id(session_id)
+    now = seen_at or _now_iso()
+
+    with _lock, _db(db_path) as conn:
+        conn.execute(
+            f"""
+            INSERT INTO {TABLE_NAME} (
+                session_id, source_profile, session_source, import_status,
+                memory_type, useful_chat, selected_capability_lane, decision_reason,
+                imported_inbox_path, processed_path, first_seen_at, last_seen_at,
+                updated_at, retry_count, error_reason, event_id, event_id_range
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                session_id=excluded.session_id,
+                source_profile=excluded.source_profile,
+                session_source=excluded.session_source,
+                import_status=excluded.import_status,
+                memory_type=excluded.memory_type,
+                useful_chat=excluded.useful_chat,
+                selected_capability_lane=excluded.selected_capability_lane,
+                decision_reason=excluded.decision_reason,
+                imported_inbox_path=excluded.imported_inbox_path,
+                processed_path=excluded.processed_path,
+                last_seen_at=excluded.last_seen_at,
+                updated_at=excluded.updated_at,
+                error_reason=excluded.error_reason,
+                event_id_range=excluded.event_id_range
+            """,
+            # 注意：first_seen_at 與 retry_count 刻意不在 UPDATE 清單——
+            # 首次發現時間不可被後續掃描洗掉；retry_count 只由 increment_retry_count() 遞增。
+            (
+                session_id, source_profile, session_source, import_status,
+                memory_type, int(bool(useful_chat)), selected_capability_lane,
+                decision_reason, imported_inbox_path, processed_path, now, now,
+                now, error_reason, event_id, event_id_range,
+            ),
+        )
+        row = conn.execute(
+            f"SELECT * FROM {TABLE_NAME} WHERE event_id=?", (event_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def get_session_state(event_id: str, db_path: Path | str = DEFAULT_DB_PATH) -> dict | None:
+    """依 event_id（"hermes:<session_id>"，可用 session_event_id() 產生）讀回一筆狀態。"""
+    with _db(db_path) as conn:
+        row = conn.execute(
+            f"SELECT * FROM {TABLE_NAME} WHERE event_id=?", (event_id,)
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def list_by_import_status(
+    import_status: str, db_path: Path | str = DEFAULT_DB_PATH
+) -> list[dict]:
+    """列出指定 import_status 的所有記錄（依 first_seen_at 排序）。"""
+    _validate_enum("import_status", import_status)
+    with _db(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM {TABLE_NAME} WHERE import_status=? ORDER BY first_seen_at ASC",
+            (import_status,),
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+
+def mark_failed(
+    event_id: str, error_reason: str, db_path: Path | str = DEFAULT_DB_PATH
+) -> dict | None:
+    """把既有記錄標成 failed 並寫入 error_reason（bridge 層錯誤摘要，
+    不得含 session 敏感內容——這是 schema description 的硬約束，呼叫端負責遵守）。
+
+    **不遞增 retry_count**：retry_count 記的是「重新嘗試匯入」的次數，遞增時機是
+    下一次 bridge 對同一 session 重跑匯入時（由呼叫端在 re-attempt 開始時呼叫
+    increment_retry_count()），不是失敗當下。找不到 event_id 時回傳 None。
+    """
+    if not error_reason:
+        raise ValueError("mark_failed 需要 error_reason（schema：failed 時必填）")
+    _validate_enum("import_status", "failed")  # 確保 'failed' 仍是 registry 合法值
+    now = _now_iso()
+    with _lock, _db(db_path) as conn:
+        cur = conn.execute(
+            f"UPDATE {TABLE_NAME} SET import_status='failed', error_reason=?, "
+            "updated_at=? WHERE event_id=? "
+            "RETURNING *",
+            (error_reason, now, event_id),
+        )
+        row = cur.fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def increment_retry_count(
+    event_id: str, db_path: Path | str = DEFAULT_DB_PATH
+) -> int | None:
+    """retry_count +1 並回傳新值（找不到 event_id 時回傳 None）。
+
+    呼叫時機：bridge 對同一 session **重新**嘗試匯入的當下（例如前次 failed 後
+    重跑）。與 hermes/db.py jobs.attempts（claim 時 +1 的 job 執行重試）無關。
+    """
+    now = _now_iso()
+    with _lock, _db(db_path) as conn:
+        cur = conn.execute(
+            f"UPDATE {TABLE_NAME} SET retry_count=retry_count+1, updated_at=? "
+            "WHERE event_id=? RETURNING retry_count",
+            (now, event_id),
+        )
+        row = cur.fetchone()
+        return row["retry_count"] if row else None
+
+
+def _cli():
+    parser = argparse.ArgumentParser(
+        description="hermes/bridge_state.py — bridge 處理狀態 DB（WSL 部署側）CLI"
+    )
+    parser.add_argument(
+        "--db-path", default=None,
+        help=f"自訂 db 路徑（預設 {DEFAULT_DB_PATH}；Windows 開發側請勿對預設路徑 init）",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init", help="初始化/確保 schema（冪等；供部署側手動初始化）")
+
+    p_show = sub.add_parser("show", help="顯示單一 event_id 的完整記錄")
+    p_show.add_argument("event_id")
+
+    p_list = sub.add_parser("list", help="列出記錄")
+    p_list.add_argument("--import-status", default=None)
+
+    args = parser.parse_args()
+    db_path = Path(args.db_path) if args.db_path else DEFAULT_DB_PATH
+
+    if args.cmd == "init":
+        init_db(db_path)
+        print(f"schema ready: {db_path}")
+    elif args.cmd == "show":
+        rec = get_session_state(args.event_id, db_path)
+        if rec is None:
+            print("找不到這個 event_id", file=sys.stderr)
+            sys.exit(1)
+        for k, v in rec.items():
+            print(f"{k}: {v}")
+    elif args.cmd == "list":
+        if args.import_status:
+            recs = list_by_import_status(args.import_status, db_path)
+        else:
+            with _db(db_path) as conn:
+                recs = [
+                    _row_to_dict(r)
+                    for r in conn.execute(
+                        f"SELECT * FROM {TABLE_NAME} ORDER BY first_seen_at ASC"
+                    ).fetchall()
+                ]
+        if not recs:
+            print("(沒有符合的記錄)")
+        for r in recs:
+            print(
+                f"{r['event_id']}  {r['import_status']:<12} retry={r['retry_count']}  "
+                f"profile={r['source_profile']:<10} first_seen={r['first_seen_at']}"
+            )
+
+
+if __name__ == "__main__":
+    _cli()
