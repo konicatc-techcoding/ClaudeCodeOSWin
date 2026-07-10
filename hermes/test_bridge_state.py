@@ -323,6 +323,44 @@ class TestFailureAndRetrySemantics(BridgeStateTestBase):
             "hermes:nope", db_path=self.db_path))
 
 
+class TestTouchLastSeen(BridgeStateTestBase):
+    """touch_last_seen：scanner 對既有記錄的安全路徑——只動 last_seen_at。"""
+
+    def test_touch_updates_only_last_seen_at(self):
+        bridge_state.upsert_session_state(
+            **make_record(), seen_at="2026-07-10T00:00:00+00:00",
+            db_path=self.db_path)
+        rec = bridge_state.touch_last_seen(
+            "hermes:sess-001", seen_at="2026-07-10T02:00:00+00:00",
+            db_path=self.db_path)
+        self.assertEqual(rec["last_seen_at"], "2026-07-10T02:00:00+00:00")
+        self.assertEqual(rec["first_seen_at"], "2026-07-10T00:00:00+00:00",
+                         "touch 不得動 first_seen_at")
+        self.assertEqual(rec["updated_at"], "2026-07-10T00:00:00+00:00",
+                         "touch 不是狀態變更，不得動 updated_at")
+        self.assertEqual(rec["import_status"], "discovered")
+        self.assertEqual(rec["retry_count"], 0)
+
+    def test_touch_never_resets_terminal_status(self):
+        """硬條件：已是 imported/failed 的記錄被重掃 touch，狀態原封不動。"""
+        bridge_state.upsert_session_state(
+            **make_record(import_status="imported",
+                          imported_inbox_path="memory/inbox/x.md",
+                          decision_reason="已整併", useful_chat=True,
+                          memory_type="semantic"),
+            db_path=self.db_path)
+        rec = bridge_state.touch_last_seen("hermes:sess-001", db_path=self.db_path)
+        self.assertEqual(rec["import_status"], "imported")
+        self.assertEqual(rec["memory_type"], "semantic")
+        self.assertIs(rec["useful_chat"], True)
+        self.assertEqual(rec["decision_reason"], "已整併")
+        self.assertEqual(rec["imported_inbox_path"], "memory/inbox/x.md")
+
+    def test_touch_unknown_event_id_returns_none(self):
+        self.assertIsNone(bridge_state.touch_last_seen(
+            "hermes:nope", db_path=self.db_path))
+
+
 class TestIsolationGuarantees(unittest.TestCase):
     """證明模組/測試不觸碰 Hermes 真實資料（靜態＋常數層面；
     行為層面由 setUpModule/tearDownModule 的 fingerprint 比對把關）。"""

@@ -297,6 +297,30 @@ def mark_failed(
         return _row_to_dict(row) if row else None
 
 
+def touch_last_seen(
+    event_id: str, seen_at: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict | None:
+    """只更新 last_seen_at（「最近一次掃描仍看到這個 session」的心跳）。
+
+    給 scanner 對「已存在的記錄」用的安全路徑——與 upsert_session_state 的
+    全欄位語義刻意分開：**絕不動 import_status / first_seen_at / retry_count /
+    decision_reason 等任何其他欄位**，所以既有的 imported/failed/skipped/
+    needs_review 狀態不可能被重掃洗回 discovered。也不動 updated_at——
+    schema 定義它是「最後一次狀態變更時間」，touch 不是狀態變更。
+
+    回傳更新後的完整列；找不到 event_id 時回傳 None。
+    """
+    now = seen_at or _now_iso()
+    with _lock, _db(db_path) as conn:
+        cur = conn.execute(
+            f"UPDATE {TABLE_NAME} SET last_seen_at=? WHERE event_id=? RETURNING *",
+            (now, event_id),
+        )
+        row = cur.fetchone()
+        return _row_to_dict(row) if row else None
+
+
 def increment_retry_count(
     event_id: str, db_path: Path | str = DEFAULT_DB_PATH
 ) -> int | None:
