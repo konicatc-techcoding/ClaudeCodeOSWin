@@ -128,8 +128,14 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > 與既有 timer 一致）。install/uninstall 用法已涵蓋；靜態測試
 > `hermes/test_systemd_units.py` 守住「排程一律無參數 scan」。**只排程 scan**，
 > reconcile 不進排程（回填/對帳工具，人工或 2.4c 串接再定）。
-> **部署側安裝驗證待互動 session**（install → 手動 start → timer 觸發 → 冪等
-> → 失敗不推進 watermark → Hermes/inbox 零寫入）。
+> **Stage 2.4b ✅ 部署完成（2026-07-10）**：五項完成標準全過——sync 下發（bridge_state.db
+> 未被覆蓋）→ dry-run 逐筆候選檢視（0 筆，watermark 後無新完結 session）→ 真實 scan
+> → 冪等重跑 → 故意失敗（exit 1、watermark 不推進）→ Hermes/inbox fingerprint 零寫入
+> **全過後才 enable timer**。手動 systemd start 成功（oneshot Finished、log 落檔、
+> watermark 經 systemd 路徑推進）。**timer 已 enable，下次觸發 2026-07-11 08:05 CST**
+> （時區確認 Asia/Taipei；enable 時無 catch-up，新 timer 無歷史戳記）。六個 units
+> 全 active、無 failed。**管線現況：偵測→discovered 全自動；discovered→inbox 為
+> 下一階段（2.4c）**。
 >
 > （2026-07-09 舊註，保留脈絡：去重狀態的記錄格式已先行定稿——
 > `claudecodeos.bridge_state.v1`，[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)；

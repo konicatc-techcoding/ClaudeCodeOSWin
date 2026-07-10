@@ -37,7 +37,9 @@ Model Router 改成 capability-based：`registry/agents.yaml` 每個領域新增
 
 **2026-07-10（Stage 2.1–2.3 完成：schema 對齊、repository 層、scanner）**：Stage 2.1 schema 對齊（17 欄，7→10 tests）；Stage 2.2 bridge_state repository（`hermes/bridge_state.py`，部署側 db 已 init）；Stage 2.3 scanner（`hermes/bridge_scanner.py`，scan/reconcile 分離、七條硬條件全有測試把關）。部署側真實寫入已執行：reconcile 回填 gate session 為 `imported`（1 筆，檔名比對依據）、scan cutover 後 0 筆、冪等驗證通過、禁區零修改。**Cutover policy：`2026-07-10T00:00:00Z`（bridge 啟用日）——目前只是人工 `--since` 操作參數，無獨立 watermark 儲存；Stage 2.4 排程化前必須設定化，不能依賴人工記憶。**
 
+**2026-07-10（Stage 2.4a/2.4b 完成：cutover 設定化＋scanner 排程上線）**：2.4a——cutover 底線進 `hermes/config/bridge.yaml`（fail loud 絕不默認全掃），watermark 進 bridge_state.db `bridge_meta`（只前進不後退、dry-run 不推進、失敗不推進；上界＝snapshot 前時間戳，窗口寧可重疊不跳漏）；無參數 scan＝安全預設 max(cutover, watermark) 並標示來源。2.4b——`hermes-bridge-scanner.timer` 每日 08:05 CST（落在 08:00 memory-check 與 08:10 skill-sync 之間），oneshot 無 Restart，守門測試鎖定「排程一律無參數 scan」；部署側五項完成標準全過後才 enable，timer 已上線。**管線現況：偵測→discovered 全自動；discovered→inbox（政策判定＋敏感偵測器）為下一階段 2.4c，是整條管線唯一涉及內容判斷的環節。**
+
 尚未動工：
 - Model Router 的 MCP server 版本（目前 script adapter 夠用）
 - Dashboard 要不要開放 Telegram 以外的投遞管道
-- Stage 2.4：scanner 排程化（前置：cutover/watermark 設定化）＋ inbox import／enqueue／headless CoS 串接
+- Stage 2.4c：discovered → inbox（政策判定 headless fail-closed、敏感偵測器實作、to-inbox／enqueue 串接）
