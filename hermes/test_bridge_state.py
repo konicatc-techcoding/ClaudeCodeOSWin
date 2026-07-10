@@ -7,8 +7,9 @@ event_id upsert 去重、get/list、mark_failed 與 retry_count 語義、刪檔�
 隔離保證（本檔自我驗證，見 setUpModule/tearDownModule 與靜態檢查測試）：
 - 全程只用 temp 目錄的 db，絕不觸碰 Hermes state.db、hermes/config/telegram.json、
   hermes/jobs.db。
-- 測試結束不得在 Windows repo 留下真實的 hermes/state/bridge_state.db
-  （該 db 依決策只存在 WSL 部署側）。
+- 測試套件執行本身不建立、不改動真實的 hermes/state/bridge_state.db：
+  Windows 開發側它本來就不存在（依決策 db 只存在 WSL 部署側），測試後仍不存在；
+  WSL 部署側它是預期終態，測試前後 fingerprint 必須一致。兩側跑同一套測試。
 
 執行：.venv/Scripts/python.exe hermes/test_bridge_state.py
 """
@@ -360,10 +361,19 @@ class TestIsolationGuarantees(unittest.TestCase):
         self.assertEqual(bridge_state.DEFAULT_DB_PATH,
                          ROOT / "hermes" / "state" / "bridge_state.db")
 
-    def test_no_real_bridge_state_db_in_windows_repo(self):
-        """Windows 開發側不該存在實際 db 檔（依決策只存在 WSL 部署側）；
-        測試全程注入 temp 路徑，也不得產生它。"""
-        self.assertFalse(bridge_state.DEFAULT_DB_PATH.exists())
+    def test_suite_does_not_touch_real_bridge_state_db(self):
+        """隔離保證的正確語義：測試套件執行本身**不建立、不改動** DEFAULT_DB_PATH
+        ——而非「該路徑絕對不存在」。Windows 開發側它本來就不存在，測試後必須仍
+        不存在；WSL 部署側它是 CLI init 建立的預期終態，測試後 fingerprint
+        （mtime/size）必須與 setUpModule 快照一致。同一套測試因此在兩側都能
+        誠實通過，隔離保證不打折。"""
+        before = _snapshot["protected"][bridge_state.DEFAULT_DB_PATH]
+        after = _fingerprint(bridge_state.DEFAULT_DB_PATH)
+        self.assertEqual(
+            after, before,
+            "DEFAULT_DB_PATH 測試前後必須一致（原本不存在→仍不存在；"
+            "原本存在→mtime/size 未被改動）",
+        )
 
 
 if __name__ == "__main__":
