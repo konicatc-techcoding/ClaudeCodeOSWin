@@ -32,10 +32,17 @@ Stage 2 session bridge 的處理狀態（bookkeeping）SQLite 存取層。
 - `error_reason` 只記 bridge 層錯誤摘要，**不得含 session 敏感內容**
   （schema description 的既有約束）。
 
+除了 bridge_sessions（17 欄），另有 bridge_meta（key-value；Stage 2.4a）存放
+scanner 的 scan_watermark——最近一次真實 scan 的窗口上界，**只前進不後退**
+（get_scan_watermark / advance_scan_watermark），同樣是可拋棄的部署側狀態：
+db 重建後 watermark 消失，scanner 退回 hermes/config/bridge.yaml 的 cutover
+底線重掃，event_id 去重保證無害。
+
 CLI（供未來 WSL 部署側手動初始化/檢視用；Windows 開發側不要對預設路徑執行 init）：
     python3 hermes/bridge_state.py init [--db-path PATH]
     python3 hermes/bridge_state.py show <event_id> [--db-path PATH]
     python3 hermes/bridge_state.py list [--import-status X] [--db-path PATH]
+    python3 hermes/bridge_state.py watermark [--db-path PATH]
 """
 import argparse
 import contextlib
@@ -88,12 +95,41 @@ CREATE_TABLE_SQL = f"""
     )
 """
 
+# bridge scanner 的 runtime 中繼資料（key-value；Stage 2.4a）。目前唯一的 key
+# 是 scan_watermark：最近一次「真實」（非 dry-run）scan 成功完成時的掃描窗口
+# 上界（見 advance_scan_watermark docstring）。與 bridge_sessions 同屬部署側
+# 可拋棄狀態：db 重建後 watermark 消失，scanner 退回 config cutover
+# （hermes/config/bridge.yaml）底線重掃，event_id 去重保證重掃無害。
+META_TABLE_NAME = "bridge_meta"
+SCAN_WATERMARK_KEY = "scan_watermark"
+
+CREATE_META_TABLE_SQL = f"""
+    CREATE TABLE IF NOT EXISTS {META_TABLE_NAME} (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+"""
+
 _lock = threading.Lock()
 _schema_fields_cache: dict | None = None
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso_utc(value: str) -> datetime:
+    """ISO 8601 → aware UTC datetime。接受 'Z' 結尾；naive 視為 UTC。"""
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"無法解析 ISO 8601 時間：{value!r}（{exc}）") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def session_event_id(session_id: str) -> str:
@@ -148,10 +184,13 @@ def _db(db_path: Path | str = DEFAULT_DB_PATH):
 
 
 def init_db(db_path: Path | str = DEFAULT_DB_PATH):
-    """建立 bridge_sessions table（冪等：CREATE TABLE IF NOT EXISTS，
-    重複呼叫不影響既有資料）。db 檔整個刪掉後再呼叫即可重建（disposable）。"""
+    """建立 bridge_sessions 與 bridge_meta table（冪等：CREATE TABLE IF NOT
+    EXISTS，重複呼叫不影響既有資料）。db 檔整個刪掉後再呼叫即可重建
+    （disposable）。對 Stage 2.4a 之前只有 bridge_sessions 的舊 db 呼叫時，
+    冪等地補建 bridge_meta（既有 db 的升級路徑）。"""
     with _lock, _db(db_path) as conn:
         conn.execute(CREATE_TABLE_SQL)
+        conn.execute(CREATE_META_TABLE_SQL)
 
 
 def ensure_schema(db_path: Path | str = DEFAULT_DB_PATH):
@@ -340,7 +379,75 @@ def increment_retry_count(
         return row["retry_count"] if row else None
 
 
+def get_scan_watermark(db_path: Path | str = DEFAULT_DB_PATH) -> str | None:
+    """讀取 scan watermark（bridge_meta 的 scan_watermark 值）；讀不到回 None。
+
+    純讀取路徑：db 檔不存在時直接回 None、**不建立 db 檔**（get_connection
+    會建檔，所以這裡先檢查存在性——dry-run 與「決定 effective since」的呼叫端
+    因此可以無條件呼叫）；舊 db 尚無 bridge_meta table 時同樣回 None
+    （table 補建交給 ensure_schema / advance_scan_watermark 的升級路徑）。
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    with _db(path) as conn:
+        try:
+            row = conn.execute(
+                f"SELECT value FROM {META_TABLE_NAME} WHERE key=?",
+                (SCAN_WATERMARK_KEY,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None  # 舊版 db 還沒有 meta table
+        return row["value"] if row else None
+
+
+def advance_scan_watermark(
+    new_value: str, db_path: Path | str = DEFAULT_DB_PATH
+) -> dict:
+    """把 scan_watermark 推進到 new_value——**只前進不後退**。
+
+    watermark 語義（Stage 2.4a 定案）：最近一次**真實**（非 dry-run）scan
+    成功完成時「該次掃描窗口的上界」＝ scanner 在建立 Hermes state.db snapshot
+    **之前**取的時間戳。選 snapshot 建立時間而非 max(ended_at) 的理由：後者在
+    窗口內沒有任何新完結 session 時不會前進，重複掃描範圍會無限增長；snapshot
+    時間則每次真實 scan 都前進，且在 snapshot 之後才完結的 session 一定
+    >= watermark，下次掃描（含端點比較 ended_at >= since）必然涵蓋——邊界重疊
+    由 event_id 去重與 touch-only 語義保證冪等無害（寧可保守重疊、不可跳漏）。
+
+    - new_value <= 現值：no-op，回報現值（人工帶 --since 掃舊區間因此不會把
+      watermark 往回拉——真實 scan 一律嘗試 advance，只前進語義自然處理）。
+    - 寫入值正規化為 UTC isoformat（+00:00 形式）；new_value 解析失敗丟
+      ValueError，不寫入。
+    - 對尚無 bridge_meta table 的舊 db 呼叫時冪等補建（升級路徑）。
+
+    回傳 {"advanced": bool, "watermark": 目前生效值}。
+    """
+    new_dt = parse_iso_utc(new_value)
+    with _lock, _db(db_path) as conn:
+        conn.execute(CREATE_META_TABLE_SQL)
+        row = conn.execute(
+            f"SELECT value FROM {META_TABLE_NAME} WHERE key=?",
+            (SCAN_WATERMARK_KEY,),
+        ).fetchone()
+        current = row["value"] if row else None
+        if current is not None and new_dt <= parse_iso_utc(current):
+            return {"advanced": False, "watermark": current}
+        normalized = new_dt.isoformat()
+        conn.execute(
+            f"INSERT INTO {META_TABLE_NAME} (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (SCAN_WATERMARK_KEY, normalized),
+        )
+        return {"advanced": True, "watermark": normalized}
+
+
 def _cli():
+    # Windows console 預設 cp950——比照 bridge_scanner，stdout/stderr 強制 UTF-8
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(
         description="hermes/bridge_state.py — bridge 處理狀態 DB（WSL 部署側）CLI"
     )
@@ -358,6 +465,8 @@ def _cli():
     p_list = sub.add_parser("list", help="列出記錄")
     p_list.add_argument("--import-status", default=None)
 
+    sub.add_parser("watermark", help="顯示目前的 scan watermark（bridge_meta）")
+
     args = parser.parse_args()
     db_path = Path(args.db_path) if args.db_path else DEFAULT_DB_PATH
 
@@ -371,6 +480,9 @@ def _cli():
             sys.exit(1)
         for k, v in rec.items():
             print(f"{k}: {v}")
+    elif args.cmd == "watermark":
+        wm = get_scan_watermark(db_path)
+        print(wm if wm else "(尚未設定 scan watermark——scanner 將以 config cutover 為下界)")
     elif args.cmd == "list":
         if args.import_status:
             recs = list_by_import_status(args.import_status, db_path)

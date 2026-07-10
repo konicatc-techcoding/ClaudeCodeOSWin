@@ -110,11 +110,17 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > gate session 1 筆 `imported`（檔名比對依據已記錄）、scan 62 sessions／cutover 後 0 筆、
 > 冪等重跑通過、禁區（state.db／jobs.db／telegram.json／inbox）零修改。
 >
-> **⚠️ Cutover policy（Stage 2.4 開工前必須設定化）**：`2026-07-10T00:00:00Z` 是
-> Stage 2.3 的 cutover 值（bridge 正式啟用日；此前 session 屬 pre-bridge 歷史，唯一
-> 有價值的舊 session 已由 reconcile 回填）。**目前沒有獨立的 watermark 儲存，cutover
-> 只是操作參數（人工帶 `--since`）**——Stage 2.4 排程化之前必須把 cutover 來源設定化
-> （設定檔或 bridge_state 內的 watermark），不能依賴人工記憶。
+> **Cutover policy ✅ 已設定化（Stage 2.4a，2026-07-10）**：`2026-07-10T00:00:00Z`
+> 是 Stage 2.3 拍板的 cutover 值（bridge 正式啟用日；此前 session 屬 pre-bridge
+> 歷史，唯一有價值的舊 session 已由 reconcile 回填），現以
+> **`hermes/config/bridge.yaml`（政策底線，版控＋同步下發，讀不到即 fail loud）＋
+> `bridge_state.db` 的 `bridge_meta` scan watermark（部署側可拋棄進度，只前進
+> 不後退）**雙層承載：scanner 無 `--since`/`--all-history` 時安全預設
+> effective since ＝ max(cutover, watermark)，不再依賴人工記憶帶 `--since`
+> （原「無參數→exit 2」改為此安全預設；「預設不得全掃」由 cutover 底線繼續保證）。
+> 設計細節見 [memory-bridge-state.md](memory-bridge-state.md) 第 7 節。
+> **2.4b 排程化前提醒**：部署側首次排程執行前先下發本次變更並跑一次真實 scan
+> 確認 watermark 開始推進；排程一律不帶 `--since`。
 >
 > （2026-07-09 舊註，保留脈絡：去重狀態的記錄格式已先行定稿——
 > `claudecodeos.bridge_state.v1`，[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)；

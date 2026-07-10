@@ -361,6 +361,102 @@ class TestTouchLastSeen(BridgeStateTestBase):
             "hermes:nope", db_path=self.db_path))
 
 
+class TestScanWatermark(BridgeStateTestBase):
+    """bridge_meta / scan_watermark（Stage 2.4a）：只前進不後退、純讀取不建檔、
+    舊 db 升級路徑、可拋棄重建語義。"""
+
+    WM1 = "2026-07-10T06:00:00+00:00"
+    WM2 = "2026-07-10T07:00:00+00:00"
+
+    def test_init_creates_meta_table(self):
+        with _raw_conn(self.db_path) as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn(bridge_state.META_TABLE_NAME, tables)
+
+    def test_watermark_none_initially(self):
+        self.assertIsNone(bridge_state.get_scan_watermark(self.db_path))
+
+    def test_get_watermark_on_missing_db_returns_none_without_creating_file(self):
+        """純讀取硬條件：db 檔不存在 → None，且**不建立 db 檔**
+        （scanner 的 dry-run 與 effective since 判斷靠這個保證）。"""
+        missing = Path(self._tmpdir.name) / "nope" / "bridge_state.db"
+        self.assertIsNone(bridge_state.get_scan_watermark(missing))
+        self.assertFalse(missing.exists(), "get_scan_watermark 不得建立 db 檔")
+        self.assertFalse(missing.parent.exists(),
+                         "get_scan_watermark 連父目錄都不得建立")
+
+    def test_advance_sets_and_normalizes_value(self):
+        result = bridge_state.advance_scan_watermark(
+            "2026-07-10T06:00:00Z", db_path=self.db_path)
+        self.assertTrue(result["advanced"])
+        self.assertEqual(result["watermark"], self.WM1,
+                         "寫入值要正規化為 UTC isoformat（+00:00 形式）")
+        self.assertEqual(bridge_state.get_scan_watermark(self.db_path), self.WM1)
+
+    def test_advance_only_moves_forward(self):
+        """只前進不後退：new <= current 時 no-op 並回報現值。"""
+        bridge_state.advance_scan_watermark(self.WM2, db_path=self.db_path)
+        older = bridge_state.advance_scan_watermark(self.WM1, db_path=self.db_path)
+        self.assertFalse(older["advanced"], "較舊的值不得把 watermark 往回拉")
+        self.assertEqual(older["watermark"], self.WM2)
+        equal = bridge_state.advance_scan_watermark(self.WM2, db_path=self.db_path)
+        self.assertFalse(equal["advanced"], "相等的值同樣 no-op")
+        self.assertEqual(bridge_state.get_scan_watermark(self.db_path), self.WM2)
+
+    def test_advance_rejects_unparseable_value(self):
+        with self.assertRaises(ValueError):
+            bridge_state.advance_scan_watermark(
+                "not-a-timestamp", db_path=self.db_path)
+        self.assertIsNone(bridge_state.get_scan_watermark(self.db_path),
+                          "解析失敗不得寫入任何值")
+
+    def _make_legacy_db(self) -> Path:
+        """模擬 Stage 2.4a 之前的既有 db：只有 bridge_sessions、沒有 bridge_meta。"""
+        legacy = Path(self._tmpdir.name) / "legacy_bridge_state.db"
+        with _raw_conn(legacy) as conn:
+            with conn:
+                conn.execute(bridge_state.CREATE_TABLE_SQL)
+        bridge_state.upsert_session_state(
+            **make_record(session_id="sess-legacy"), db_path=legacy)
+        with _raw_conn(legacy) as conn:
+            with conn:
+                conn.execute(f"DROP TABLE IF EXISTS {bridge_state.META_TABLE_NAME}")
+        return legacy
+
+    def test_get_watermark_on_legacy_db_returns_none(self):
+        legacy = self._make_legacy_db()
+        self.assertIsNone(bridge_state.get_scan_watermark(legacy),
+                          "沒有 meta table 的舊 db 讀 watermark 要回 None，不得炸")
+
+    def test_ensure_schema_upgrades_legacy_db_and_preserves_rows(self):
+        """升級路徑：對既有 db 呼叫 ensure_schema 冪等補建 meta table，
+        既有 bridge_sessions 資料原封不動。"""
+        legacy = self._make_legacy_db()
+        bridge_state.ensure_schema(legacy)
+        with _raw_conn(legacy) as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn(bridge_state.META_TABLE_NAME, tables)
+        rec = bridge_state.get_session_state("hermes:sess-legacy", db_path=legacy)
+        self.assertIsNotNone(rec, "升級不得動既有資料")
+        self.assertIsNone(bridge_state.get_scan_watermark(legacy))
+
+    def test_advance_on_legacy_db_creates_meta_table(self):
+        legacy = self._make_legacy_db()
+        result = bridge_state.advance_scan_watermark(self.WM1, db_path=legacy)
+        self.assertTrue(result["advanced"])
+        self.assertEqual(bridge_state.get_scan_watermark(legacy), self.WM1)
+
+    def test_watermark_is_disposable_with_db(self):
+        """可拋棄語義：db 重建後 watermark 消失（scanner 退回 cutover 底線）。"""
+        bridge_state.advance_scan_watermark(self.WM1, db_path=self.db_path)
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self.db_path) + suffix).unlink(missing_ok=True)
+        bridge_state.init_db(self.db_path)
+        self.assertIsNone(bridge_state.get_scan_watermark(self.db_path))
+
+
 class TestIsolationGuarantees(unittest.TestCase):
     """證明模組/測試不觸碰 Hermes 真實資料（靜態＋常數層面；
     行為層面由 setUpModule/tearDownModule 的 fingerprint 比對把關）。"""

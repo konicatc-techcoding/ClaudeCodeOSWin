@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""hermes/test_bridge_scanner.py — v0.1（Stage 2.3）
+"""hermes/test_bridge_scanner.py — v0.1（Stage 2.3；2.4a 加入 cutover 設定化與 watermark）
 
-hermes/bridge_scanner.py 的測試：scan 的安全預設（無參數不得掃全歷史）、
+hermes/bridge_scanner.py 的測試：scan 的安全預設（無參數時 effective since ＝
+max(config cutover, watermark)，設定檔缺失 fail loud、絕不默認全掃）、
 --since 過濾（含端點）、--all-history 明確全掃、未完結不撈、discovered upsert、
-重跑冪等、既有狀態不被重設（硬條件 5）、dry-run 零寫入、reconcile 目錄回填
-（frontmatter 與檔名退回兩種對帳路徑）、processed_path 修正、靜態隔離保證。
+重跑冪等、既有狀態不被重設（硬條件 5）、真實 scan 推進 watermark／dry-run 絕不
+推進、dry-run 零寫入、reconcile 目錄回填（frontmatter 與檔名退回兩種對帳路徑）、
+processed_path 修正、靜態隔離保證。
 
 隔離保證（沿用 test_bridge_state.py 的 fingerprint 慣例）：
 - 全程只用 temp 目錄的 db 與 inbox，絕不觸碰 Hermes 真實 state.db、
@@ -115,6 +117,9 @@ class ScannerTestBase(unittest.TestCase):
             conn.executescript(EXTRA_SESSIONS_SQL)
             conn.commit()
         self.bridge_db = self.tmp / "bridge_state.db"
+        # 測試自己的政策設定檔（cutover 底線），不依賴 repo 的真實 bridge.yaml
+        self.config = self.tmp / "bridge.yaml"
+        self.config.write_text(f'cutover: "{CUTOVER}"\n', encoding="utf-8")
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -122,6 +127,7 @@ class ScannerTestBase(unittest.TestCase):
     def scan(self, **kwargs):
         kwargs.setdefault("state_db", self.hermes_db)
         kwargs.setdefault("bridge_db", self.bridge_db)
+        kwargs.setdefault("config_path", self.config)
         return bridge_scanner.scan(**kwargs)
 
     def rows(self) -> dict:
@@ -135,22 +141,45 @@ class ScannerTestBase(unittest.TestCase):
 
 
 class TestScanSafetyAndFilters(ScannerTestBase):
-    def test_api_requires_since_or_all_history(self):
-        """硬條件 1：無參數的預設行為是報錯，絕不掃全部歷史。"""
-        with self.assertRaises(ValueError):
-            self.scan()
+    def test_missing_config_fails_loud_never_full_scan(self):
+        """硬條件 1（2.4a 形式）：無參數時靠 config cutover 底線；設定檔讀不到
+        必須 fail loud，絕不默認全掃。"""
+        with self.assertRaises(FileNotFoundError):
+            self.scan(config_path=self.tmp / "no_such_bridge.yaml")
         self.assertFalse(self.bridge_db.exists(), "報錯路徑不得建立 bridge db")
+
+    def test_config_without_cutover_field_fails_loud(self):
+        bad = self.tmp / "bad.yaml"
+        bad.write_text("some_other_key: 1\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.scan(config_path=bad)
+        self.assertFalse(self.bridge_db.exists(), "報錯路徑不得建立 bridge db")
+
+    def test_config_with_unparseable_cutover_fails_loud(self):
+        bad = self.tmp / "bad.yaml"
+        bad.write_text('cutover: "not-a-timestamp"\n', encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.scan(config_path=bad)
+
+    def test_repo_bridge_config_is_valid(self):
+        """守住版控正本：hermes/config/bridge.yaml 必須存在且 cutover 可解析。"""
+        cutover = bridge_scanner.load_cutover(bridge_scanner.DEFAULT_BRIDGE_CONFIG)
+        parsed = bridge_scanner._parse_iso_utc(cutover)
+        self.assertIsNotNone(parsed.tzinfo,
+                             "cutover 必須可解析為 aware UTC 時間"
+                             "（值本身是政策層決策，測試不寫死）")
 
     def test_api_rejects_since_plus_all_history(self):
         with self.assertRaises(ValueError):
             self.scan(since=CUTOVER, all_history=True)
 
-    def test_cli_scan_without_range_flag_is_usage_error(self):
+    def test_cli_scan_without_range_flag_is_accepted(self):
+        """2.4a 行為變更：無 --since/--all-history 不再是 usage error（exit 2），
+        改走 max(config cutover, watermark) 安全預設。"""
         parser = bridge_scanner._build_parser()
-        with contextlib.redirect_stderr(io.StringIO()), \
-                self.assertRaises(SystemExit) as ctx:
-            parser.parse_args(["scan"])
-        self.assertEqual(ctx.exception.code, 2)
+        args = parser.parse_args(["scan"])
+        self.assertIsNone(args.since)
+        self.assertFalse(args.all_history)
 
     def test_cli_scan_rejects_both_flags(self):
         parser = bridge_scanner._build_parser()
@@ -285,6 +314,95 @@ class TestScanWrites(ScannerTestBase):
         self.scan(all_history=True)
         self.assertEqual(_sha256(self.hermes_db), before,
                          "scan 只能經 snapshot 讀取，來源 db 一個 byte 都不能動")
+
+
+class TestScanEffectiveSinceAndWatermark(ScannerTestBase):
+    """Stage 2.4a：無參數時 effective since ＝ max(config cutover, watermark)；
+    真實 scan 推進 watermark（只前進）、dry-run 絕不推進。"""
+
+    WM_NEWER = "2026-07-09T18:00:00+00:00"  # > CUTOVER 也 > 所有 ended_at
+    WM_OLDER = "2026-07-01T00:00:00+00:00"  # < CUTOVER
+
+    def _set_watermark(self, value: str):
+        bridge_state.init_db(self.bridge_db)
+        bridge_state.advance_scan_watermark(value, db_path=self.bridge_db)
+
+    def test_no_args_uses_config_cutover_when_no_watermark(self):
+        """情境 1：只有 cutover（無 watermark）→ 下界＝config cutover。"""
+        result = self.scan(seen_at=T1)
+        self.assertEqual(result["since_source"], "config cutover")
+        self.assertEqual(result["effective_since"], "2026-07-08T00:00:00+00:00")
+        self.assertEqual(set(self.rows()), {"hermes:sess_new_ended"},
+                         "cutover 前完結的 session 不得被撈進來")
+
+    def test_no_args_watermark_newer_than_cutover_wins(self):
+        """情境 2：watermark 較新 → 下界＝watermark（增量掃描）。"""
+        self._set_watermark(self.WM_NEWER)
+        result = self.scan(seen_at=T1)
+        self.assertEqual(result["since_source"], "bridge_meta watermark")
+        self.assertEqual(result["effective_since"], self.WM_NEWER)
+        self.assertEqual(result["candidates"], 0,
+                         "watermark 之前完結的 session 都不該再撈")
+
+    def test_no_args_cutover_newer_than_watermark_wins(self):
+        """情境 3：cutover 較新（例如 db 重建後又人工掃過舊區間）→ 下界＝cutover
+        ——cutover 是絕對底線，自動掃描絕不越過它往前掃 pre-bridge 歷史。"""
+        self._set_watermark(self.WM_OLDER)
+        result = self.scan(seen_at=T1)
+        self.assertEqual(result["since_source"], "config cutover")
+        self.assertEqual(result["effective_since"], "2026-07-08T00:00:00+00:00")
+        self.assertEqual(set(self.rows()), {"hermes:sess_new_ended"})
+
+    def test_real_scan_advances_watermark_to_window_upper_bound(self):
+        before_scan = datetime.now(timezone.utc)
+        result = self.scan(since=CUTOVER)
+        wm = bridge_state.get_scan_watermark(self.bridge_db)
+        self.assertIsNotNone(wm, "真實 scan 成功必須推進 watermark")
+        self.assertEqual(result["watermark_after"], wm)
+        wm_dt = bridge_scanner._parse_iso_utc(wm)
+        self.assertGreaterEqual(wm_dt, before_scan.replace(microsecond=0),
+                                "watermark ＝ 本次掃描窗口上界（snapshot 前時間戳）")
+        self.assertLessEqual(wm_dt, datetime.now(timezone.utc))
+
+    def test_dry_run_never_advances_watermark(self):
+        # db 不存在：dry-run 連 db 檔都不建立，也就沒有 watermark
+        result = self.scan(dry_run=True)
+        self.assertFalse(self.bridge_db.exists())
+        self.assertIsNone(result["watermark_after"])
+        # db 已存在且有 watermark：dry-run 後 watermark 原封不動
+        self._set_watermark(self.WM_OLDER)
+        result = self.scan(dry_run=True)
+        self.assertEqual(result["watermark_before"], self.WM_OLDER)
+        self.assertEqual(result["watermark_after"], self.WM_OLDER)
+        self.assertEqual(bridge_state.get_scan_watermark(self.bridge_db),
+                         self.WM_OLDER, "dry-run 絕不推進 watermark")
+
+    def test_manual_since_over_old_range_never_moves_watermark_backwards(self):
+        """真實 scan 一律嘗試 advance；只前進語義保證人工掃舊區間
+        不會把 watermark 往回拉。"""
+        self.scan(since=CUTOVER)
+        wm1 = bridge_state.get_scan_watermark(self.bridge_db)
+        self.scan(since="2020-01-01T00:00:00Z")  # 人工覆蓋掃很舊的區間
+        wm2 = bridge_state.get_scan_watermark(self.bridge_db)
+        self.assertGreaterEqual(bridge_scanner._parse_iso_utc(wm2),
+                                bridge_scanner._parse_iso_utc(wm1))
+
+    def test_no_args_rescan_is_incremental_and_idempotent(self):
+        """重疊/後續窗口重掃冪等：第一次 no-args 掃到新 session 並推進
+        watermark；第二次 no-args 用 watermark 當下界（增量），不重複記錄、
+        不重設既有狀態、first_seen_at 不被洗掉。"""
+        self.scan(seen_at=T1)
+        first = self.rows()
+        self.assertEqual(set(first), {"hermes:sess_new_ended"})
+        result2 = self.scan(seen_at=T2)
+        self.assertEqual(result2["since_source"], "bridge_meta watermark")
+        self.assertEqual(result2["candidates"], 0,
+                         "watermark 已越過所有 ended_at，重掃是增量、零候選")
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, "重掃不得產生重複記錄")
+        rec = rows["hermes:sess_new_ended"]
+        self.assertEqual(rec["import_status"], "discovered")
+        self.assertEqual(rec["first_seen_at"], T1, "first_seen_at 不得被重掃洗掉")
 
 
 def _frontmatter_file(sid: str, event_id_range: str, session_source: str) -> str:

@@ -1,0 +1,23 @@
+# hermes/config/bridge.yaml — v0.1（Stage 2.4a）
+#
+# Session bridge 的政策層設定。與 cron_jobs.yaml / rss_feeds.yaml 同層慣例：
+# 非密鑰、進版控、會被部署同步下發（不在 deployment-sync-plan 的排除清單）。
+# 部署側的 runtime 狀態（watermark）另存 hermes/state/bridge_state.db 的
+# bridge_meta table，兩者分層：這裡是「底線政策」，那裡是「可拋棄進度」。
+#
+# cutover：bridge 正式啟用日（UTC ISO 8601）。此時間點之前完結的 session 屬
+# pre-bridge 歷史，不在自動掃描範圍（唯一有價值的舊 session 已於 Stage 2.3
+# 由 reconcile 回填）。scanner 無 --since / --all-history 時的 effective since
+# ＝ max(cutover, watermark)——cutover 是掃描範圍的絕對底線：即使部署側
+# bridge_state.db（含 watermark）整個刪掉重建，自動掃描也絕不會越過這個值
+# 往前掃到 pre-bridge 歷史。
+#
+# 變更此值的語義：
+# - 往後調＝宣告「此日期前的 session 改列 pre-bridge 歷史」；watermark 較新時
+#   effective since 取兩者較大值，已掃過的範圍不受影響。
+# - 往前調＝擴大歷史掃描範圍——但 watermark 較新時不會生效（effective since
+#   仍取較大值）；真的要回溯補掃請人工帶 --since 執行一次（人工覆蓋不受
+#   watermark 影響，且掃完只會把 watermark 往前推、不會往回拉）。
+# - scanner 讀不到本檔或缺 cutover 欄位時 fail loud（exit 1），絕不默認全掃。
+
+cutover: "2026-07-10T00:00:00Z"

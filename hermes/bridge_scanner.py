@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hermes/bridge_scanner.py — v0.1（Stage 2.3）
+"""hermes/bridge_scanner.py — v0.1（Stage 2.3；2.4a 加入 cutover 設定化與 watermark）
 
 Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 session，
 把處理狀態寫進 bridge_state.db（經 hermes/bridge_state.py 的 repository API）。
@@ -8,11 +8,20 @@ Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 
 兩個子指令（職責分離，互不重疊）：
 
 - ``scan``：讀 Hermes state.db（一律經 HermesSessionAdapter 的 snapshot 模式），
-  找出 cutover（--since，含 cutover 當下）之後「已完結」（ended_at 已設）的
-  session。首次看到 → upsert ``import_status=discovered``（first_seen_at 從
-  首次發現起算，不失真）；已有記錄 → 只呼叫 touch_last_seen() 更新
-  last_seen_at，**絕不把 imported/failed/skipped/needs_review 等既有狀態
-  重設回 discovered**，也不動 decision_reason / retry_count / updated_at。
+  找出範圍下界（含端點）之後「已完結」（ended_at 已設）的 session。首次看到
+  → upsert ``import_status=discovered``（first_seen_at 從首次發現起算，
+  不失真）；已有記錄 → 只呼叫 touch_last_seen() 更新 last_seen_at，
+  **絕不把 imported/failed/skipped/needs_review 等既有狀態重設回 discovered**，
+  也不動 decision_reason / retry_count / updated_at。
+
+  範圍下界（Stage 2.4a 設定化，排程化的安全預設）：無 --since / --all-history
+  時，effective since ＝ max(config cutover, watermark)，輸出明示來源——
+  cutover 來自 hermes/config/bridge.yaml（政策底線，版控＋部署同步下發；
+  讀不到檔案或欄位缺失一律 fail loud，絕不默認全掃），watermark 來自
+  bridge_state.db 的 bridge_meta（部署側可拋棄進度，只前進不後退；語義見
+  bridge_state.advance_scan_watermark）。每次**真實**（非 dry-run）scan 成功
+  完成後，一律嘗試把 watermark 推進到本次掃描窗口上界（建立 snapshot 之前取的
+  時間戳）；--since 人工覆蓋掃舊區間時，只前進語義保證 watermark 不被往回拉。
 - ``reconcile``：掃 memory/inbox/ 本層＋.processed/＋.failed/，依
   「目錄位置是 inbox 檔案狀態的唯一真相」（docs/memory-taxonomy.md §5）回填：
   inbox 本層 → to_inbox、.processed/ → imported、.failed/ → failed。
@@ -21,26 +30,28 @@ Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 
   processed_path 與 db 記錄不一致時，以 .processed/ 實際位置為準回寫。
 
 安全預設（硬條件，測試逐條把關）：
-- scan 必須明確指定 --since <ISO8601> 或 --all-history 其中一個，兩者互斥；
-  **什麼參數都不給就掃全部歷史是被禁止的**（CLI 直接 usage error exit 2，
-  API 丟 ValueError）。--since 為含端點的 cutover：ended_at >= since 才撈。
+- **預設不得全掃**：--since 與 --all-history 互斥；兩者都不給時走安全預設
+  effective since ＝ max(config cutover, watermark)（Stage 2.4a 取代原本的
+  「無參數→exit 2」——原硬條件的精神由 cutover 底線繼續保證：設定檔讀不到或
+  cutover 欄位缺失時 fail loud，絕不默認全掃）。下界一律含端點：
+  ended_at >= since 才撈。
 - 讀 Hermes state.db 只走 HermesSessionAdapter(snapshot=True)：先把 db
   （含 -wal/-shm）複製到 temp 再讀副本，絕不對正在寫入的 live db 直接開連線。
   本模組完全不 import sqlite3，也沒有任何 immutable 連線參數的 code path
   （對 Windows 上正被 Hermes 寫入的 db 開 immutable 會讀到不一致 snapshot）
   ——這兩點由測試靜態把關。
 - --dry-run 只印出將要執行的動作摘要，不寫入任何檔案；bridge db 不存在時
-  連 db 檔都不建立。
+  連 db 檔都不建立；**絕不推進 watermark**。
 - 本模組對 bridge_state.db 的所有讀寫都經 hermes/bridge_state.py 的 API，
   該層唯一的連線入口只開 bridge 自己的 db。
 
 retry_count 備忘（Stage 2.2 既定語義）：scan/reconcile 都不是「re-attempt」，
 所以本模組**不呼叫** increment_retry_count()——那要等之後的匯入重試流程。
 
-CLI（exit code：0 成功；1 執行期錯誤；2 參數用法錯誤）：
+CLI（exit code：0 成功；1 執行期錯誤——含 bridge.yaml 缺失；2 參數用法錯誤）：
     python3 hermes/bridge_scanner.py [--bridge-db PATH] scan \
-        (--since ISO8601 | --all-history) [--dry-run] \
-        [--state-db PATH] [--source-profile NAME]
+        [--since ISO8601 | --all-history] [--dry-run] \
+        [--state-db PATH] [--source-profile NAME] [--config PATH]
     python3 hermes/bridge_scanner.py [--bridge-db PATH] reconcile \
         [--dry-run] [--inbox DIR] [--source-profile NAME]
 """
@@ -60,6 +71,9 @@ import bridge_state  # noqa: E402
 from adapter import HermesSessionAdapter, HermesSessionReadError  # noqa: E402
 
 DEFAULT_INBOX_DIR = ROOT / "memory" / "inbox"
+
+# 政策層設定檔（版控、部署同步下發）：cutover 底線的唯一來源（Stage 2.4a）
+DEFAULT_BRIDGE_CONFIG = _HERMES_DIR / "config" / "bridge.yaml"
 
 # 檔名退回比對：涵蓋新格式 hermes_session_<id>.md 與
 # 舊時間戳格式 <stamp>_hermes_session_<id>.md（與 adapter 的去重掃描同一慣例）
@@ -150,6 +164,31 @@ def _body_session_source(path: Path) -> str | None:
 
 # ---------- scan ----------
 
+def load_cutover(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> str:
+    """讀取 bridge 設定檔的 cutover（bridge 正式啟用日，掃描範圍的政策底線）。
+
+    fail loud（硬條件）：設定檔不存在丟 FileNotFoundError、cutover 欄位缺失/
+    非字串/無法解析為 ISO 8601 丟 ValueError——**任何一種情況都不得默認全掃**。
+    """
+    import yaml  # lazy import：比照 bridge_state，需要時才要求 pyyaml
+
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"bridge 設定檔不存在：{path}——cutover 底線必須存在（fail loud，"
+            "絕不默認全掃）；正本為版控的 hermes/config/bridge.yaml"
+        )
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    cutover = doc.get("cutover") if isinstance(doc, dict) else None
+    if not isinstance(cutover, str) or not cutover.strip():
+        raise ValueError(
+            f"bridge 設定檔缺少 cutover 欄位（或不是字串）：{path}"
+            "（fail loud，絕不默認全掃）"
+        )
+    _parse_iso_utc(cutover)  # 驗證可解析；解析失敗丟 ValueError
+    return cutover
+
+
 def scan(
     *,
     since: str | None = None,
@@ -159,27 +198,51 @@ def scan(
     bridge_db: Path | str = bridge_state.DEFAULT_DB_PATH,
     source_profile: str = "default",
     seen_at: str | None = None,
+    config_path: Path | str = DEFAULT_BRIDGE_CONFIG,
 ) -> dict:
-    """偵測 cutover 後新完結的 Hermes session → upsert discovered。
+    """偵測範圍下界後新完結的 Hermes session → upsert discovered。
 
-    - since / all_history 恰好指定一個（安全預設：都不給就報錯，絕不掃全歷史）。
+    - 範圍下界（含端點，ended_at >= 下界才撈）三種來源，結果的 since_source
+      明示是哪一種：--since（人工覆蓋）＞ --all-history（明確全掃、無下界）＞
+      安全預設 max(config cutover, watermark)。config 讀不到就 fail loud，
+      **絕不默認全掃**（原「無參數→exit 2」硬條件的精神由 cutover 底線接手）。
     - ended_at 為 NULL（未完結）或壞值（無法解析）的 session 一律不撈。
     - 已有記錄的 session 只 touch last_seen_at，既有狀態原封不動（硬條件）。
-    - dry_run=True：只回報將執行的動作，不寫入；bridge db 不存在時不建檔。
+    - 真實（非 dry-run）scan 成功後一律嘗試把 watermark 推進到本次掃描窗口
+      上界（建立 snapshot **之前**取的時間戳，理由見
+      bridge_state.advance_scan_watermark）；只前進語義保證 --since 掃舊區間
+      不會把 watermark 往回拉。
+    - dry_run=True：只回報將執行的動作，不寫入、**不推進 watermark**；
+      bridge db 不存在時不建檔。
     """
     if since and all_history:
         raise ValueError("--since 與 --all-history 互斥，只能指定一個")
-    if not since and not all_history:
-        raise ValueError(
-            "安全預設：scan 必須指定 --since <ISO8601>（cutover，含當下）"
-            "或明確的 --all-history——什麼都不給就掃全部歷史是被禁止的"
-        )
-    cutover = _parse_iso_utc(since) if since else None
+
+    bridge_db = Path(bridge_db)
+    # 純讀取：db 不存在回 None、不建檔（dry-run 安全）
+    watermark_before = bridge_state.get_scan_watermark(db_path=bridge_db)
+
+    if since:
+        cutover = _parse_iso_utc(since)
+        since_source = "--since（人工覆蓋）"
+    elif all_history:
+        cutover = None
+        since_source = "--all-history（明確全掃）"
+    else:
+        cutover = _parse_iso_utc(load_cutover(config_path))
+        since_source = "config cutover"
+        if watermark_before is not None and \
+                _parse_iso_utc(watermark_before) > cutover:
+            cutover = _parse_iso_utc(watermark_before)
+            since_source = "bridge_meta watermark"
+
+    # 本次掃描窗口上界＝建立 snapshot 之前取的時間戳（保守：snapshot 之後才
+    # 完結的 session 一定 >= 這個值，下次掃描必然涵蓋；邊界重疊冪等無害）
+    window_end = datetime.now(timezone.utc).isoformat()
 
     with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
         sessions = adapter.list_sessions()
 
-    bridge_db = Path(bridge_db)
     if not dry_run:
         bridge_state.ensure_schema(bridge_db)
     db_readable = bridge_db.exists()  # dry-run 且 db 不存在時，連檔案都不建立
@@ -225,9 +288,21 @@ def scan(
                                              db_path=bridge_db)
         actions.append(action)
 
+    # 真實 scan 成功走到這裡才推進 watermark（中途丟例外不會推進，不會跳漏）；
+    # dry-run 絕不推進
+    watermark_after = watermark_before
+    if not dry_run:
+        watermark_after = bridge_state.advance_scan_watermark(
+            window_end, db_path=bridge_db)["watermark"]
+
     return {"mode": "scan", "dry_run": dry_run,
             "sessions_seen": len(sessions), "candidates": candidates,
-            "bridge_db_exists": db_readable, "actions": actions}
+            "bridge_db_exists": db_readable,
+            "effective_since": cutover.isoformat() if cutover else None,
+            "since_source": since_source,
+            "watermark_before": watermark_before,
+            "watermark_after": watermark_after,
+            "actions": actions}
 
 
 # ---------- reconcile ----------
@@ -389,16 +464,22 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_scan = sub.add_parser(
-        "scan", help="偵測 cutover 後新完結的 session → upsert discovered")
-    group = p_scan.add_mutually_exclusive_group(required=True)
+        "scan", help="偵測範圍下界後新完結的 session → upsert discovered"
+                     "（無參數時安全預設：max(config cutover, watermark)）")
+    group = p_scan.add_mutually_exclusive_group()
     group.add_argument(
         "--since", default=None, metavar="ISO8601",
-        help="cutover 時間（含當下；ended_at >= since 才撈）。與 --all-history 互斥")
+        help="人工覆蓋範圍下界（含當下；ended_at >= since 才撈）。與 --all-history"
+             " 互斥；不給時用 max(config cutover, watermark) 安全預設")
     group.add_argument(
         "--all-history", action="store_true",
-        help="明確要求掃全部歷史完結 session（預設禁止全掃，必須明確指定）")
+        help="明確要求掃全部歷史完結 session（安全預設絕不全掃，必須明確指定）")
     p_scan.add_argument("--dry-run", action="store_true",
-                        help="只印出將執行的動作，不寫入任何檔案")
+                        help="只印出將執行的動作，不寫入任何檔案、不推進 watermark")
+    p_scan.add_argument(
+        "--config", default=None, metavar="PATH",
+        help=f"bridge 設定檔路徑（預設 {DEFAULT_BRIDGE_CONFIG}；提供 cutover 底線，"
+             "讀不到即失敗、絕不默認全掃）")
     p_scan.add_argument(
         "--state-db", default=None,
         help="Hermes state.db 路徑（預設自動偵測；一律 snapshot 讀 temp 副本）")
@@ -418,6 +499,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _print_result(result: dict):
     prefix = "[dry-run] " if result["dry_run"] else ""
+    if result["mode"] == "scan":
+        bound = result["effective_since"] or "（無下界，明確全掃）"
+        print(f"{prefix}scan 範圍下界：{bound}｜來源：{result['since_source']}")
     for action in result["actions"]:
         target = action.get("event_id") or action.get("path")
         extra = ""
@@ -435,6 +519,12 @@ def _print_result(result: dict):
         print(f"{prefix}scan 完成：檢視 {result['sessions_seen']} 個 session，"
               f"符合條件的完結 session {result['candidates']} 個，"
               f"動作 {len(result['actions'])} 筆{tail}")
+        if result["dry_run"]:
+            print(f"{prefix}watermark 不推進（dry-run），"
+                  f"維持：{result['watermark_before'] or '（未設定）'}")
+        else:
+            print(f"{prefix}watermark：{result['watermark_before'] or '（未設定）'}"
+                  f" → {result['watermark_after']}")
     else:
         print(f"{prefix}reconcile 完成：檢視 {result['files_seen']} 個檔案，"
               f"動作 {len(result['actions'])} 筆{tail}")
@@ -452,10 +542,13 @@ def _cli(argv=None) -> int:
                  else bridge_state.DEFAULT_DB_PATH)
     try:
         if args.cmd == "scan":
+            config_path = (Path(args.config) if args.config
+                           else DEFAULT_BRIDGE_CONFIG)
             result = scan(since=args.since, all_history=args.all_history,
                           dry_run=args.dry_run, state_db=args.state_db,
                           bridge_db=bridge_db,
-                          source_profile=args.source_profile)
+                          source_profile=args.source_profile,
+                          config_path=config_path)
         else:
             result = reconcile(inbox_dir=Path(args.inbox), dry_run=args.dry_run,
                                bridge_db=bridge_db,

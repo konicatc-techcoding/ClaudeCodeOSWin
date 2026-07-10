@@ -168,3 +168,32 @@ schema 仍是 definition-only、無任何 runtime 寫入者與存量資料，升
   `selected_capability_lane` **維持選填的追蹤欄位**（記「這是哪條通道產生的工作」），
   不承載任何路由行為；lane 活化（OpenRouter／Hermes profile／Gemini 等）留待
   bridge 穩定後的 Stage 2.x／Stage 3 之後再議。
+
+## 7. Stage 2.4a（2026-07-10）：cutover 設定化＋scan watermark（`bridge_meta`）
+
+排程化（Stage 2.4b）的硬前置——scan 範圍下界不再依賴人工記憶，分成兩層：
+
+- **政策層 cutover**：`hermes/config/bridge.yaml` 的 `cutover`（版控、部署同步
+  下發，與 cron_jobs.yaml／rss_feeds.yaml 同層慣例）。bridge 正式啟用日；此前
+  session 屬 pre-bridge 歷史，自動掃描的絕對底線。scanner 讀不到設定檔或欄位
+  缺失時 fail loud，**絕不默認全掃**。
+- **狀態層 watermark**：`bridge_state.db` 新增 `bridge_meta(key, value)` meta
+  table（`init_db`／`ensure_schema` 冪等建立；對 2.4a 之前只有 bridge_sessions
+  的既有 db 是升級路徑補建），key=`scan_watermark`。語義：最近一次**真實**
+  （非 dry-run）scan 成功完成時「該次掃描窗口的上界」＝建立 state.db snapshot
+  **之前**取的時間戳（選它而非 max(ended_at)：後者在窗口內無新完結 session 時
+  不前進，重複掃描範圍會無限增長；snapshot 時間每次真實 scan 都前進，且
+  snapshot 之後才完結的 session 一定 >= watermark，下次掃描必然涵蓋）。
+  **只前進不後退**（`advance_scan_watermark`：new <= current 時 no-op 並回報
+  現值——真實 scan 一律嘗試 advance，人工帶 `--since` 掃舊區間因此不會把
+  watermark 往回拉）；dry-run 絕不推進（測試把關）。
+
+scanner 無 `--since`／`--all-history` 時的 effective since ＝
+**max(cutover, watermark)**，輸出明示來源（config cutover／bridge_meta
+watermark）。窗口重疊無害：`event_id` 去重＋touch-only 語義保證冪等，
+寧可保守重疊、不可跳漏。
+
+**可拋棄重建語義不變**：watermark 與 bridge_sessions 同屬部署側 runtime
+state——db 整個刪掉重建後 watermark 消失，scanner 退回 cutover 底線重掃
+（重掃範圍變大但絕不越過 cutover），event_id 去重保證重掃無害。檢視指令：
+`python3 hermes/bridge_state.py watermark [--db-path PATH]`。
