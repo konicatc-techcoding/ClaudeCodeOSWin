@@ -46,6 +46,40 @@ guardrails:
     masking:
       secrets: full_removal           # 金鑰/token/密碼整段換成 [REDACTED:credential]，不留頭尾
       personal_data: fact_level_only  # 健康/財務可保留「存在此類討論」，數值與細節移除
+    # detection（Stage 2.4c 擴充）：bridge importer（hermes/bridge_importer.py）
+    # 的機器可讀偵測 pattern——只給 headless 自動判定用；上方 categories／
+    # headless_action／interactive_action／masking 的人為判定規則語義不變。
+    # 約定（importer 載入時逐條驗證，違反即 fail loud、整批不跑）：
+    # - categories 的每個成員都必須在此有至少一條 pattern（缺漏＝該類別無法
+    #   偵測，fail-closed 寧可整批不跑也不漏判）。
+    # - pattern 為 Python regex，對「完整 session 內容」（全部訊息＋tool 輸出，
+    #   不截斷——截斷可能把敏感段截掉造成漏判）逐條比對。
+    # - 命中只記類別標籤（sensitive:<category>），絕不記命中原文片段
+    #   （decision_reason／error_reason／stdout／stderr 一體適用）。
+    # - 寧可誤攔（false positive → needs_review，人工可補匯）不可漏放。
+    detection:
+      credentials:
+        - '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+        - '(?i)\baws_secret_access_key\b'
+        - '(?i)\b(?:client[_-]?secret|secret[_-]?key|private[_-]?key)\b\s*[:=]'
+      api_tokens:
+        - '\bsk-[A-Za-z0-9_-]{16,}\b'
+        - '\bghp_[A-Za-z0-9]{20,}\b'
+        - '\bgithub_pat_[A-Za-z0-9_]{20,}\b'
+        - '\bxox[abprs]-[A-Za-z0-9-]{10,}\b'
+        - '\bAKIA[0-9A-Z]{16}\b'
+        - '(?i)\b(?:api[_-]?key|api[_-]?token|access[_-]?token|auth[_-]?token)\b\s*[:=]'
+        - '(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}'
+      passwords:
+        - '(?i)\b(?:password|passwd|pwd)\b\s*[:=]'
+        - '密碼\s*[:：=]'
+      health_data:
+        - '(?i)\b(?:blood[ _]pressure|blood[ _]glucose|heart[ _]rate|resting[ _]hr)\b'
+        - '血壓|血糖|心率|心跳|靜止心率|睡眠分數|HRV|步數|體脂|膽固醇|健康日報'
+      financial_pii:
+        - '\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4}\b'   # 信用卡號分組樣式
+        - '(?i)\bbank[ _]account\b'
+        - '信用卡|銀行帳戶|帳戶餘額|薪資|月薪|年薪'
 
 inbox_frontmatter:
   # memory/inbox/ 新增檔案的建議 frontmatter schema（非必要條件，

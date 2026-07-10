@@ -84,6 +84,24 @@ Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes �
   訊息層級的 `event_id_range` 跟 inbox frontmatter（`claudecodeos.inbox.v1`）
   的同名欄位互相對照。
 
+### 3.1 Stage 2.4c importer 的實際轉換（2026-07-10 實作）
+
+`hermes/bridge_importer.py` 處理 `discovered`（與自動重試中的 `failed`）
+session。偵測 pattern 的機器可讀正本＝`registry/consolidation_policy.yaml`
+`guardrails.sensitive.detection`（政策檔讀不到或任一類別缺 pattern → fail loud
+整批不跑）；重試上限＝`hermes/config/bridge.yaml` `max_import_retries`（預設 3）。
+判定與狀態對應：
+
+| 判定結果 | import_status | 理由與備註 |
+|---|---|---|
+| 敏感命中（headless fail-closed） | `needs_review` | 選 `needs_review` 而非 `skipped`：skipped 語義是「政策判定不值得留」，敏感 session 可能有價值、只是 headless 無人可確認（4.3 interactive_action=human_confirm）；原文永在 state.db，互動式 session 可人工補匯。decision_reason **只記類別標籤（sensitive:<category>），絕不記命中原文**——error_reason／stdout／stderr 一體適用。偵測對完整內容（不截斷）比對 |
+| 4.2 結構性排除（test_session／too_short） | `skipped` | decision_reason 記 `exclusion:<label>`＋統計數字。純閒聊／試誤／重複需要語義判斷，v0.1 不自動判，留給 consolidate-memory 第二道網 |
+| 錯誤／判不出來（export 失敗、偵測階段錯誤） | `failed` ＋ `error_reason` | fail-closed 決不落地；error_reason 只記階段標籤＋例外類別名（不引用例外訊息，避免夾帶內容） |
+| 通過 → inbox 落地成功 | `to_inbox` | **先有檔案、再記狀態**（順序硬約束；repository 層對 to_inbox/imported 必附 inbox 路徑有硬驗證）。useful_chat=true、memory_type=episodic |
+| 落地成功但 DB 更新失敗 | 維持原狀態 | 不中斷整批；下次 reconcile 依目錄位置回填 `to_inbox`（本節既有語義，實測走通） |
+| 檔案已存在（InboxAlreadyImportedError） | 維持原狀態 | **不是錯誤**——前次 DB 更新失敗或人工匯過。留給 reconcile 回填而非當場對帳：目錄真相的回填規則（.processed/ 優先序、frontmatter 對帳）只該有 reconcile 一份實作 |
+| `failed` 重試達上限（retry_count >= max_import_retries） | `needs_review` | 不再自動嘗試、轉人工檢視；每次 re-attempt 當下 increment_retry_count（Stage 2.2 既定語義），dry-run 不遞增 |
+
 ## 4. 儲存載體 — ✅ 已拍板（2026-07-10）：獨立 SQLite `hermes/state/bridge_state.db`
 
 **決策**：bridge state 存放於**獨立 SQLite `hermes/state/bridge_state.db`**。

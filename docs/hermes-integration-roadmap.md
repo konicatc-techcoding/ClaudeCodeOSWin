@@ -137,6 +137,16 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > 全 active、無 failed。**管線現況：偵測→discovered 全自動；discovered→inbox 為
 > 下一階段（2.4c）**。
 >
+> **Stage 2.4c ✅ 實作完成（2026-07-10；部署驗證待互動 session）**：bridge importer
+> （`hermes/bridge_importer.py`，`import [--dry-run] [--limit N]`）——discovered→
+> 政策判定→inbox 落地：敏感 fail-closed（pattern 由 consolidation_policy.yaml
+> `guardrails.sensitive.detection` 載入、對完整內容判定、只記類別標籤絕不記命中
+> 原文）→ needs_review；4.2 結構性排除（test/too_short）→ skipped；錯誤 → failed
+> （重試上限 `bridge.yaml max_import_retries=3`，達上限轉 needs_review）；通過者
+> 先落地檔案再記 to_inbox，DB 更新失敗／檔案已存在由 reconcile 回填（實測走通）。
+> 狀態對應表見 memory-bridge-state.md §3.1。25 tests 全綠、既有全套零回歸。
+> **尚未 enqueue、尚未 headless CoS、尚未 importer timer**——那是後續階段。
+>
 > （2026-07-09 舊註，保留脈絡：去重狀態的記錄格式已先行定稿——
 > `claudecodeos.bridge_state.v1`，[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)；
 > capability → 執行通道的對應已有 registry 層定義（[capability-lanes.md](capability-lanes.md)），

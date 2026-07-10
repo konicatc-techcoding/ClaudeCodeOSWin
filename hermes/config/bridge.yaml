@@ -21,3 +21,10 @@
 # - scanner 讀不到本檔或缺 cutover 欄位時 fail loud（exit 1），絕不默認全掃。
 
 cutover: "2026-07-10T00:00:00Z"
+
+# max_import_retries（Stage 2.4c）：bridge importer（hermes/bridge_importer.py）
+# 對同一 session 匯入失敗後的自動重試上限。前次 failed 的 session 重新嘗試時
+# retry_count +1（bridge_state.increment_retry_count 的既定語義，與 jobs.attempts
+# 不同層）；retry_count 達此值後不再自動嘗試，狀態轉 needs_review（人工檢視）。
+# 欄位缺失時 importer 預設 3；設定檔本身讀不到時 fail loud（比照 cutover 慣例）。
+max_import_retries: 3
