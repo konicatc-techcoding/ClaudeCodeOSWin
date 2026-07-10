@@ -1,12 +1,21 @@
-# registry/bridge_state_schema.yaml — v0.1
+# registry/bridge_state_schema.yaml — v0.1（2026-07-10 對齊修訂）
 # Stage 2 session bridge「處理狀態記錄」的格式定義（schema），說明文件見
 # docs/memory-bridge-state.md。
+#
+# 修訂記錄：2026-07-10 使用者拍板 Stage 2 前置決策後，依拍板欄位清單對齊
+# （Stage 2 實作第一步，見 docs/memory-bridge-state.md 第 6 節）：
+# 四處改名（status→import_status、inbox_file→imported_inbox_path、
+# error→error_reason、processed_at→updated_at）、新增 first_seen_at／
+# last_seen_at／retry_count／processed_path，共 17 欄。schema 仍為
+# definition-only、無 runtime 寫入者與存量資料，故為 v1 in-place 修訂，
+# marker 不變。
 #
 # 為什麼放 registry：registry 放的是版本控管的政策/格式**正本**
 # （consolidation_policy.yaml、delegation_policy.yaml 同類）——這份檔案是
 # 「格式契約」，屬 Procedural 層（怎麼記錄），適合 git 管理與測試把關。
 # **實際的 runtime state（一筆一筆的處理記錄）不放這裡、也不進 git**——
-# 儲存載體是 Stage 2 的實作決策（見 docs/memory-bridge-state.md 第 4 節）。
+# 儲存載體已拍板：`hermes/state/bridge_state.db`（獨立 SQLite，僅存在 WSL
+# 部署側；見 docs/memory-bridge-state.md 第 4 節）。
 #
 # 硬邊界（沿用既有規則，本 schema 不放寬任何一條）：
 # - bridge state 不是 Hermes 的記憶資料庫；不建第二份 state.db；
@@ -31,13 +40,15 @@ fields:
       session 來自哪個 Hermes profile（default/nemocoding/gptcoding/…）。
       等同指出來源 db（default → %LOCALAPPDATA%\hermes\state.db，
       profile → profiles/<name>/ 底下的 state.db）。
+      2026-07-10 拍板清單的 source 對應 source_profile＋session_source 這一對
+      （拍板清單是「至少」非「僅限」，保留拆分不遺失資訊）。
 
   session_source:
     type: string
     required: true
     description: Hermes sessions.source 欄位（cli | tui | telegram | cron …），原樣照抄不轉譯
 
-  status:
+  import_status:
     type: enum
     required: true
     values: [discovered, skipped, to_inbox, imported, failed, needs_review]
@@ -48,9 +59,11 @@ fields:
       to_inbox＝已在 memory/inbox/ 新增檔案（進入 Episodic→Semantic 過渡區，
       之後由 N-gate 觸發的 consolidate-memory 收尾）；
       imported＝對應 inbox 檔案已被 consolidate-memory 整併（檔案移入 .processed/）；
-      failed＝處理過程出錯（error 欄位必填）；
+      failed＝處理過程出錯（error_reason 欄位必填）；
       needs_review＝需要互動式 session 人工確認（例如疑似敏感但值得保留，
       留給互動式路徑做遮罩後匯入的決策——headless 自己絕不遮罩）。
+      命名為 import_status（而非 status）＝與 hermes jobs table 的 status
+      （job 生命週期）明確區隔。
 
   memory_type:
     type: enum
@@ -76,22 +89,52 @@ fields:
   decision_reason:
     type: string
     required: true
-    description: 一句話說明為什麼是這個 status（略過依據哪條排除訊號、落地依據哪個正面訊號）
+    description: 一句話說明為什麼是這個 import_status（略過依據哪條排除訊號、落地依據哪個正面訊號）
 
-  inbox_file:
+  imported_inbox_path:
     type: string
     required: false
-    description: status 為 to_inbox/imported 時必填——落地的 inbox 檔案相對路徑
+    description: import_status 為 to_inbox/imported 時必填——落地的 inbox 檔案相對路徑
 
-  processed_at:
+  processed_path:
+    type: string
+    required: false
+    description: >
+      import_status=imported 時的歸檔路徑追蹤快取（inbox 檔案被
+      consolidate-memory 整併後移入 .processed/ 的相對路徑）。
+      **僅為追蹤快取——inbox 檔案的待處理/已處理/失敗狀態，唯一真相仍是
+      目錄位置**（inbox/、.processed/、.failed/，memory-taxonomy 第 5 節
+      既有立場）；兩者不一致時以目錄位置為準。
+
+  first_seen_at:
+    type: string
+    required: true
+    description: bridge 首次發現這個 session 的時間（UTC ISO 8601）
+
+  last_seen_at:
+    type: string
+    required: true
+    description: 最近一次掃描仍看到這個 session 的時間（UTC ISO 8601）
+
+  updated_at:
     type: string
     required: true
     description: 最後一次狀態變更時間（UTC ISO 8601）
 
-  error:
+  retry_count:
+    type: int
+    required: true
+    description: >
+      bridge 層級「同一 session 的匯入嘗試次數」，default 0。
+      **與 hermes/db.py jobs.attempts 完全不同層、兩者不互通**：
+      jobs.attempts 是 job 執行重試（claim 時 +1、達 max_attempts 進
+      dead_letter）；retry_count 記的是 bridge 對同一 session 重新嘗試
+      匯入的次數（例如前次 failed 後重跑）。
+
+  error_reason:
     type: string
     required: false
-    description: status=failed 時必填——錯誤摘要（不得含 session 敏感內容）
+    description: import_status=failed 時必填——錯誤摘要（不得含 session 敏感內容）
 
   event_id:
     type: string

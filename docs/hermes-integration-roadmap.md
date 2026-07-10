@@ -96,7 +96,8 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > （見下方「前置決策拍板記錄」）；原 Stage 1 DoD 1/2 實走已完成——idempotency 修正
 > （adapter deterministic 檔名＋`.processed` 掃描＋exit code 3）已完成並下發部署側。
 > Stage 0.5 殘項定位為非阻塞。**開工後的第一步工作**：bridge_state schema v1 與
-> 拍板欄位清單的對齊（[memory-bridge-state.md](memory-bridge-state.md) 第 6 節）。
+> 拍板欄位清單的對齊（[memory-bridge-state.md](memory-bridge-state.md) 第 6 節）
+> ——✅ **已完成（2026-07-10）**：v1 in-place 修訂為 17 欄、測試 7→10 全綠、文件鏡像同動。
 >
 > （2026-07-09 舊註，保留脈絡：去重狀態的記錄格式已先行定稿——
 > `claudecodeos.bridge_state.v1`，[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)；
