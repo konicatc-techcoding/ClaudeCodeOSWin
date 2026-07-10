@@ -35,7 +35,9 @@ Model Router 改成 capability-based：`registry/agents.yaml` 每個領域新增
 
 **2026-07-10（Stage 2 三項前置決策拍板；gate 全數解除）**：使用者拍板——(1) **Bridge 側別＝WSL 部署側**（worker/jobs.db/timers/logs 都在 WSL，降低排程與 enqueue 複雜度；state.db 維持唯讀來源，被鎖時走 snapshot/immutable 路徑，絕不寫回）；(2) **Bridge state 載體＝獨立 SQLite `hermes/state/bridge_state.db`**（只記 ClaudeCodeOS 側處理狀態，不是 Hermes memory DB、不是第二份 state.db；hermes/state/ 在 .gitignore 與 sync 排除清單，天然只存在於部署側；memory/inbox 仍只是落地區不當狀態庫）；(3) **Capability Lane 不接自動路由**（capability_lanes.yaml 維持 reference/planning 層，model_router TODO 值不硬接，bridge 穩定後 Stage 2.x/3 再整合）。同日稍早：to-inbox idempotency blocker 已修復（deterministic 檔名 `hermes_session_<id>.md`＋.processed/.failed 掃描＋exit code 3，30 tests）並已同步部署側；真實 session import gate 實走完成（`20260628_004555_13dd7b` → reference_hermes_workspace.md）。Stage 2 開工 gate 全數解除，殘餘 Stage 0.5 四小項為非阻塞。git baseline：03c7a0e → eb08b8d → 51ba85a → 199d741。
 
+**2026-07-10（Stage 2.1–2.3 完成：schema 對齊、repository 層、scanner）**：Stage 2.1 schema 對齊（17 欄，7→10 tests）；Stage 2.2 bridge_state repository（`hermes/bridge_state.py`，部署側 db 已 init）；Stage 2.3 scanner（`hermes/bridge_scanner.py`，scan/reconcile 分離、七條硬條件全有測試把關）。部署側真實寫入已執行：reconcile 回填 gate session 為 `imported`（1 筆，檔名比對依據）、scan cutover 後 0 筆、冪等驗證通過、禁區零修改。**Cutover policy：`2026-07-10T00:00:00Z`（bridge 啟用日）——目前只是人工 `--since` 操作參數，無獨立 watermark 儲存；Stage 2.4 排程化前必須設定化，不能依賴人工記憶。**
+
 尚未動工：
 - Model Router 的 MCP server 版本（目前 script adapter 夠用）
 - Dashboard 要不要開放 Telegram 以外的投遞管道
-- Stage 2 session bridge 實作本體（前置決策已全數拍板，見 2026-07-10 條目；實作第一步＝bridge_state schema v1 與拍板欄位清單對齊）
+- Stage 2.4：scanner 排程化（前置：cutover/watermark 設定化）＋ inbox import／enqueue／headless CoS 串接

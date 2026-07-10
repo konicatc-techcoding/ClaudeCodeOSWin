@@ -99,6 +99,23 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > 拍板欄位清單的對齊（[memory-bridge-state.md](memory-bridge-state.md) 第 6 節）
 > ——✅ **已完成（2026-07-10）**：v1 in-place 修訂為 17 欄、測試 7→10 全綠、文件鏡像同動。
 >
+> **Stage 2.2 ✅ 完成（2026-07-10）**：bridge_state repository 層（`hermes/bridge_state.py`，
+> 17 欄 table、event_id UNIQUE、enum 由 registry yaml 驗證不複製第二份）；部署側
+> `hermes/state/bridge_state.db` 已 CLI init 並 smoke 驗證；隔離測試改為環境無關語義後
+> 兩側同套測試全綠。
+>
+> **Stage 2.3 ✅ 完成（2026-07-10）**：bridge scanner（`hermes/bridge_scanner.py`，
+> scan／reconcile 分離、`--since` 必填或 `--all-history` 明確啟用、既有狀態只 touch
+> last_seen 絕不重設、snapshot-only 讀取）。部署側真實寫入已執行並驗證：reconcile 回填
+> gate session 1 筆 `imported`（檔名比對依據已記錄）、scan 62 sessions／cutover 後 0 筆、
+> 冪等重跑通過、禁區（state.db／jobs.db／telegram.json／inbox）零修改。
+>
+> **⚠️ Cutover policy（Stage 2.4 開工前必須設定化）**：`2026-07-10T00:00:00Z` 是
+> Stage 2.3 的 cutover 值（bridge 正式啟用日；此前 session 屬 pre-bridge 歷史，唯一
+> 有價值的舊 session 已由 reconcile 回填）。**目前沒有獨立的 watermark 儲存，cutover
+> 只是操作參數（人工帶 `--since`）**——Stage 2.4 排程化之前必須把 cutover 來源設定化
+> （設定檔或 bridge_state 內的 watermark），不能依賴人工記憶。
+>
 > （2026-07-09 舊註，保留脈絡：去重狀態的記錄格式已先行定稿——
 > `claudecodeos.bridge_state.v1`，[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)；
 > capability → 執行通道的對應已有 registry 層定義（[capability-lanes.md](capability-lanes.md)），
