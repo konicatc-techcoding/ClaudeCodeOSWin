@@ -1,0 +1,21 @@
+# hermes/systemd/hermes-bridge-scanner.timer — Stage 2.4b
+# 每天 08:05 觸發一次 scan。時間選擇：落在既有早上批次的空檔——
+#   08:00 hermes-cron-daily-memory-check（inbox 整併）
+#   08:05 hermes-bridge-scanner（本 timer；偵測新完結 session → discovered）
+#   08:10 hermes-bridge（skill-sync）
+# 避開整點、也與相鄰 timer 各隔 5 分鐘。scanner 只寫 bridge_state.db、
+# 不碰 inbox，跟 08:00 的整併沒有資料相依，純粹是錯開負載與 log 可讀性。
+#
+# Persistent=true 與既有 timer 一致：WSL 睡過觸發時刻，喚醒後會 catch-up
+# 補跑一次（既知行為）。scan 冪等且 watermark 只前進，補跑安全。
+
+[Unit]
+Description=Run hermes-bridge-scanner.service every day at 08:05
+
+[Timer]
+OnCalendar=*-*-* 08:05:00
+Unit=hermes-bridge-scanner.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

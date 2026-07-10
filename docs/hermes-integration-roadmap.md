@@ -122,6 +122,15 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > **2.4b 排程化前提醒**：部署側首次排程執行前先下發本次變更並跑一次真實 scan
 > 確認 watermark 開始推進；排程一律不帶 `--since`。
 >
+> **Stage 2.4b unit 檔完成（2026-07-10）**：`hermes/systemd/hermes-bridge-scanner.service`
+> ＋ `.timer`（每天 08:05，落在 08:00 memory-check 與 08:10 bridge 之間；oneshot、
+> 無參數 scan、無 Restart——失敗不推進 watermark 由下次觸發補掃；`Persistent=true`
+> 與既有 timer 一致）。install/uninstall 用法已涵蓋；靜態測試
+> `hermes/test_systemd_units.py` 守住「排程一律無參數 scan」。**只排程 scan**，
+> reconcile 不進排程（回填/對帳工具，人工或 2.4c 串接再定）。
+> **部署側安裝驗證待互動 session**（install → 手動 start → timer 觸發 → 冪等
+> → 失敗不推進 watermark → Hermes/inbox 零寫入）。
+>
 > （2026-07-09 舊註，保留脈絡：去重狀態的記錄格式已先行定稿——
 > `claudecodeos.bridge_state.v1`，[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)；
 > capability → 執行通道的對應已有 registry 層定義（[capability-lanes.md](capability-lanes.md)），

@@ -43,6 +43,7 @@ wsl --shutdown
 - `hermes-rss.service` + `hermes-rss.timer` — 每 30 分鐘觸發一次（等效 `hermes-rss.plist` 的 `StartInterval:1800`）
 - `hermes-cron-daily-memory-check.service` + `.timer` — 每天 08:00 觸發一次（等效同名 plist 的 `StartCalendarInterval`）
 - `hermes-bridge.service` + `.timer` — 每天 08:10 觸發一次（等效 `hermes-bridge.plist`）
+- `hermes-bridge-scanner.service` + `.timer` — 每天 08:05 觸發一次 `bridge_scanner.py scan`（Stage 2.4b 新增，無 launchd 前身）。**只排程 scan**：ExecStart 無參數，走 2.4a 安全預設（effective since ＝ max(config cutover, watermark)），排程一律不帶 `--since`；`reconcile` 是回填/對帳工具，人工或未來 2.4c 串接時才用，**刻意不進排程**。失敗（如 config 缺失）→ unit failed 可觀測，不設 Restart——失敗不推進 watermark，下次觸發從同一下界重掃，不會跳漏
 - `install.sh` / `uninstall.sh` — 安裝/移除腳本，用法跟原本 `hermes/launchd/install.sh` 一致，只是底層換成 `systemctl --user`
 
 ## 安裝 / 移除
@@ -53,6 +54,7 @@ hermes/systemd/install.sh hermes-telegram                    # 安裝 telegram�
 hermes/systemd/install.sh hermes-rss                          # 安裝 rss（service+timer，每 30 分鐘）
 hermes/systemd/install.sh hermes-cron-daily-memory-check      # 安裝 cron（service+timer，每天 08:00）
 hermes/systemd/install.sh hermes-bridge                       # 安裝 hermes bridge（service+timer，每天 08:10）
+hermes/systemd/install.sh hermes-bridge-scanner               # 安裝 bridge scanner（service+timer，每天 08:05）
 
 hermes/systemd/uninstall.sh                                   # 預設移除 worker
 hermes/systemd/uninstall.sh hermes-telegram                   # 移除 telegram

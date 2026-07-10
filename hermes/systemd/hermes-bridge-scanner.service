@@ -1,0 +1,26 @@
+# hermes/systemd/hermes-bridge-scanner.service — Stage 2.4b
+# 一次性執行單元：跑一輪 bridge_scanner.py scan 就結束，觸發時機交給搭配的
+# hermes-bridge-scanner.timer（每天 08:05）。
+#
+# ExecStart 刻意「無參數」：scan 不帶 --since/--all-history/--dry-run，
+# 走 2.4a 的安全預設（effective since ＝ max(config cutover, watermark)）。
+# 排程一律不帶 --since——這是 roadmap 明文規則，不要在這裡加範圍參數。
+#
+# 失敗語義：scanner 非零 exit（例如 config 缺失 fail loud）→ unit 進入 failed
+# 狀態（systemctl --user list-units --failed 可觀測）。不設 Restart——失敗不推進
+# watermark，下次 timer 觸發會從同一個下界重掃，watermark 語義保證不跳漏。
+#
+# 注意：只有 scan 進排程。reconcile 是回填/對帳工具（人工或未來 2.4c 串接時
+# 使用），刻意不排程。
+
+[Unit]
+Description=Hermes bridge scanner (scan only, one-shot, triggered by hermes-bridge-scanner.timer)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/bridge_scanner.py scan
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/bridge_scanner_systemd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/bridge_scanner_systemd.stderr.log

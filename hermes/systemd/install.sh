@@ -24,6 +24,7 @@
 #   hermes/systemd/install.sh hermes-rss            # 安裝 rss adapter（service+timer）
 #   hermes/systemd/install.sh hermes-cron-daily-memory-check   # 安裝 cron adapter（service+timer）
 #   hermes/systemd/install.sh hermes-bridge         # 安裝 hermes bridge（service+timer）
+#   hermes/systemd/install.sh hermes-bridge-scanner # 安裝 bridge scanner（service+timer，每天 08:05）
 
 set -euo pipefail
 

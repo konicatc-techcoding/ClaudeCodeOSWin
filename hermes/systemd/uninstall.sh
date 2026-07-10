@@ -5,6 +5,7 @@
 #   hermes/systemd/uninstall.sh                     # 預設移除 worker
 #   hermes/systemd/uninstall.sh hermes-telegram     # 移除 telegram adapter
 #   hermes/systemd/uninstall.sh hermes-rss          # 移除 rss adapter（連 timer 一起移除）
+#   hermes/systemd/uninstall.sh hermes-bridge-scanner   # 移除 bridge scanner（連 timer 一起移除）
 
 set -euo pipefail
 
