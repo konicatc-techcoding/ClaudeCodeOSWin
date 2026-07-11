@@ -614,6 +614,532 @@ class TestStaticGuarantees(unittest.TestCase):
             self.assertNotIn(forbidden, code)
 
 
+# ====================================================================
+# Stage 2.4d-2：episode 偵測（scan 擴充）＋ manual checkpoint
+# （提案 docs/stage2.4d-episode-capture-proposal.md §5／§6；
+#  矩陣 #1/#7/#8/#10/#15-17/#19/#20/#27/#28 的 scanner 相關部分）
+# ====================================================================
+
+_EP_SESSIONS_DDL = """
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    user_id TEXT,
+    model TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    end_reason TEXT,
+    message_count INTEGER DEFAULT 0,
+    title TEXT,
+    session_key TEXT,
+    chat_id TEXT,
+    chat_type TEXT,
+    thread_id TEXT,
+    parent_session_id TEXT,
+    archived INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_EP_MESSAGES_DDL = """
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_call_id TEXT,
+    tool_calls TEXT,
+    tool_name TEXT,
+    timestamp REAL NOT NULL,
+    token_count INTEGER,
+    finish_reason TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    compacted INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+# episode_cutover：測試固定值（不用 datetime.now()，避免 flaky）。
+EP_CUTOVER_DT = datetime(2026, 7, 10, 0, 0, 0, tzinfo=timezone.utc)
+EP_CUTOVER_ISO = EP_CUTOVER_DT.isoformat().replace("+00:00", "Z")
+EP_CUTOVER_EPOCH = EP_CUTOVER_DT.timestamp()
+HOUR = 3600.0
+
+# scan 的 seen_at（同時也是 _detect_episodes 的「now」參照，決定 inactivity 是否
+# 達門檻）——固定值，配合 EP_CUTOVER 與訊息時間戳推算 idle 小時數。
+EP_NOW = "2026-07-11T00:00:00+00:00"  # cutover 後 24 小時
+
+
+class EpisodeScannerTestBase(unittest.TestCase):
+    """輕量、自建 schema 的 Hermes state.db（不依賴 seed_state_db.sql），
+    專供 episode 偵測測試控制訊息時間戳與 archived/ended_at 欄位。"""
+
+    INACTIVITY_HOURS = 2  # 測試用小門檻，不代表拍板值（拍板值 72 見 bridge.yaml）
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.hermes_db = self.tmp / "state.db"
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.executescript(_EP_SESSIONS_DDL)
+            conn.executescript(_EP_MESSAGES_DDL)
+            conn.commit()
+        self.bridge_db = self.tmp / "bridge_state.db"
+        self.inbox = self.tmp / "inbox"
+        self.processed = self.inbox / ".processed"
+        self.failed = self.inbox / ".failed"
+        for d in (self.inbox, self.processed, self.failed):
+            d.mkdir(parents=True)
+        self.config = self.tmp / "bridge.yaml"
+        self._write_config(enabled=True, cutover=EP_CUTOVER_ISO,
+                          inactivity_hours=self.INACTIVITY_HOURS)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_config(self, *, enabled: bool, cutover, inactivity_hours,
+                      legacy_cutover: str = "2020-01-01T00:00:00Z"):
+        cutover_line = f'  episode_cutover: "{cutover}"\n' if cutover else "  episode_cutover:\n"
+        self.config.write_text(
+            f'cutover: "{legacy_cutover}"\n'
+            "episodes:\n"
+            f"  enabled: {'true' if enabled else 'false'}\n"
+            f"{cutover_line}"
+            f"  inactivity_hours: {inactivity_hours}\n",
+            encoding="utf-8",
+        )
+
+    def add_session(self, sid: str, *, source: str = "desktop",
+                    started_at: float = EP_CUTOVER_EPOCH - 10 * HOUR,
+                    ended_at: float | None = None, archived: bool = False,
+                    title: str | None = None):
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute(
+                "INSERT INTO sessions (id, source, started_at, ended_at, "
+                "title, archived) VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, source, started_at, ended_at, title, int(archived)),
+            )
+            conn.commit()
+
+    def add_message(self, mid: int, sid: str, role: str, content: str,
+                    timestamp: float, active: int = 1):
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, "
+                "timestamp, active) VALUES (?, ?, ?, ?, ?, ?)",
+                (mid, sid, role, content, timestamp, active),
+            )
+            conn.commit()
+
+    def scan(self, **kwargs):
+        kwargs.setdefault("state_db", self.hermes_db)
+        kwargs.setdefault("bridge_db", self.bridge_db)
+        kwargs.setdefault("config_path", self.config)
+        kwargs.setdefault("inbox_dir", self.inbox)
+        kwargs.setdefault("all_history", True)  # 略過 legacy cutover 計算，聚焦 episode 偵測
+        kwargs.setdefault("seen_at", EP_NOW)
+        return bridge_scanner.scan(**kwargs)
+
+    def checkpoint(self, session_id: str, **kwargs):
+        kwargs.setdefault("state_db", self.hermes_db)
+        kwargs.setdefault("bridge_db", self.bridge_db)
+        kwargs.setdefault("config_path", self.config)
+        kwargs.setdefault("inbox_dir", self.inbox)
+        return bridge_scanner.checkpoint(session_id, **kwargs)
+
+    def rows(self) -> dict:
+        if not self.bridge_db.exists():
+            return {}
+        with contextlib.closing(sqlite3.connect(self.bridge_db)) as conn:
+            conn.row_factory = sqlite3.Row
+            return {r["event_id"]: dict(r)
+                    for r in conn.execute("SELECT * FROM bridge_sessions")}
+
+    def episode_rows(self) -> dict:
+        return {eid: row for eid, row in self.rows().items()
+                if row.get("episode_seq") is not None}
+
+    def cursor(self, sid: str):
+        return bridge_state.get_cursor(sid, db_path=self.bridge_db)
+
+
+class TestEpisodeTriggerEnded(EpisodeScannerTestBase):
+    """矩陣 #15：trigger=ended——ended_at 已設（>= episode_cutover）即切，
+    不等 inactivity；ended 但無新訊息不切空 episode。"""
+
+    def test_ended_at_after_cutover_cuts_immediately_without_waiting_inactivity(self):
+        sid = "sess-ended"
+        self.add_session(sid, ended_at=EP_CUTOVER_EPOCH + HOUR)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + 0.5 * HOUR)
+        self.add_message(2, sid, "assistant", "hi", EP_CUTOVER_EPOCH + 0.6 * HOUR)
+        # seen_at 很接近訊息時間，inactivity 門檻不可能達到——確認切刀不靠 inactivity
+        result = self.scan(seen_at=EP_CUTOVER_ISO)
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1)
+        row = next(iter(eps.values()))
+        self.assertEqual(row["capture_trigger"], "ended")
+        self.assertEqual(row["first_message_id"], 1)
+        self.assertEqual(row["last_message_id"], 2)
+        self.assertEqual(row["episode_seq"], 1)
+
+    def test_ended_with_no_new_messages_does_not_cut_empty_episode(self):
+        sid = "sess-ended-empty"
+        self.add_session(sid, ended_at=EP_CUTOVER_EPOCH + HOUR)
+        # 沒有任何訊息
+        self.scan()
+        self.assertEqual(self.episode_rows(), {})
+
+    def test_ended_before_cutover_does_not_satisfy_ended_trigger(self):
+        """judgment call（見 _decide_trigger docstring）：ended_at < cutover
+        時 ended 條件不成立；若也不滿足 archived，本階段不會自動切刀。"""
+        sid = "sess-ended-precutover"
+        self.add_session(sid, ended_at=EP_CUTOVER_EPOCH - HOUR)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        self.scan()
+        self.assertEqual(self.episode_rows(), {})
+
+
+class TestEpisodeTriggerInactivity(EpisodeScannerTestBase):
+    """矩陣 #16：trigger=inactivity——未達門檻不切、達門檻切、要求 ended_at NULL。"""
+
+    def test_below_threshold_does_not_cut(self):
+        sid = "sess-idle-short"
+        self.add_session(sid)  # ended_at=None
+        last_ts = EP_CUTOVER_EPOCH + HOUR
+        self.add_message(1, sid, "user", "hello", last_ts)
+        # seen_at 只比最後訊息晚 1 小時（< INACTIVITY_HOURS=2）
+        seen_at = datetime.fromtimestamp(last_ts + HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at)
+        self.assertEqual(self.episode_rows(), {})
+
+    def test_at_or_above_threshold_cuts(self):
+        sid = "sess-idle-long"
+        self.add_session(sid)
+        last_ts = EP_CUTOVER_EPOCH + HOUR
+        self.add_message(1, sid, "user", "hello", last_ts)
+        self.add_message(2, sid, "assistant", "hi", last_ts + 60)
+        # seen_at 比最後訊息晚 3 小時（>= INACTIVITY_HOURS=2）
+        seen_at = datetime.fromtimestamp(last_ts + 3 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at)
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1)
+        row = next(iter(eps.values()))
+        self.assertEqual(row["capture_trigger"], "inactivity")
+        self.assertEqual(row["first_message_id"], 1)
+        self.assertEqual(row["last_message_id"], 2)
+
+
+class TestEpisodeTriggerArchived(EpisodeScannerTestBase):
+    """矩陣 #28：trigger=archived——level-triggered，立即切、不等 72 小時；
+    eligible 為空不切；Unarchive 後新訊息改由其他 trigger 另切一刀
+    （fixture 驗證邏輯，非真實 Hermes UI 行為，見提案文首修訂記錄）。"""
+
+    def test_archived_true_cuts_immediately_without_inactivity_wait(self):
+        sid = "sess-archived"
+        self.add_session(sid, archived=True)  # ended_at=None
+        last_ts = EP_CUTOVER_EPOCH + HOUR
+        self.add_message(1, sid, "user", "hello", last_ts)
+        # seen_at 幾乎緊貼訊息時間——inactivity 條件不可能成立
+        seen_at = datetime.fromtimestamp(last_ts + 60, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at)
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1)
+        self.assertEqual(next(iter(eps.values()))["capture_trigger"], "archived")
+
+    def test_archived_with_no_new_messages_does_not_cut(self):
+        sid = "sess-archived-empty"
+        self.add_session(sid, archived=True)
+        self.scan()
+        self.assertEqual(self.episode_rows(), {})
+
+    def test_unarchive_then_new_message_cuts_via_other_trigger_not_archived(self):
+        """fixture 模擬 Unarchive（archived 變回 false）之後新增訊息：
+        不再滿足 archived 條件，改由 inactivity 另切下一刀；既有 episode 不變。"""
+        sid = "sess-unarchive"
+        self.add_session(sid, archived=True)
+        last_ts = EP_CUTOVER_EPOCH + HOUR
+        self.add_message(1, sid, "user", "hello", last_ts)
+        seen_at1 = datetime.fromtimestamp(last_ts + 60, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at1)
+        ep1 = dict(self.episode_rows())
+        self.assertEqual(len(ep1), 1)
+        self.assertEqual(next(iter(ep1.values()))["capture_trigger"], "archived")
+
+        # Unarchive：archived 變回 false；新增一則訊息
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute("UPDATE sessions SET archived=0 WHERE id=?", (sid,))
+            conn.commit()
+        new_ts = last_ts + 2 * HOUR
+        self.add_message(2, sid, "user", "回來了", new_ts)
+        seen_at2 = datetime.fromtimestamp(new_ts + 3 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at2)
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 2, "應多切出一個獨立 episode")
+        triggers = sorted(row["capture_trigger"] for row in eps.values())
+        self.assertEqual(triggers, ["archived", "inactivity"])
+        # ep1 內容不變（immutability）
+        ep1_row = next(iter(ep1.values()))
+        ep1_after = self.rows()[ep1_row["event_id"]]
+        self.assertEqual(ep1_after["decision_reason"], ep1_row["decision_reason"])
+        self.assertEqual(ep1_after["last_message_id"], 1)
+
+
+class TestEpisodeMultipleAndRerun(EpisodeScannerTestBase):
+    """矩陣 #1：多 episode 生成；矩陣 #10：同窗口重跑不重複 create_episode。"""
+
+    def test_two_rounds_produce_adjacent_non_overlapping_episodes(self):
+        sid = "sess-multi"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "第一輪-1", EP_CUTOVER_EPOCH + HOUR)
+        self.add_message(2, sid, "assistant", "第一輪-2", EP_CUTOVER_EPOCH + 1.1 * HOUR)
+        seen_at1 = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 1.2 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at1)
+        eps1 = self.episode_rows()
+        self.assertEqual(len(eps1), 1)
+        row1 = next(iter(eps1.values()))
+        self.assertEqual((row1["first_message_id"], row1["last_message_id"]), (1, 2))
+        self.assertEqual(row1["episode_seq"], 1)
+
+        self.add_message(3, sid, "user", "第二輪-1", EP_CUTOVER_EPOCH + 2 * HOUR)
+        self.add_message(4, sid, "assistant", "第二輪-2", EP_CUTOVER_EPOCH + 2.1 * HOUR)
+        seen_at2 = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 2.2 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at2)
+        eps2 = self.episode_rows()
+        self.assertEqual(len(eps2), 2)
+        seqs = sorted(r["episode_seq"] for r in eps2.values())
+        self.assertEqual(seqs, [1, 2])
+        row2 = next(r for r in eps2.values() if r["episode_seq"] == 2)
+        self.assertEqual((row2["first_message_id"], row2["last_message_id"]), (3, 4))
+        # boundary 相接不重疊不跳漏
+        self.assertEqual(row2["first_message_id"], row1["last_message_id"] + 1)
+
+    def test_rerun_same_window_does_not_duplicate_create_episode(self):
+        sid = "sess-rerun"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        seen_at = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 1.1 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen_at)
+        before = self.episode_rows()
+        self.assertEqual(len(before), 1)
+        # archived 仍是 true（level-triggered 仍會成立），但 cursor 已推進、
+        # 沒有新訊息可切——不得重複 create_episode
+        self.scan(seen_at=seen_at)
+        after = self.episode_rows()
+        self.assertEqual(len(after), 1, "重跑不得產生第二筆 episode 列")
+        before_row = next(iter(before.values()))
+        after_row = next(iter(after.values()))
+        self.assertEqual(before_row["decision_reason"], after_row["decision_reason"])
+        self.assertEqual(before_row["updated_at"], after_row["updated_at"])
+
+
+class TestEpisodePreCutoverGuard(EpisodeScannerTestBase):
+    """矩陣 #7：pre-cutover 不湧入。"""
+
+    def test_all_messages_before_cutover_never_scanned(self):
+        sid = "sess-precutover"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "old-1", EP_CUTOVER_EPOCH - 3 * HOUR)
+        self.add_message(2, sid, "assistant", "old-2", EP_CUTOVER_EPOCH - 2 * HOUR)
+        self.scan()
+        self.assertEqual(self.episode_rows(), {},
+                         "cutover 前的活動不得被候選過濾撿到（§5.3）")
+
+    def test_mixed_before_and_after_cutover_only_captures_after(self):
+        sid = "sess-mixed"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "old", EP_CUTOVER_EPOCH - HOUR)
+        self.add_message(2, sid, "user", "new", EP_CUTOVER_EPOCH + HOUR)
+        self.scan()
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1)
+        row = next(iter(eps.values()))
+        self.assertEqual(row["first_message_id"], 2, "cutover 前的訊息不進 boundary")
+        self.assertEqual(row["last_message_id"], 2)
+
+
+class TestEpisodeCursorMissingGuard(EpisodeScannerTestBase):
+    """矩陣 #8：cursor 遺失的 fail-closed 防護。"""
+
+    def test_landed_episode_file_without_cursor_blocks_cut(self):
+        sid = "sess-lost-cursor"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        # 模擬「已有 episode 落地檔，但 bridge db（含 cursor）已消失」：
+        # 只放一個檔名帶 _ep 段的檔案，不建立任何 cursor 記錄
+        (self.inbox / f"hermes_session_{sid}_ep1-1.md").write_text(
+            "已落地內容", encoding="utf-8")
+        result = self.scan()
+        self.assertEqual(self.episode_rows(), {}, "拒切：不得切出與既有 episode 重疊的 boundary")
+        blocked = [a for a in result["actions"]
+                  if a["action"] == "cursor_missing_needs_reconcile"]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["session_id"], sid)
+        self.assertIsNone(self.cursor(sid), "拒切路徑不得建立 cursor")
+
+    def test_no_cursor_and_no_landed_file_cuts_normally_from_cutover(self):
+        sid = "sess-fresh"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        self.scan()
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1, "無落地檔、無 cursor 時應依 cutover 正常首切")
+
+
+class TestEpisodeConfigGate(EpisodeScannerTestBase):
+    """矩陣 #19：config gate——enabled=false/區塊缺失與 2.4c 位元級一致；
+    enabled=true 但 episode_cutover 缺失 → fail loud。"""
+
+    def test_enabled_false_produces_zero_episodes_even_with_eligible_activity(self):
+        self._write_config(enabled=False, cutover=EP_CUTOVER_ISO, inactivity_hours=2)
+        sid = "sess-gate-off"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        result = self.scan()
+        self.assertEqual(self.episode_rows(), {})
+        self.assertFalse(result["episodes_enabled"])
+        self.assertEqual(result["episode_actions"], 0)
+
+    def test_missing_episodes_block_behaves_like_2_4c(self):
+        self.config.write_text('cutover: "2020-01-01T00:00:00Z"\n', encoding="utf-8")
+        sid = "sess-no-block"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        result = self.scan()
+        self.assertEqual(self.episode_rows(), {})
+        self.assertFalse(result["episodes_enabled"])
+
+    def test_enabled_true_missing_cutover_fails_loud(self):
+        self._write_config(enabled=True, cutover=None, inactivity_hours=2)
+        with self.assertRaises(ValueError):
+            self.scan()
+        self.assertFalse(self.bridge_db.exists(),
+                         "fail loud 路徑不得建立 bridge db")
+
+    def test_load_episodes_config_directly(self):
+        cfg = bridge_scanner.load_episodes_config(self.config)
+        self.assertTrue(cfg["enabled"])
+        self.assertEqual(cfg["episode_cutover"], EP_CUTOVER_ISO)
+        self.assertEqual(cfg["inactivity_hours"], self.INACTIVITY_HOURS)
+
+
+class TestEpisodeProfileFailClosed(EpisodeScannerTestBase):
+    """矩陣 #27：非 default profile fail-closed（scanner 半部）。"""
+
+    def test_non_default_profile_with_episodes_enabled_fails_loud(self):
+        with self.assertRaises(ValueError):
+            self.scan(source_profile="nemocoding")
+        self.assertFalse(self.bridge_db.exists())
+
+    def test_non_default_profile_with_episodes_disabled_is_allowed(self):
+        self._write_config(enabled=False, cutover=EP_CUTOVER_ISO, inactivity_hours=2)
+        # 不該 raise——episodes 關閉時非 default profile 不受這條限制
+        result = self.scan(source_profile="nemocoding", all_history=True)
+        self.assertEqual(result["episode_actions"], 0)
+
+
+class TestCheckpointManualTrigger(EpisodeScannerTestBase):
+    """矩陣 #17：trigger=manual——立即切、無視門檻；無新訊息 exit 0 不切；
+    --dry-run 零寫入；不觸發 importer（本函式只建立 discovered episode 列）。"""
+
+    def test_manual_cuts_immediately_ignoring_all_thresholds(self):
+        sid = "sess-manual"
+        self.add_session(sid)  # 無 ended_at、無 archived，且剛剛才有新訊息
+        self.add_message(1, sid, "user", "現在就切這段", EP_CUTOVER_EPOCH + HOUR)
+        result = self.checkpoint(sid)
+        self.assertEqual(result["action"], "create_episode")
+        self.assertTrue(result["created"])
+        row = self.episode_rows()[result["event_id"]]
+        self.assertEqual(row["capture_trigger"], "manual")
+        self.assertEqual(row["import_status"], "discovered",
+                         "manual 只建立 discovered，不觸發 importer")
+
+    def test_no_new_messages_reports_not_error(self):
+        sid = "sess-manual-empty"
+        self.add_session(sid)
+        result = self.checkpoint(sid)
+        self.assertEqual(result["action"], "no_new_messages")
+        self.assertFalse(result["created"])
+
+    def test_dry_run_writes_nothing(self):
+        sid = "sess-manual-dry"
+        self.add_session(sid)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        result = self.checkpoint(sid, dry_run=True)
+        self.assertEqual(result["action"], "create_episode")
+        self.assertFalse(self.bridge_db.exists(), "dry-run 不得建立 bridge db")
+
+    def test_second_checkpoint_only_captures_new_messages(self):
+        sid = "sess-manual-twice"
+        self.add_session(sid)
+        self.add_message(1, sid, "user", "第一段", EP_CUTOVER_EPOCH + HOUR)
+        first = self.checkpoint(sid)
+        self.assertEqual(first["action"], "create_episode")
+        self.add_message(2, sid, "user", "第二段", EP_CUTOVER_EPOCH + 2 * HOUR)
+        second = self.checkpoint(sid)
+        self.assertEqual(second["action"], "create_episode")
+        self.assertEqual(second["first_message_id"], 2)
+        self.assertEqual(second["last_message_id"], 2)
+        self.assertEqual(second["episode_seq"], 2)
+
+    def test_missing_cutover_without_cursor_fails_loud(self):
+        self._write_config(enabled=False, cutover=None, inactivity_hours=2)
+        sid = "sess-manual-nocutover"
+        self.add_session(sid)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        with self.assertRaises(ValueError):
+            self.checkpoint(sid)
+
+    def test_cursor_missing_guard_applies_to_checkpoint_too(self):
+        sid = "sess-manual-lostcursor"
+        self.add_session(sid)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        (self.inbox / f"hermes_session_{sid}_ep1-1.md").write_text(
+            "已落地內容", encoding="utf-8")
+        result = self.checkpoint(sid)
+        self.assertEqual(result["action"], "cursor_missing_needs_reconcile")
+
+    def test_unknown_session_raises(self):
+        with self.assertRaises(ValueError):
+            self.checkpoint("no-such-session")
+
+
+class TestCheckpointCli(EpisodeScannerTestBase):
+    """checkpoint CLI 子指令：exit code 與 --dry-run。"""
+
+    def _run_cli(self, *extra_args):
+        argv = ["--bridge-db", str(self.bridge_db), "checkpoint",
+               *extra_args, "--state-db", str(self.hermes_db),
+               "--config", str(self.config), "--inbox", str(self.inbox)]
+        return bridge_scanner._cli(argv)
+
+    def test_cli_success_exit_zero(self):
+        sid = "sess-cli-manual"
+        self.add_session(sid)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        self.assertEqual(self._run_cli(sid), 0)
+
+    def test_cli_no_new_messages_exit_zero(self):
+        sid = "sess-cli-empty"
+        self.add_session(sid)
+        self.assertEqual(self._run_cli(sid), 0)
+
+    def test_cli_cursor_missing_guard_exit_nonzero(self):
+        sid = "sess-cli-lostcursor"
+        self.add_session(sid)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        (self.inbox / f"hermes_session_{sid}_ep1-1.md").write_text(
+            "已落地內容", encoding="utf-8")
+        self.assertEqual(self._run_cli(sid), 1)
+
+    def test_cli_dry_run_flag(self):
+        sid = "sess-cli-dry"
+        self.add_session(sid)
+        self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        self.assertEqual(self._run_cli(sid, "--dry-run"), 0)
+        self.assertFalse(self.bridge_db.exists())
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")

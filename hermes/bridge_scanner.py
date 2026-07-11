@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""hermes/bridge_scanner.py — v0.1（Stage 2.3；2.4a 加入 cutover 設定化與 watermark）
+"""hermes/bridge_scanner.py — v0.3（Stage 2.3；2.4a cutover 設定化與 watermark；
+2.4d-2 episode 偵測＋manual checkpoint）
 
 Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 session，
 把處理狀態寫進 bridge_state.db（經 hermes/bridge_state.py 的 repository API）。
 **只做偵測與記錄**：不匯入 inbox、不 enqueue job、絕不寫回 Hermes state.db。
 
-兩個子指令（職責分離，互不重疊）：
+Stage 2.4d-2（episode capture 偵測，規格正本：
+docs/stage2.4d-episode-capture-proposal.md）：`scan` 在既有 ended_at 掃描
+邏輯之外，`episodes.enabled: true`（hermes/config/bridge.yaml）時額外對每個
+session 判斷三種 trigger（ended／archived／inactivity）並呼叫
+`bridge_state.create_episode()`；`enabled: false`（本階段預設，交付後仍是
+false）或整個 `episodes` 區塊缺失時，`scan` 行為與 2.4c 位元級一致——
+episode 偵測只在候選過濾用 `episodes.episode_cutover` 政策底線（不延伸既有
+scan watermark 進 episode 語義，見 §5.3 的結構性衝突發現）。`checkpoint`
+是獨立的第三個子指令（manual trigger，立即切刀無視門檻，不觸發 importer）。
+
+三個子指令（職責分離，互不重疊）：
 
 - ``scan``：讀 Hermes state.db（一律經 HermesSessionAdapter 的 snapshot 模式），
   找出範圍下界（含端點）之後「已完結」（ended_at 已設）的 session。首次看到
@@ -28,6 +39,29 @@ Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 
   對帳依據優先用 frontmatter 的 session_id / event_id_range；無 frontmatter
   （舊時間戳檔名格式的歸檔）退回檔名比對，依據記錄在 decision_reason。
   processed_path 與 db 記錄不一致時，以 .processed/ 實際位置為準回寫。
+  （episode-aware 回填＋cursor recovery 是 2.4d-3 範圍，本階段 reconcile
+  邏輯本身不變。）
+- ``checkpoint``：manual trigger（Stage 2.4d-2 新增）。對單一 session 立即
+  切一刀（trigger=manual，無視 ended_at／archived／inactivity 門檻），走
+  同一條 `bridge_state.create_episode()` 路徑；eligible 為空時明確回報
+  「無新訊息、不切」（exit 0，非錯誤）；--dry-run 零寫入。**不觸發
+  importer**——scan／import 職責分離不因 manual 破例（§0.1 拍板）。
+
+episode 偵測與 trigger 判斷（提案 §5／§6，`scan` 與 `checkpoint` 共用）：
+- 候選過濾**只用 `episodes.episode_cutover` 底線**，不沿用既有 scan
+  watermark（§5.3：inactivity trigger 恰恰在「最近沒有活動」時才成立，若用
+  watermark 過濾會系統性漏切）；逐 session 以 per-session cursor
+  （`bridge_state.get_cursor`）比對決定有無新訊息。
+- trigger 判定：`ended`（ended_at 已設且 >= episode_cutover，立即切、不等
+  inactivity）／`archived`（Hermes `archived==true`，level-triggered：只看
+  當下值，立即切、不等 72 小時）／`inactivity`（ended_at NULL 且閒置達
+  `episodes.inactivity_hours`）。三者任一成立即可切；eligible 為空一律
+  不建立空 episode（通用規則、無特例）。
+- cursor 遺失防護（矩陣 #8）：session 無 cursor 記錄但 inbox 已有該 sid 的
+  `_ep` 落地檔（代表 recovery／reconcile 沒跑過）→ 拒切、回報「請先跑
+  reconcile」，不切出與既有 episode 重疊的 boundary。
+- profile fail-closed（§6.1）：episode 偵測只在 `--source-profile default`
+  下執行；帶其他 profile 且 `episodes.enabled: true` 時 fail loud（exit 1）。
 
 安全預設（硬條件，測試逐條把關）：
 - **預設不得全掃**：--since 與 --all-history 互斥；兩者都不給時走安全預設
@@ -48,12 +82,15 @@ Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 
 retry_count 備忘（Stage 2.2 既定語義）：scan/reconcile 都不是「re-attempt」，
 所以本模組**不呼叫** increment_retry_count()——那要等之後的匯入重試流程。
 
-CLI（exit code：0 成功；1 執行期錯誤——含 bridge.yaml 缺失；2 參數用法錯誤）：
+CLI（exit code：0 成功；1 執行期錯誤——含 bridge.yaml 缺失、非 default profile
+    加 episodes enabled、checkpoint 遇 cursor 缺失防護；2 參數用法錯誤）：
     python3 hermes/bridge_scanner.py [--bridge-db PATH] scan \
         [--since ISO8601 | --all-history] [--dry-run] \
-        [--state-db PATH] [--source-profile NAME] [--config PATH]
+        [--state-db PATH] [--source-profile NAME] [--config PATH] [--inbox DIR]
     python3 hermes/bridge_scanner.py [--bridge-db PATH] reconcile \
         [--dry-run] [--inbox DIR] [--source-profile NAME]
+    python3 hermes/bridge_scanner.py [--bridge-db PATH] checkpoint <session_id> \
+        [--dry-run] [--state-db PATH] [--config PATH] [--inbox DIR]
 """
 import argparse
 import re
@@ -189,6 +226,200 @@ def load_cutover(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> str:
     return cutover
 
 
+# ---------- Stage 2.4d-2：episode 偵測（提案 §5／§6） ----------
+
+# episodes.inactivity_hours 缺失時的 fallback——唯一 fail-loud 必填項是
+# episode_cutover（矩陣 #19 後半），inactivity_hours 已拍板 72（§0.1），
+# 缺欄位時直接退回這個值即可，不需要為此再 fail loud 一次。
+DEFAULT_INACTIVITY_HOURS = 72
+
+# episode 落地檔存在性探測 needle 的固定後綴（矩陣 #8）：精確到 "_ep" 段，
+# 目的只是「這個 session 有沒有 episode 落地過」，不是回填——回填規則仍只
+# 留給 reconcile 一份實作（2.4d-3，提案 §3.2）。
+_EPISODE_FILE_NEEDLE_SUFFIX = "_ep"
+
+
+def load_episodes_config(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> dict:
+    """讀取 hermes/config/bridge.yaml 的 episodes 區塊（提案 §1.3／§5.1）。
+
+    - 設定檔不存在、或存在但無 episodes 區塊、或 enabled 非 true
+      → {"enabled": False, ...}——scanner 維持 2.4c 位元級行為
+      （矩陣 #19 前半，零成本 gate）。
+    - enabled: true 但 episode_cutover 缺失/非字串/無法解析
+      → ValueError（fail loud，矩陣 #19 後半）：寧可讓「忘記填就翻 true」
+      在啟用當下就爆炸，也不要默默當成「什麼都不管」而允許回溯湧入。
+    - episode_cutover 即使 enabled=false 也一併回傳（可能是 None）：
+      manual checkpoint 子指令獨立於 enabled 閘門之外，對無 cursor 的
+      session 一樣需要這個值才能決定擷取起點（見 checkpoint()）。
+    """
+    import yaml  # lazy import：比照 load_cutover，需要時才要求 pyyaml
+
+    path = Path(config_path)
+    if not path.is_file():
+        return {"enabled": False, "inactivity_hours": None, "episode_cutover": None}
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    episodes = doc.get("episodes") if isinstance(doc, dict) else None
+    if not isinstance(episodes, dict):
+        episodes = {}
+    enabled = bool(episodes.get("enabled", False))
+    cutover = episodes.get("episode_cutover")
+    if enabled:
+        if not isinstance(cutover, str) or not cutover.strip():
+            raise ValueError(
+                f"episodes.enabled=true 但 episode_cutover 缺失（或不是字串）："
+                f"{path}——fail loud，絕不默默當成「什麼都不管」（提案 §1.3／§5.1）"
+            )
+        _parse_iso_utc(cutover)  # 驗證可解析；解析失敗丟 ValueError
+    inactivity_hours = episodes.get("inactivity_hours", DEFAULT_INACTIVITY_HOURS)
+    return {"enabled": enabled, "inactivity_hours": inactivity_hours,
+            "episode_cutover": cutover if isinstance(cutover, str) else None}
+
+
+def _has_landed_episode_files(inbox_dir: Path | str, session_id: str) -> bool:
+    """存在性探測（矩陣 #8）：inbox 本層＋.processed/＋.failed/ 是否已有該
+    session 的 episode 落地檔（檔名含 `hermes_session_<sid>_ep`）。只判斷
+    存在與否，**不回填任何欄位**——回填規則仍只留給 reconcile 一份實作
+    （2.4d-3，提案 §3.2）；本階段 bridge_importer.py 尚未有episode-aware
+    的專用 needle helper（那是 2.4d-3 範圍），這裡先實作一個最小的獨立探測，
+    2.4d-3 補上 importer 側的 helper 後應收斂成單一實作。"""
+    inbox_dir = Path(inbox_dir)
+    needle = f"hermes_session_{session_id}{_EPISODE_FILE_NEEDLE_SUFFIX}"
+    for sub, _status in _DIR_STATUS:
+        directory = inbox_dir / sub if sub else inbox_dir
+        if not directory.is_dir():
+            continue
+        for candidate in directory.glob("*.md"):
+            if needle in candidate.name:
+                return True
+    return False
+
+
+def _episode_hash_events(events: list[dict]) -> list[dict]:
+    """adapter normalized event → bridge_state.episode_content_hash() 需要的
+    normalized 欄位（rowid/role/type/content/tool_calls/timestamp）。"""
+    return [
+        {
+            "rowid": e["metadata"]["raw_message_id"],
+            "role": e["role"],
+            "type": e["type"],
+            "content": e["content"],
+            "tool_calls": e["metadata"].get("tool_calls"),
+            "timestamp": e["timestamp"],
+        }
+        for e in events
+    ]
+
+
+def _decide_trigger(sess: dict, cutover_dt: datetime, inactivity_hours: float,
+                    last_activity_dt: datetime, now_dt: datetime) -> str | None:
+    """§6 trigger 表逐條判斷（scan 用；checkpoint 走獨立的 manual 路徑，
+    不經這個函式）。優先序 ended > archived > inactivity——三者判斷用同一次
+    eligible（由呼叫端另外算），優先序只影響 capture_trigger 標籤紀錄哪個
+    名字，不影響「切不切」：任一成立就切一刀。
+
+    判斷 judgment call（規格未明文的邊界情況，記錄理由）：ended_at 已設但
+    < episode_cutover 的 session（legacy 完結、cutover 前結束）不滿足
+    inactivity 條件（inactivity 明文要求 ended_at NULL）——這類 session 若
+    cutover 後又有新訊息，本階段只靠 archived／manual 觸發，不會自動被
+    inactivity 撿到。這是逐字照 §6 trigger 表的條件寫出的結果，不是遺漏。
+    """
+    ended_at = sess["ended_at"]
+    if ended_at:
+        ended_dt = _parse_iso_utc(ended_at)
+        if ended_dt >= cutover_dt:
+            return "ended"
+    if bool(sess["metadata"].get("archived")):
+        return "archived"
+    if not ended_at:
+        idle_hours = (now_dt - last_activity_dt).total_seconds() / 3600.0
+        if idle_hours >= inactivity_hours:
+            return "inactivity"
+    return None
+
+
+def _detect_episodes(
+    *, adapter: HermesSessionAdapter, sessions: list[dict], activity_map: dict,
+    episodes_cfg: dict, bridge_db: Path, source_profile: str,
+    inbox_dir: Path | str, dry_run: bool, seen_at: str | None,
+) -> list[dict]:
+    """episode 偵測主邏輯（提案 §5／§6）：候選過濾只用 episode_cutover 底線
+    （§5.3，不沿用 scan watermark）；逐 session 判斷 trigger、算 eligible、
+    呼叫 create_episode()。呼叫端須已確保 episodes_cfg["enabled"] 為 True
+    且 source_profile == default（profile fail-closed 由呼叫端 scan() 檢查）。
+    """
+    cutover_dt = _parse_iso_utc(episodes_cfg["episode_cutover"])
+    inactivity_hours = float(episodes_cfg["inactivity_hours"] or DEFAULT_INACTIVITY_HOURS)
+    now_dt = _parse_iso_utc(seen_at) if seen_at else datetime.now(timezone.utc)
+
+    actions: list[dict] = []
+    for sess in sessions:
+        sid = sess["session_id"]
+        activity = activity_map.get(sid)
+        if not activity or not activity.get("max_timestamp"):
+            continue  # 無任何 active 訊息，無從切刀
+        last_activity_dt = _parse_iso_utc(activity["max_timestamp"])
+        if last_activity_dt < cutover_dt:
+            continue  # 候選過濾：episode_cutover 底線（§5.3），不用 watermark
+
+        trigger = _decide_trigger(sess, cutover_dt, inactivity_hours,
+                                  last_activity_dt, now_dt)
+        if trigger is None:
+            continue
+
+        cursor = bridge_state.get_cursor(
+            sid, source_profile=source_profile, db_path=bridge_db)
+        if cursor is None and _has_landed_episode_files(inbox_dir, sid):
+            actions.append({
+                "action": "cursor_missing_needs_reconcile",
+                "session_id": sid, "trigger": trigger,
+            })
+            continue  # 拒切（矩陣 #8）：不切出與既有 episode 重疊的 boundary
+
+        events = list(adapter.iter_events(session_id=sid))  # active=1 only
+        if cursor is not None:
+            eligible = [e for e in events
+                       if e["metadata"]["raw_message_id"] >
+                       cursor["last_captured_message_id"]]
+        else:
+            eligible = [e for e in events
+                       if e["timestamp"]
+                       and _parse_iso_utc(e["timestamp"]) >= cutover_dt]
+        if not eligible:
+            continue  # eligible 為空一律不建立空 episode（通用規則，無特例）
+
+        rowids = [e["metadata"]["raw_message_id"] for e in eligible]
+        first_id, last_id = min(rowids), max(rowids)
+        content_hash = bridge_state.episode_content_hash(
+            _episode_hash_events(eligible))
+        episode_seq = (cursor["last_episode_seq"] + 1) if cursor else 1
+        reason = (f"bridge scan episode 偵測：trigger={trigger}，"
+                 f"boundary=[{first_id}..{last_id}]")
+
+        action = {
+            "action": "create_episode", "session_id": sid, "trigger": trigger,
+            "first_message_id": first_id, "last_message_id": last_id,
+            "episode_seq": episode_seq,
+        }
+        if not dry_run:
+            result = bridge_state.create_episode(
+                session_id=sid,
+                source_profile=source_profile,
+                session_source=sess["session_source"] or "unknown",
+                episode_seq=episode_seq,
+                capture_trigger=trigger,
+                first_message_id=first_id,
+                last_message_id=last_id,
+                source_content_hash=content_hash,
+                decision_reason=reason,
+                seen_at=seen_at,
+                db_path=bridge_db,
+            )
+            action["event_id"] = result["row"]["event_id"]
+            action["created"] = result["created"]
+        actions.append(action)
+    return actions
+
+
 def scan(
     *,
     since: str | None = None,
@@ -199,8 +430,11 @@ def scan(
     source_profile: str = "default",
     seen_at: str | None = None,
     config_path: Path | str = DEFAULT_BRIDGE_CONFIG,
+    inbox_dir: Path | str = DEFAULT_INBOX_DIR,
 ) -> dict:
-    """偵測範圍下界後新完結的 Hermes session → upsert discovered。
+    """偵測範圍下界後新完結的 Hermes session → upsert discovered；
+    `episodes.enabled: true` 時另外做 Stage 2.4d-2 episode 偵測（見模組
+    docstring 與 docs/stage2.4d-episode-capture-proposal.md §5／§6）。
 
     - 範圍下界（含端點，ended_at >= 下界才撈）三種來源，結果的 since_source
       明示是哪一種：--since（人工覆蓋）＞ --all-history（明確全掃、無下界）＞
@@ -214,9 +448,22 @@ def scan(
       不會把 watermark 往回拉。
     - dry_run=True：只回報將執行的動作，不寫入、**不推進 watermark**；
       bridge db 不存在時不建檔。
+    - episode 偵測（`episodes.enabled: true`）：候選過濾只用
+      `episodes.episode_cutover` 底線（不是這個函式的 since/watermark，
+      §5.3 的結構性衝突發現）；`enabled: false` 或區塊缺失時與 2.4c
+      位元級一致（矩陣 #19 前半，本函式對 episode 偵測完全零成本：不查
+      list_session_activity()、不進 _detect_episodes()）；帶非 default
+      profile 時 fail loud（§6.1，矩陣 #27）。
     """
     if since and all_history:
         raise ValueError("--since 與 --all-history 互斥，只能指定一個")
+
+    episodes_cfg = load_episodes_config(config_path)
+    if episodes_cfg["enabled"] and source_profile != bridge_state.DEFAULT_SOURCE_PROFILE:
+        raise ValueError(
+            f"episode capture 本階段僅支援 --source-profile default"
+            f"（得到 {source_profile!r}）——fail-closed 拒絕（提案 §6.1）"
+        )
 
     bridge_db = Path(bridge_db)
     # 純讀取：db 不存在回 None、不建檔（dry-run 安全）
@@ -240,12 +487,21 @@ def scan(
     # 完結的 session 一定 >= 這個值，下次掃描必然涵蓋；邊界重疊冪等無害）
     window_end = datetime.now(timezone.utc).isoformat()
 
-    with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
-        sessions = adapter.list_sessions()
-
     if not dry_run:
         bridge_state.ensure_schema(bridge_db)
     db_readable = bridge_db.exists()  # dry-run 且 db 不存在時，連檔案都不建立
+
+    episode_actions: list[dict] = []
+    with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
+        sessions = adapter.list_sessions()
+        if episodes_cfg["enabled"]:
+            activity_map = adapter.list_session_activity()
+            episode_actions = _detect_episodes(
+                adapter=adapter, sessions=sessions, activity_map=activity_map,
+                episodes_cfg=episodes_cfg, bridge_db=bridge_db,
+                source_profile=source_profile, inbox_dir=inbox_dir,
+                dry_run=dry_run, seen_at=seen_at,
+            )
 
     actions: list[dict] = []
     candidates = 0
@@ -295,6 +551,8 @@ def scan(
         watermark_after = bridge_state.advance_scan_watermark(
             window_end, db_path=bridge_db)["watermark"]
 
+    actions.extend(episode_actions)
+
     return {"mode": "scan", "dry_run": dry_run,
             "sessions_seen": len(sessions), "candidates": candidates,
             "bridge_db_exists": db_readable,
@@ -302,7 +560,117 @@ def scan(
             "since_source": since_source,
             "watermark_before": watermark_before,
             "watermark_after": watermark_after,
+            "episodes_enabled": episodes_cfg["enabled"],
+            "episode_actions": len(episode_actions),
             "actions": actions}
+
+
+# ---------- checkpoint（manual trigger，Stage 2.4d-2） ----------
+
+def checkpoint(
+    session_id: str,
+    *,
+    dry_run: bool = False,
+    state_db: Path | str | None = None,
+    bridge_db: Path | str = bridge_state.DEFAULT_DB_PATH,
+    seen_at: str | None = None,
+    config_path: Path | str = DEFAULT_BRIDGE_CONFIG,
+    inbox_dir: Path | str = DEFAULT_INBOX_DIR,
+) -> dict:
+    """manual checkpoint（提案 §6 CLI 雛形）：對單一 session 立即切一刀
+    （trigger=manual，無視 ended_at／archived／inactivity 門檻），走同一條
+    `bridge_state.create_episode()` 路徑。**scan／import 職責分離不因
+    manual 破例**——本函式只建立 discovered episode 列，不觸發 importer
+    （§0.1 拍板）。
+
+    - 固定 `source_profile="default"`（CLI 雛形沒有 --source-profile；
+      create_episode() 本身仍會對非 default fail-closed，這裡沒有繞過的
+      code path）。
+    - 獨立於 `episodes.enabled` 閘門之外（manual 是人工明確操作，不受
+      自動管線是否開啟影響）；但無 cursor 的 session 仍需要
+      `episodes.episode_cutover` 作為擷取起點，缺失時 fail loud（ValueError）
+      ——與 scan() 的「enabled 但 cutover 缺失才 fail loud」不同：checkpoint
+      任何時候要處理無 cursor session 都需要這個值，不看 enabled。
+    - cursor 遺失防護（矩陣 #8）同 scan：session 無 cursor 但 inbox 已有該
+      sid 的 `_ep` 落地檔 → 回報 `cursor_missing_needs_reconcile`，不切。
+    - eligible 為空 → 回報 `no_new_messages`（呼叫端 CLI 對應 exit 0，
+      非錯誤——「無新訊息、不切」不是失敗）。
+    - --dry-run：零寫入（不建 bridge db、不呼叫 create_episode）。
+    """
+    source_profile = bridge_state.DEFAULT_SOURCE_PROFILE
+    episodes_cfg = load_episodes_config(config_path)
+
+    if not dry_run:
+        bridge_state.ensure_schema(bridge_db)
+
+    cursor = bridge_state.get_cursor(
+        session_id, source_profile=source_profile, db_path=bridge_db)
+
+    if cursor is None and _has_landed_episode_files(inbox_dir, session_id):
+        return {"mode": "checkpoint", "dry_run": dry_run,
+                "session_id": session_id,
+                "action": "cursor_missing_needs_reconcile", "created": False}
+
+    with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
+        try:
+            export = adapter.export_session(session_id)
+        except KeyError as exc:
+            raise ValueError(
+                f"Hermes state.db 裡沒有 session：{session_id}") from exc
+    events = export["events"]  # export_session 預設 include_inactive=False
+
+    if cursor is not None:
+        eligible = [e for e in events
+                   if e["metadata"]["raw_message_id"] >
+                   cursor["last_captured_message_id"]]
+    else:
+        cutover_raw = episodes_cfg["episode_cutover"]
+        if not cutover_raw:
+            raise ValueError(
+                "checkpoint 需要 hermes/config/bridge.yaml 的 "
+                "episodes.episode_cutover——session 無 cursor 記錄時，"
+                "擷取起點以此為底線，缺失時不猜、不預設全掃（fail loud）"
+            )
+        cutover_dt = _parse_iso_utc(cutover_raw)
+        eligible = [e for e in events
+                   if e["timestamp"]
+                   and _parse_iso_utc(e["timestamp"]) >= cutover_dt]
+
+    if not eligible:
+        return {"mode": "checkpoint", "dry_run": dry_run,
+                "session_id": session_id,
+                "action": "no_new_messages", "created": False}
+
+    rowids = [e["metadata"]["raw_message_id"] for e in eligible]
+    first_id, last_id = min(rowids), max(rowids)
+    content_hash = bridge_state.episode_content_hash(_episode_hash_events(eligible))
+    episode_seq = (cursor["last_episode_seq"] + 1) if cursor else 1
+    session_source = export["session"]["session_source"] or "unknown"
+    reason = f"bridge checkpoint（manual）：boundary=[{first_id}..{last_id}]"
+
+    result = {"mode": "checkpoint", "dry_run": dry_run, "session_id": session_id,
+              "action": "create_episode",
+              "first_message_id": first_id, "last_message_id": last_id,
+              "episode_seq": episode_seq,
+              "event_id": bridge_state.episode_event_id(session_id, first_id, last_id),
+              "created": False}
+    if not dry_run:
+        created = bridge_state.create_episode(
+            session_id=session_id,
+            source_profile=source_profile,
+            session_source=session_source,
+            episode_seq=episode_seq,
+            capture_trigger="manual",
+            first_message_id=first_id,
+            last_message_id=last_id,
+            source_content_hash=content_hash,
+            decision_reason=reason,
+            seen_at=seen_at,
+            db_path=bridge_db,
+        )
+        result["event_id"] = created["row"]["event_id"]
+        result["created"] = created["created"]
+    return result
 
 
 # ---------- reconcile ----------
@@ -484,7 +852,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--state-db", default=None,
         help="Hermes state.db 路徑（預設自動偵測；一律 snapshot 讀 temp 副本）")
     p_scan.add_argument("--source-profile", default="default",
-                        help="來源 Hermes profile（本階段只支援主 db，預設 default）")
+                        help="來源 Hermes profile（本階段只支援主 db，預設 default；"
+                             "episodes.enabled=true 時非 default 會 fail loud）")
+    p_scan.add_argument(
+        "--inbox", default=str(DEFAULT_INBOX_DIR),
+        help=f"inbox 目錄（預設 {DEFAULT_INBOX_DIR}；episode 偵測的 cursor 遺失"
+             "防護用來探測既有落地檔，矩陣 #8）")
 
     p_rec = sub.add_parser(
         "reconcile", help="掃 inbox 本層＋.processed/＋.failed/ 回填既有狀態")
@@ -494,6 +867,24 @@ def _build_parser() -> argparse.ArgumentParser:
                        help=f"inbox 目錄（預設 {DEFAULT_INBOX_DIR}）")
     p_rec.add_argument("--source-profile", default="default",
                        help="回填新記錄時使用的 source_profile（預設 default）")
+
+    p_ckpt = sub.add_parser(
+        "checkpoint",
+        help="manual trigger：對單一 session 立即切一刀（trigger=manual，"
+             "無視門檻），不觸發 importer")
+    p_ckpt.add_argument("session_id")
+    p_ckpt.add_argument("--dry-run", action="store_true",
+                        help="只印出將執行的動作，零寫入")
+    p_ckpt.add_argument(
+        "--state-db", default=None,
+        help="Hermes state.db 路徑（預設自動偵測；一律 snapshot 讀 temp 副本）")
+    p_ckpt.add_argument(
+        "--config", default=None, metavar="PATH",
+        help=f"bridge 設定檔路徑（預設 {DEFAULT_BRIDGE_CONFIG}；session 無 cursor "
+             "時需要 episodes.episode_cutover 決定擷取起點，缺失 fail loud）")
+    p_ckpt.add_argument(
+        "--inbox", default=str(DEFAULT_INBOX_DIR),
+        help=f"inbox 目錄（預設 {DEFAULT_INBOX_DIR}；cursor 遺失防護探測用）")
     return parser
 
 
@@ -502,14 +893,19 @@ def _print_result(result: dict):
     if result["mode"] == "scan":
         bound = result["effective_since"] or "（無下界，明確全掃）"
         print(f"{prefix}scan 範圍下界：{bound}｜來源：{result['since_source']}")
+        print(f"{prefix}episode 偵測：{'啟用' if result['episodes_enabled'] else '關閉'}"
+              f"（episodes.enabled，動作 {result['episode_actions']} 筆）")
     for action in result["actions"]:
-        target = action.get("event_id") or action.get("path")
+        target = (action.get("event_id") or action.get("path")
+                  or action.get("session_id"))
         extra = ""
         if action.get("import_status"):
             extra += f"（既有狀態 {action['import_status']} 不變）"
         if action.get("basis"):
             extra += f"｜依據：{action['basis']}"
-        print(f"{prefix}{action['action']:<20} {target}{extra}")
+        if action.get("trigger"):
+            extra += f"｜trigger={action['trigger']}"
+        print(f"{prefix}{action['action']:<28} {target}{extra}")
     if not result["actions"]:
         print(f"{prefix}(沒有需要處理的項目)")
     tail = "（dry-run，未寫入任何檔案）" if result["dry_run"] else ""
@@ -530,6 +926,32 @@ def _print_result(result: dict):
               f"動作 {len(result['actions'])} 筆{tail}")
 
 
+def _print_checkpoint_result(result: dict) -> int:
+    """checkpoint 結果印出＋決定 exit code：
+    - create_episode：成功切刀（或 dry-run 預覽），exit 0。
+    - no_new_messages：eligible 為空，明確回報「不切」，exit 0（非錯誤）。
+    - cursor_missing_needs_reconcile：矩陣 #8 的拒切防護，印到 stderr，exit 1
+      （manual 呼叫端明確要求對這個 session 動作，防護擋下時應可從 exit code
+      辨別「沒做到」，不是靜默假裝成功）。
+    """
+    prefix = "[dry-run] " if result["dry_run"] else ""
+    sid = result["session_id"]
+    if result["action"] == "no_new_messages":
+        print(f"{prefix}checkpoint {sid}：無新訊息、不切（exit 0，非錯誤）")
+        return 0
+    if result["action"] == "cursor_missing_needs_reconcile":
+        print(f"checkpoint {sid}：cursor 缺失但已有 episode 落地檔——"
+              "請先跑 reconcile（拒切，矩陣 #8）", file=sys.stderr)
+        return 1
+    print(f"{prefix}checkpoint {sid}：{result['action']}｜"
+          f"event_id={result['event_id']}｜"
+          f"boundary=[{result['first_message_id']}..{result['last_message_id']}]"
+          f"｜episode_seq={result['episode_seq']}"
+          + ("（dry-run，未寫入任何檔案）" if result["dry_run"] else
+             f"｜created={result['created']}"))
+    return 0
+
+
 def _cli(argv=None) -> int:
     # Windows console 預設 cp950——比照 adapter，stdout/stderr 強制 UTF-8
     if hasattr(sys.stdout, "reconfigure"):
@@ -548,14 +970,24 @@ def _cli(argv=None) -> int:
                           dry_run=args.dry_run, state_db=args.state_db,
                           bridge_db=bridge_db,
                           source_profile=args.source_profile,
-                          config_path=config_path)
-        else:
+                          config_path=config_path,
+                          inbox_dir=Path(args.inbox))
+        elif args.cmd == "reconcile":
             result = reconcile(inbox_dir=Path(args.inbox), dry_run=args.dry_run,
                                bridge_db=bridge_db,
                                source_profile=args.source_profile)
+        else:  # checkpoint
+            config_path = (Path(args.config) if args.config
+                           else DEFAULT_BRIDGE_CONFIG)
+            result = checkpoint(args.session_id, dry_run=args.dry_run,
+                               state_db=args.state_db, bridge_db=bridge_db,
+                               config_path=config_path,
+                               inbox_dir=Path(args.inbox))
     except (ValueError, FileNotFoundError, HermesSessionReadError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
+    if args.cmd == "checkpoint":
+        return _print_checkpoint_result(result)
     _print_result(result)
     return 0
 
