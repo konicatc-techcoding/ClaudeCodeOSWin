@@ -53,6 +53,10 @@ Idempotency（同一 session 重跑不產生重複檔）：
   usefulness/sensitivity 一律是 pending——adapter 不做內容判斷與敏感偵測，
   那是落地後呼叫端／consolidation 的責任。
 
+Stage 2.4d-2：`list_session_activity()` 提供每個 session 的 max(rowid)／
+max(timestamp)（active=1 訊息）輕量查詢，供 bridge_scanner 的 episode
+偵測用（不 export 訊息內容，見該方法 docstring 與提案 §5.3）。
+
 CLI 用法（手動測試/操作用；Windows 用 `py -3.11`，WSL 用 python3；
 `--db`/`--snapshot` 是全域 flag，要放在子指令前面）：
     python3 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] list [--source telegram]
@@ -462,6 +466,39 @@ class HermesSessionAdapter:
             "content": content,
             "metadata": metadata,
         }
+
+    def list_session_activity(self) -> dict[str, dict]:
+        """輕量查詢：每個 session 目前的 max(rowid)、max(timestamp)（active=1
+        訊息），**不 export 訊息內容**（Stage 2.4d-2，bridge_scanner episode
+        偵測用；提案 §5.3：既有 scan watermark 過濾的是 ended_at，不能沿用
+        到 episode 偵測——inactivity trigger 恰恰在「最近沒有活動」時才成立，
+        若用「活動時間 >= watermark」過濾會系統性漏切。這個方法讓呼叫端改用
+        episode_cutover 底線＋逐 session cursor 比對，不延伸 watermark 進
+        episode 語義）。
+
+        read-only：走既有 _connect() 入口（mode=ro＋query_only），是否
+        snapshot 由呼叫端建構 adapter 時決定，本方法不另開連線邏輯。
+
+        回傳 {session_id: {"max_rowid": int, "max_timestamp": ISO字串或None}}；
+        沒有任何 active 訊息的 session 不會出現在結果裡（無從判斷活動時間，
+        呼叫端應視為「無法切刀」）。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT session_id, MAX(id) AS max_rowid, "
+                "MAX(timestamp) AS max_timestamp FROM messages "
+                "WHERE active = 1 GROUP BY session_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        result: dict[str, dict] = {}
+        for row in rows:
+            result[str(row["session_id"])] = {
+                "max_rowid": row["max_rowid"],
+                "max_timestamp": _epoch_to_iso(row["max_timestamp"]),
+            }
+        return result
 
     def export_session(self, session_id: str, include_inactive: bool = False) -> dict:
         """單一 session 的完整 normalized 匯出：{session, events}。"""
