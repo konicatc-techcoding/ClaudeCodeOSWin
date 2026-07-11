@@ -402,8 +402,34 @@ episode 狀態打架（例如「session 整體算 imported 嗎」這種無法定
 
 Hermes 側後續變化（訊息被 compact、active 翻轉）不追溯已落地的 episode
 ——inbox 檔是 capture checkpoint 的快照，本來就不承諾與來源同步。
+「切刀時看到的內容」與「匯入時讀到的內容」之間的漂移由 §4.5 的
+完整性檢查偵測。
 
----
+### 4.5 內容完整性檢查：`source_content_hash`（blocker 修訂）
+
+scanner 與 importer 各自開 snapshot、時間點不同——boundary（rowid 範圍）
+固定不代表**內容**不變（Hermes compaction／active 翻轉／內容改寫都可能
+發生在兩次讀取之間）。設計：
+
+- **scanner 切刀時**：`create_episode()` 由**同一個 scan snapshot** 對
+  boundary 內容計算雜湊存入 `source_content_hash`。定義：對 eligible
+  events（`active=1`、rowid ∈ [first..last]、依 rowid 升冪）的
+  normalized 欄位（rowid、role、type、content、tool_calls 原始值、
+  timestamp）做固定鍵序 JSON 序列化後 SHA-256——確定性、與 render
+  格式解耦（render 改版不會假性 mismatch）。
+- **importer 匯入時**：對自己的 snapshot 以同一純函式**重算**，先於
+  敏感偵測比對（流程順序：export → **hash 驗證** → 敏感偵測 → 4.2 排除
+  → 落地；完整性是其他判定的前提——內容都不對了，判定與落地都不該做）。
+- **不一致 → `needs_review`**：decision_reason 記
+  `integrity:content_hash_mismatch`＋可能原因（state.db 內容被 compaction
+  ／修改、或兩次讀取窗口不一致），**不記任何內容**（沿用只記標籤的硬
+  約束）；不落地、cursor 不回退（boundary immutable 語義不變）、不進
+  自動重試（內容漂移不是暫時性錯誤，重試只會反覆 mismatch——與 failed
+  的 retry 路徑明確區分）。人工處置走互動式路徑。
+- **狀態機影響**：§3.1 轉換表新增一列——「hash 不一致（完整性檢查）→
+  `needs_review`」；其餘狀態與轉換不變。reconcile 回填的 episode 列
+  hash 為 NULL（無法自檔案還原，§3.2），importer 對 hash 為 NULL 的列
+  跳過比對（回填列本來就已落地或已判定，不再進匯入流程）。
 
 ## 5. Cutover／防湧入（提案七項之五）
 
@@ -423,16 +449,16 @@ eligible 為空 → 不切 episode（episode 永不為空）
 
 **pre-cutover 訊息永遠不自動擷取**——這是絕對底線，與掃描層 cutover
 同一哲學：即使 bridge_cursors／bridge_state.db 整個刪掉重建，自動管線
-也絕不越過 episode_cutover 往前擷取。人工 reconcile／`adapter.py to-inbox`
-補匯（互動式路徑）不受此限，維持既有例外。
+也絕不越過 episode_cutover 往前擷取（注意：cutover 底線只保證「不往前」；
+重建後「不重複」的保證來自 §3.2 recovery，兩者缺一不可）。人工 reconcile
+／`adapter.py to-inbox` 補匯（互動式路徑）不受此限，維持既有例外。
 
-**episode_cutover 建議值＝2.4d 部署日**（而非沿用掃描層 cutover
-2026-07-10）：若沿用 07-10，部署當下所有 07-10 之後活躍過的長壽 session
-會在第一次 episode scan 同時切出第一刀——雖然每刀只含 post-cutover
-訊息、不算「歷史湧入」，但仍是一次性批量。設為部署日則首日行為是
-「從今天開始的新訊息才進管線」，最保守、最可預期。兩值分開也讓
-「掃描層歷史底線」與「episode 擷取底線」語義不互相綁架。（若使用者
-偏好含 07-10 起的訊息，改一個 config 值即可，機制不變——此為待拍板點。）
+**episode_cutover ＝ 2.4d 部署啟用的精確 UTC 時刻（已拍板，§0.1）**：
+2.4d-4 翻 `episodes.enabled: true` 之前，取當下實際時間戳寫入 config——
+是**時刻**不是日期概念值（不取當日 00:00）。效果：啟用前的一切訊息
+（含掃描層 cutover 07-10 以來的積累）都不自動擷取，首日行為是「從啟用
+那一刻起的新訊息才進管線」，零一次性批量、完全可預期。「掃描層歷史
+底線」（07-10）與「episode 擷取底線」語義自此分開，不互相綁架。
 
 ### 5.2 44 個歷史 session 在新判準下的行為推演
 
@@ -470,8 +496,8 @@ max(rowid)、max(timestamp)，read-only、snapshot 模式照舊），避免為�
 | `manual` | 人工執行 checkpoint 指令 | 立即切刀，無視門檻（例如「這段討論很重要，現在就擷取」） |
 
 - 參數位置：`hermes/config/bridge.yaml` 的 `episodes.inactivity_hours`
-  （建議 72——比「過幾天拿出來繼續用」的節奏保守；切早了也無資料損失，
-  只是同一主題分成兩個 episode，consolidation 會再整併）。
+  （**已拍板 72**，§0.1——比「過幾天拿出來繼續用」的節奏保守；切早了也
+  無資料損失，只是同一主題分成兩個 episode，consolidation 會再整併）。
 - **與 session 復用的相容性（明文）**：inactivity 切刀後 session 又活過來
   ——已切的 episode immutable、內容與判定不變；新訊息累積、等下一次
   trigger 成為 episode N+1。**這正是 trigger 與擷取語義解耦的價值**：
@@ -505,9 +531,26 @@ frontmatter 是 additive 輔助資訊（memory-taxonomy §5 的既有定位）�
 唯一下游語義變化：「同 session_id 多個 inbox 檔」從異常變成合法，
 reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 
----
+### 6.1 Profile 邊界：本階段 default-only，fail-closed（blocker 修訂）
 
-## 7. 測試矩陣（提案七項之六）
+**本階段不做多 profile 支援**，但邊界必須 fail-closed 而非未定義：
+
+- `bridge_cursors` 主鍵是 `(source_profile, session_id)`（§1.2）——即使
+  未來兩個 profile 出現同名 session，cursor 也結構性不可能混用。
+- **scanner**：episode 偵測只在 `--source-profile default`（含預設值）下
+  執行；帶其他 profile 呼叫且 `episodes.enabled: true` 時 **fail loud
+  （exit 1）**，明示「episode capture 本階段僅支援 default profile」——
+  因為現行 event_id namespace 無 profile 段，非 default 的 episode 會
+  寫出與 default 無法區分的 event_id（namespace 污染），寧可拒跑。
+- **importer**：佇列中遇到 `source_profile != 'default'` 的 episode 列
+  （理論上不該存在，防禦性處理）→ 回報動作
+  `unsupported_profile_fail_closed`、**記錄並跳過**：不改狀態、不動
+  cursor、不落地——絕不默默用 default 的 cursor 或混寫 namespace。
+- **reconcile**：cursor 重建（§3.2）寫入的 key 帶 source_profile；對非
+  default 來源的檔案（未來才可能出現）同樣記錄並跳過。
+- **未來擴充路徑已預留**（§2）：`hermes/<profile>:<sid>:<first>..<last>`
+  ——屆時只需啟用新 namespace＋放行檢查，不需要 migration 既有
+  default 資料（裸 `hermes:` 恆等於 default，向後相容）。
 
 | # | 測試 | 驗證點 |
 |---|---|---|
@@ -518,12 +561,12 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 | 5 | 敏感／乾淨 episode 混合 | ep1 敏感 → needs_review、不落地、只記類別標籤；ep2 乾淨 → 獨立放行落地 to_inbox；ep1 判定不變 |
 | 6 | 敏感 episode 的 cursor 不回收 | ep1 needs_review 後 cursor 仍在 ep1.last；ep2 不含 ep1 訊息 |
 | 7 | pre-cutover 不湧入 | 造 44-session 情境（ended_at=None、訊息全在 episode_cutover 前）→ scan 零 episode；cutover 前後訊息混合的 session → episode 只含 cutover 後訊息 |
-| 8 | cursor 表刪除重建 | 刪 bridge_cursors 後重掃：退回 episode_cutover 底線，event_id 去重擋住重複落地（already-imported 路徑） |
+| 8 | cursor 遺失的 fail-closed 防護 | 刪 bridge_cursors 後直接 scan：對「已有 `_ep` 落地檔」的 session **拒切並回報請先 reconcile**（不切出重疊 boundary）；對從無落地檔的 session 依 episode_cutover 正常首切 |
 | 9 | inbox 檔名 deterministic | 同一 episode 任何時間重跑 → 同一檔名；檔名可由 boundary 純函式重算；不含匯入時間 |
 | 10 | 重跑冪等（scanner 層） | 同窗口重掃：既有 episode 列只 touch_last_seen，狀態／decision_reason 不變；不重複 create_episode |
 | 11 | 重跑冪等（importer 層） | 已 to_inbox 的 episode 重進佇列 → InboxAlreadyImportedError 路徑、DB 不動；episode needle 精確到 boundary |
 | 12 | legacy 檔不誤擋 episode | inbox 有 `hermes_session_<sid>.md`（legacy）時，`<sid>_ep..` 的新 episode 仍可落地；反向亦然 |
-| 13 | migration 冪等 | 對 2.4c 版 db（17 欄＋3 筆模擬記錄）跑 migrate 兩次：欄位補齊、legacy 回填 `capture_trigger='legacy'`、imported 筆 cursor 種子正確、第二次 no-op |
+| 13 | migration 冪等 | 對 2.4c 版 db（17 欄＋3 筆模擬記錄）跑 migrate 兩次：5 個新欄補齊、legacy 回填 `capture_trigger='legacy'`（boundary／hash 欄維持 NULL）、imported 筆 cursor 種子正確、第二次 no-op |
 | 14 | migration 後舊 API 不回歸 | 既有 bridge_state 全套測試對 migrate 後 db 全綠（legacy 列語義不變） |
 | 15 | trigger：ended | ended_at 設定即切（不等 inactivity）；ended 但無新訊息 → 不切空 episode |
 | 16 | trigger：inactivity | 未達 inactivity_hours 不切；達門檻切；ended_at NULL 前提 |
