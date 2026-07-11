@@ -137,24 +137,49 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > 全 active、無 failed。**管線現況：偵測→discovered 全自動；discovered→inbox 為
 > 下一階段（2.4c）**。
 >
-> **Stage 2.4c ✅ 實作完成（2026-07-10；部署驗證待互動 session）**：bridge importer
-> （`hermes/bridge_importer.py`，`import [--dry-run] [--limit N]`）——discovered→
-> 政策判定→inbox 落地：敏感 fail-closed（pattern 由 consolidation_policy.yaml
-> `guardrails.sensitive.detection` 載入、對完整內容判定、只記類別標籤絕不記命中
-> 原文）→ needs_review；4.2 結構性排除（test/too_short）→ skipped；錯誤 → failed
-> （重試上限 `bridge.yaml max_import_retries=3`，達上限轉 needs_review）；通過者
-> 先落地檔案再記 to_inbox，DB 更新失敗／檔案已存在由 reconcile 回填（實測走通）。
-> 狀態對應表見 memory-bridge-state.md §3.1。25 tests 全綠、既有全套零回歸。
+> **Stage 2.4c ✅ 程式部署完成、敏感路徑已驗證（2026-07-10 實作；部署與敏感阻擋
+> 驗證已完成）**：bridge importer（`hermes/bridge_importer.py`，
+> `import [--dry-run] [--limit N]`）——discovered→政策判定→inbox 落地：敏感
+> fail-closed（pattern 由 consolidation_policy.yaml `guardrails.sensitive.detection`
+> 載入、對完整內容判定、只記類別標籤絕不記命中原文）→ needs_review；4.2 結構性
+> 排除（test/too_short）→ skipped；錯誤 → failed（重試上限
+> `bridge.yaml max_import_retries=3`，達上限轉 needs_review）；通過者先落地檔案
+> 再記 to_inbox，DB 更新失敗／檔案已存在由 reconcile 回填（實測走通）。狀態對應表
+> 見 memory-bridge-state.md §3.1。25 tests 全綠、既有全套零回歸。程式已下發部署
+> 側並實地跑過敏感阻擋路徑（fail-closed 行為與設計相符，未落地敏感內容）。
 > **尚未 enqueue、尚未 headless CoS、尚未 importer timer**——那是後續階段。
+> DoD 1「在 Windows Hermes 正常運行時仍能運作」的完整 Desktop end-to-end 驗證
+> **不再獨立列為 2.4c 未完項**，併入 2.4d-4 的部署 rollout 驗證一起做（見下方
+> 2.4d 節與 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
+> 第 8.1 節 migration runbook）。
 >
 > （2026-07-09 舊註，保留脈絡：去重狀態的記錄格式已先行定稿——
 > `claudecodeos.bridge_state.v1`，[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)；
 > capability → 執行通道的對應已有 registry 層定義（[capability-lanes.md](capability-lanes.md)），
 > bridge state 的 `selected_capability_lane` 欄位引用其 lane id。bridge 本身仍未實作。）
+>
+> **Stage 2.4d — Episode Capture（2026-07-11 起，設計已核准，見
+> [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)）**：
+> 實測發現 Desktop／TUI 的 `ended_at` 結構性不可靠——64 個既有 session 只有 20
+> 個有 `ended_at` 值（**Desktop 0/2、TUI 8/46**），且這個比例不會隨時間補上（多數
+> session 是「可長期復用的上下文容器」，本來就不會被「結束」）。原本以「`ended_at`
+> 已設＝完結」為匯入判準的 Stage 2 設計，因此**結構性漏掉大部分 session**——
+> Stage 2 的匯入單位改為 **episode／capture checkpoint**（同一 session 可切出多個
+> immutable episode），**不再是整個 session**。schema 隨之升級為
+> `claudecodeos.bridge_state.v2`（`bridge_sessions` 22 欄＋新表 `bridge_cursors`，
+> 見 [memory-bridge-state.md](memory-bridge-state.md)）。
+> **2.4d-1（schema＋repository）已完成**（`registry/bridge_state_schema.yaml`
+> v2、`hermes/bridge_state.py` 的 `create_episode`／`migrate` CLI／content hash
+> 純函式，測試矩陣全綠）——**但尚未部署**：部署側 `bridge_state.db` 尚未跑
+> `migrate`、`hermes/config/bridge.yaml` 尚未加入 `episodes` 區塊，部署是
+> 2.4d-4 的工作（migration runbook 見提案第 8.1 節）。2.4d-2（scanner episode
+> 偵測）／2.4d-3（importer episode 化＋recovery）尚未開始。
 
-**目標**：新增一個 cron 觸發的 bridge（模式同 `hermes/adapters/hermes_bridge.py` 的 skills
-同步）：定期偵測 Hermes **新完結**的 session（`ended_at` 已設），`export_session()` 後
-`enqueue()` 給 headless CoS，由 CoS 依匯入政策（memory-taxonomy 4.2／4.3）決定要不要寫
+**目標（原始設計，2026-07-07 定稿；匯入單位已由上方 2.4d 更新為 episode／capture
+checkpoint，`ended_at` 不再是唯一判準——本段保留作歷史脈絡）**：新增一個 cron 觸發
+的 bridge（模式同 `hermes/adapters/hermes_bridge.py` 的 skills 同步）：定期偵測
+Hermes **新完結**的 session（`ended_at` 已設），`export_session()` 後 `enqueue()`
+給 headless CoS，由 CoS 依匯入政策（memory-taxonomy 4.2／4.3）決定要不要寫
 inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由既有的 `daily-memory-check`
 整併路徑收尾。
 

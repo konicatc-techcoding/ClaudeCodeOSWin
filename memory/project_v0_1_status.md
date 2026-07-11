@@ -39,7 +39,38 @@ Model Router 改成 capability-based：`registry/agents.yaml` 每個領域新增
 
 **2026-07-10（Stage 2.4a/2.4b 完成：cutover 設定化＋scanner 排程上線）**：2.4a——cutover 底線進 `hermes/config/bridge.yaml`（fail loud 絕不默認全掃），watermark 進 bridge_state.db `bridge_meta`（只前進不後退、dry-run 不推進、失敗不推進；上界＝snapshot 前時間戳，窗口寧可重疊不跳漏）；無參數 scan＝安全預設 max(cutover, watermark) 並標示來源。2.4b——`hermes-bridge-scanner.timer` 每日 08:05 CST（落在 08:00 memory-check 與 08:10 skill-sync 之間），oneshot 無 Restart，守門測試鎖定「排程一律無參數 scan」；部署側五項完成標準全過後才 enable，timer 已上線。**管線現況：偵測→discovered 全自動；discovered→inbox（政策判定＋敏感偵測器）為下一階段 2.4c，是整條管線唯一涉及內容判斷的環節。**
 
+**2026-07-10（Stage 2.4c 完成：bridge importer 實作＋部署＋敏感阻擋實地驗證通過）**：
+`hermes/bridge_importer.py`（discovered→政策判定→inbox 落地）完成，25 tests 全綠、
+既有全套零回歸；程式已下發部署側，敏感 fail-closed 路徑已實地跑過驗證（命中敏感內容
+時正確轉 `needs_review`、不落地、decision_reason 只記類別標籤）。**管線現況：
+偵測→discovered→inbox 落地全部可動；尚未 enqueue、尚未接 headless CoS、尚未裝
+importer 排程**（人工 CLI 執行，維持 2.4c 既有邊界）。
+
+**2026-07-11／12（Stage 2.4d-1 完成：episode capture schema v2＋repository 層；
+schema 已完成但尚未部署）**：實測發現 Desktop／TUI 的 `ended_at` 結構性不可靠
+（64 個既有 session 只有 20 個有值，Desktop 0/2、TUI 8/46），Stage 2 匯入單位改為
+episode／capture checkpoint（同一 session 可切多個 immutable episode），設計見
+docs/stage2.4d-episode-capture-proposal.md（已核准）。`registry/bridge_state_schema.yaml`
+升級為 v2（`bridge_sessions` 17→22 欄＋新表 `bridge_cursors`）；`hermes/bridge_state.py`
+加上 `create_episode`（原子＋UNIQUE conflict 冪等）、`migrate` CLI、content hash 純函式；
+`hermes/session_adapter/adapter.py` snapshot 一致性補強（fingerprint＋retry＋
+`quick_check`）；archived trigger 契約已用真實 Desktop session 實地驗證（Archive
+0→1 持久、`ended_at`／內容不變）。**2.4d-1 已完成並已 commit，但尚未部署**——
+部署側 `bridge_state.db` 尚未跑 `migrate`、`bridge.yaml` 尚未加 `episodes` 區塊；
+2.4d-2（scanner episode 偵測）／2.4d-3（importer episode 化）／2.4d-4（部署
+migration）尚未開始。
+
+**WSL 開發環境現況（2026-07-12 釐清，避免與 scanner timer 的 Persistent catch-up
+行為混淆）**：目前 WSL 側是 **on-demand**——互動 session 手動用 `wsl.exe` 呼叫、
+用完不常駐；不是 always-on production 環境。這與 `hermes-bridge-scanner.timer`
+的 `Persistent=true` 行為要分開理解：timer 排程本身已部署為系統 systemd 常駐
+timer（見 hermes/systemd/），但 **WSL distro 本身不是持續開機的**——distro 睡眠
+期間排定的觸發時刻會被跳過，等下次有人手動喚醒 WSL（例如開一個互動 session）時，
+systemd 的 `Persistent=true` 才會觸發 catch-up 補跑一次錯過的排程。因此「timer
+已 enable、每天 08:05 觸發」不代表這台機器天天都有人在 08:05 那個時間點真的
+跑過 scan——多數情況下是之後某次手動喚醒 WSL 時補跑的。
+
 尚未動工：
 - Model Router 的 MCP server 版本（目前 script adapter 夠用）
 - Dashboard 要不要開放 Telegram 以外的投遞管道
-- Stage 2.4c：discovered → inbox（政策判定 headless fail-closed、敏感偵測器實作、to-inbox／enqueue 串接）
+- Stage 2.4d-2／2.4d-3／2.4d-4：episode capture 的 scanner／importer 實作與部署 migration
