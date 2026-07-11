@@ -132,11 +132,27 @@ python3 hermes/session_adapter/tests/test_adapter.py        # WSL/macOS
 fixtures 在 `tests/fixtures/seed_state_db.sql`（schema 抄自真實 state.db），每個測試
 在 temp 目錄建假 db，不碰真實 Hermes 資料。
 
+## `ended_at` 不是 Desktop/TUI session 完結的可靠訊號（2026-07-11 實測發現）
+
+`sessions.ended_at` **不是**「這個 session 已經結束」的唯一或可靠訊號——實測
+64 個既有 session 只有 20 個有 `ended_at` 值（**Desktop 0/2、TUI 8/46**）。
+Desktop／TUI session 多半是可長期復用的上下文容器，本來就不會被明確「結束」，
+這個比例不會隨時間自然補上。Stage 2 bridge 因此改以 **episode／capture
+checkpoint**（而非整個 session、也不是單靠 `ended_at`）作為匯入單位，
+`ended_at`／閒置門檻／使用者手動 archive 都只是「該不該切一刀」的 trigger 之一，
+與「session 是否完結」解耦。細節見
+[docs/stage2.4d-episode-capture-proposal.md](../../docs/stage2.4d-episode-capture-proposal.md)
+（已核准設計）；本 adapter 本身不變——`ended_at` 仍是 normalized schema
+（`claudecodeos.session.v1`）的既有欄位，只是呼叫端不該把它當成唯一判準。
+
 ## 整合點（都是「未來由呼叫端新增」，本模組不改任何既有檔案）
 
 - **hermes_bridge.py 同型的橋接**：新增一個 cron 觸發的 bridge（模式同
   `hermes/adapters/hermes_bridge.py` 的 skills 同步），定期比對 Hermes 新完結的
   session，`export_session()` 後 `enqueue()` 給 headless CoS 決定要不要寫 inbox。
+  **現況（2026-07-11 起）**：已實作為 `hermes/bridge_scanner.py`／
+  `hermes/bridge_importer.py`，且匯入單位已改為 episode／capture checkpoint
+  （見上方 `ended_at` 說明），不是原本設想的「整個 session」。
 - **knowledge subagent**：整併記憶時可直接呼叫 `to-inbox` CLI 把指定 session 落地成
   inbox 檔案，再走 consolidate-memory。
 - **dashboard**：`dashboard/data.py` 同樣是 `mode=ro` 讀 SQLite 的模式，未來可以用

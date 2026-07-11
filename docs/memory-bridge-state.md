@@ -1,20 +1,27 @@
-# Memory Bridge State — Stage 2 session bridge 的處理狀態記錄（定義，不實作）
+# Memory Bridge State — Stage 2 session bridge 的處理狀態記錄
 
-日期：2026-07-09　狀態：**格式定稿（v1，2026-07-10 對齊修訂，17 欄）／儲存載體已拍板（2026-07-10）／實作待 Stage 2**
+日期：2026-07-09　狀態：**格式 v2（2026-07-11 升版，22 欄＋`bridge_cursors`）／
+儲存載體已拍板（2026-07-10）／repository 層（2.4d-1）已實作＝已完成、但尚未部署**
 負責領域：`engineering`
 
-這份文件定義未來 Stage 2 session bridge（[hermes-integration-roadmap.md](hermes-integration-roadmap.md)
-Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes 新完結 session，
-要記下「處理到哪、判定成什麼、為什麼」，用於**去重（idempotent）**與**可追蹤性**。
-機器可讀的 schema 正本在 [`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)
-（`claudecodeos.bridge_state.v1`）。
+這份文件定義 Stage 2 session bridge（[hermes-integration-roadmap.md](hermes-integration-roadmap.md)
+Stage 2）的「處理狀態記錄」格式：bridge 每偵測到一個 Hermes 匯入單位（episode 或
+legacy session-level 記錄），要記下「處理到哪、判定成什麼、為什麼」，用於
+**去重（idempotent）**與**可追蹤性**。機器可讀的 schema 正本在
+[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)
+（`claudecodeos.bridge_state.v2`）。Episode capture 完整設計見
+[stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
+（已核准，規格正本）；本文件第 8 節只記與 v1 的差異摘要與交叉引用，細節不重複維護。
 
-**本文件只定義格式，不實作 bridge、不安裝排程**——那是 Stage 2 的工作。
+**本文件定義格式並記錄 repository 層現況；scanner／importer 的 episode 化與部署
+migration（2.4d-2/3/4）尚未實作**，見第 8 節與 roadmap Stage 2.4d。
 
 > **決策更新（2026-07-10，使用者拍板）**：儲存載體定案為**獨立 SQLite
 > `hermes/state/bridge_state.db`**（第 4 節）。拍板時的最少欄位清單與 schema v1
 > 原 13 欄有出入——**對齊已於同日完成**（Stage 2 實作第一步）：v1 in-place 修訂
-> 為 17 欄（marker 不變），對照表與定案結果見第 6 節。
+> 為 17 欄（marker 不變），對照表與定案結果見第 6 節。**2026-07-11 起 v1 → v2**
+> （第 8 節）：22 欄＋新表 `bridge_cursors`，因為部署側已有存量資料與活的寫入者，
+> in-place 修訂的前提不再成立（詳見 schema yaml 檔頭修訂記錄）。
 
 ## 1. 明確聲明（硬邊界，全部沿用既有規則）
 
@@ -215,3 +222,83 @@ watermark）。窗口重疊無害：`event_id` 去重＋touch-only 語義保證�
 state——db 整個刪掉重建後 watermark 消失，scanner 退回 cutover 底線重掃
 （重掃範圍變大但絕不越過 cutover），event_id 去重保證重掃無害。檢視指令：
 `python3 hermes/bridge_state.py watermark [--db-path PATH]`。
+
+## 8. Stage 2.4d（2026-07-11／12）：schema v2、episode 三層 namespace、content hash、recovery
+
+**本節只記與本文件既有內容（v1／17 欄）的差異摘要**——完整設計（欄位取捨分析、
+狀態機、trigger 語義、測試矩陣）正本在
+[stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
+（已核准，不重複維護第二份）。**目前只完成 schema 與 repository 層（2.4d-1）；
+scanner／importer 的 episode 化與部署 migration（2.4d-2/3/4）尚未實作**。
+
+### 8.1 schema v1 → v2：22 欄 ＋ `bridge_cursors`
+
+`bridge_sessions` 由 17 欄增至 **22 欄**（新增 `episode_seq`、`capture_trigger`、
+`first_message_id`、`last_message_id`、`source_content_hash`，全部 optional——
+legacy 列全 NULL，episode 列的條件必填由 repository `create_episode()` 驗證）。
+新增小表 **`bridge_cursors`**：per-session 游標，**複合主鍵
+`(source_profile, session_id)`**——不同 profile 的同名 session 絕不共用 cursor；
+只有 `last_captured_message_id`（只前進不後退）與 `last_episode_seq`，**沒有
+`import_status`**，不是狀態機（第 4 節既有的「session 層級不設狀態機」立場延伸
+到 episode capture）。欄位完整定義見
+[`registry/bridge_state_schema.yaml`](../registry/bridge_state_schema.yaml)（marker
+`claudecodeos.bridge_state.v2`）。
+
+### 8.2 `event_id` 三層 namespace
+
+`event_id` 的 `UNIQUE` 去重骨幹不變，但現在機械可區分三層：
+
+| 層級 | 格式 | 用途 |
+|---|---|---|
+| session（legacy） | `hermes:<sid>` | pre-2.4d 部署側既有 3 筆記錄，原樣保留、不再新增 |
+| 訊息 | `hermes:<sid>:<rowid>` | `claudecodeos.event.v1` 既有慣例 |
+| episode | `hermes:<sid>:<first>..<last>` | 2.4d 起匯入單位的去重 key；boundary 為穩定值（cursor 只前進、first/last 於 `create_episode` 當下固定、之後 immutable） |
+
+區分規則：含 `..` ＝ episode；含 `:` 但無 `..` 且冒號後是整數 ＝ 訊息；其餘 ＝
+session 層級。未來 profile namespace（`hermes/<profile>:...`）現在定案、本階段
+**不啟用**——任何元件讀到 `hermes/` 開頭的 event_id 一律 fail-closed 拒絕處理。
+
+### 8.3 內容雜湊機制（`source_content_hash`）
+
+scanner 切刀時由**同一個 scan snapshot** 對 boundary 內容（eligible events 的
+normalized 欄位，固定鍵序 JSON 序列化）計算 SHA-256；importer 匯入時以同一純
+函式重算比對，先於敏感偵測。不一致 → `needs_review`（`decision_reason` 只記
+`integrity:content_hash_mismatch` 標籤，不落地、cursor 不回退、不進自動重試）。
+偵測「切刀後、匯入前」的內容漂移（Hermes compaction／內容改寫等）；reconcile
+回填的 episode 列因無法自檔案還原內容，`source_content_hash` 可為 NULL，不影響
+去重。完整定義見提案 §4.5。
+
+### 8.4 Recovery 流程（db 重建後的 cursor 重建）——**必要前置，非可選**
+
+**明文強調（與提案 §3.2 同一條硬規則）：`bridge_state.db` 整個刪掉重建後，
+必須先跑一次 `bridge_scanner.py reconcile`（recovery 語義）成功完成，才能安全
+重新 scan。** 直接重建後就 scan 並不安全——cursor 消失後若直接從
+`episode_cutover` 重切，切出的 boundary 可能與歷史已落地的 episode **不同**
+（例如歷史已匯入 `100..120`，重建後累積新訊息可能切出 `100..130`），而
+`UNIQUE(event_id)` 與 episode 檔名查重都只擋**完全相同**的 boundary，擋不住
+不同 boundary 的重疊內容重複落地。
+
+Recovery 流程（整合進既有 `reconcile`，不是新工具，回填規則只該有一份實作）：
+
+1. reconcile 掃 `memory/inbox/` 本層＋`.processed/`＋`.failed/` 時，對每個帶
+   boundary 的 episode 檔（deterministic 檔名或 frontmatter `event_id_range`）
+   回填對應 episode 列（含 `first_message_id`／`last_message_id`；
+   `source_content_hash` 回填 NULL，不影響去重）。
+2. 對每個 `(source_profile, session_id)`，取其所有已落地 episode 檔的
+   `max(last_message_id)`，upsert 進 `bridge_cursors`（只前進不後退，對健康
+   db 重跑無害、天然冪等）。
+
+scanner 側另有 fail-closed 防護：episode 偵測遇到「該 session 無 cursor、但
+inbox 已存在該 sid 的 `_ep` 落地檔」時，**拒切**並回報「請先跑 reconcile」，
+不是直接切出可能重疊的 boundary。「切刀位置穩定 ⇔ session 尾端最後一次切刀
+有落地檔」的完整逐 case 推演（含「部分重建＋尾端無檔判定」的已知殘留情況）
+見提案 §3.2，本節不重複。
+
+### 8.5 部署現況
+
+**2.4d-1（schema＋repository）已完成並已 commit，但尚未部署**：部署側
+`bridge_state.db` 現有 3 筆既有記錄仍是 v1／17 欄語義下的內容，尚未執行
+`hermes/bridge_state.py migrate`；`hermes/config/bridge.yaml` 尚未新增
+`episodes` 區塊。部署順序（migration runbook）正本在
+[stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
+第 8.1 節，本文件不重複維護第二份順序。

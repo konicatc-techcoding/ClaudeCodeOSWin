@@ -125,10 +125,30 @@ hermes/systemd/install.sh hermes-rss            # 裝成每 30 分鐘檢查一�
 
 **驗證紀錄**（2026-07-04）：用真實的 `hnrss.org/frontpage` feed 跑過完整流程——第一次執行正確建立基準線（20 篇文章，沒有 enqueue 任何一筆）；手動移除一筆已讀紀錄模擬「新文章」，確認真的被偵測到、正確 enqueue、CoS 分派給 `intelligence`、產出真正的摘要。跟 Cron 一樣，另外裝了一個 `StartInterval:30` 的臨時 plist，觀察到 launchd 自動觸發 3 次（去重正確運作，沒有重複 enqueue），驗證完移除，正式改裝 `StartInterval:1800`（30 分鐘）的版本。
 
-### `config/`（尚未使用）
+### `config/`（已使用）
 
-規劃放 cron 排程設定、RSS 來源清單、bot token 等——這個目錄已加進 `.gitignore`，內容不會進版控。
+放 cron 排程設定（`cron_jobs.yaml`）、RSS 來源清單（`rss_feeds.yaml`）、bot token
+（`telegram.json`，gitignore，部署側自建）、以及 **`bridge.yaml`**（Stage 2 session
+bridge 的政策層設定：`cutover` 掃描底線、`max_import_retries`；非密鑰、進版控、
+隨部署同步下發，見 [docs/hermes-shared-storage-bootstrap.md](../docs/hermes-shared-storage-bootstrap.md)
+與 [docs/memory-bridge-state.md](../docs/memory-bridge-state.md) 第 7 節）。
+`config/` 整個目錄已加進 `.gitignore`（密鑰不進版控），但非密鑰檔案（`bridge.yaml`／
+`cron_jobs.yaml`／`rss_feeds.yaml`）另外個別加回版控。
 
-### `state/`（規劃中，尚未建立）
+### `state/`（已使用）
 
-Adapter 自己維護的執行狀態（Telegram 的 offset、RSS 的已讀 guid），跟 `config/`（使用者提供的設定）分開。
+Adapter／bridge 自己維護的 runtime 執行狀態，跟 `config/`（使用者提供的設定）分開；
+目錄本身在 `.gitignore`（也在部署同步排除清單），只存在於部署側，不進版控、不被同步。
+目前有：Telegram 的 offset（`telegram_offset.json`）、RSS 已讀 guid（`rss_seen.json`）、
+Hermes skills 雜湊快照（`hermes_skills_snapshot.json`），以及 **`bridge_state.db`**——
+Stage 2 session bridge 的處理狀態 SQLite（`hermes/bridge_state.py` 存取層，格式契約
+`registry/bridge_state_schema.yaml`）。
+
+`bridge_state.db` 現況：repository 層（`bridge_state.py`）與 scanner
+（`bridge_scanner.py`，`scan`／`reconcile` 子指令）、importer（`bridge_importer.py`，
+`import` 子指令）都已實作並下發部署側；`hermes-bridge-scanner.timer` 已排程常駐
+（每日 08:05，只跑 `scan`，見 `hermes/systemd/hermes-bridge-scanner.service`／
+`.timer`）；importer 目前只能人工 CLI 執行，尚未排程、尚未接 headless CoS。
+Episode capture（schema v2）已完成 schema／repository 層但**尚未部署**——細節見
+[docs/memory-bridge-state.md](../docs/memory-bridge-state.md) 與
+[docs/stage2.4d-episode-capture-proposal.md](../docs/stage2.4d-episode-capture-proposal.md)。

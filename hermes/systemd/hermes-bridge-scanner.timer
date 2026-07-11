@@ -8,6 +8,13 @@
 #
 # Persistent=true 與既有 timer 一致：WSL 睡過觸發時刻，喚醒後會 catch-up
 # 補跑一次（既知行為）。scan 冪等且 watermark 只前進，補跑安全。
+# 注意：目前 WSL 開發環境是 on-demand（互動 session 手動喚醒），不是
+# always-on production——多數情況下「每天 08:05 觸發」實際上是之後某次
+# 手動喚醒 WSL 時的 catch-up 補跑，不是固定時刻真的有人在跑。
+#
+# 現況（2026-07-12）：搭配的 hermes-bridge-scanner.service 目前仍是 legacy
+# ended_at scanner，episode capture（Stage 2.4d）尚未啟用（episodes.enabled
+# 尚不存在於 bridge.yaml）。
 
 [Unit]
 Description=Run hermes-bridge-scanner.service every day at 08:05

@@ -6,6 +6,8 @@
 > 下方 milestone 表裡的「launchd 常駐」是當時 macOS 環境的歷史記錄，原樣保留；
 > `hermes/launchd/` 目錄僅為 macOS legacy/reference，不再是 live runtime。
 > Windows 側的 bridge／Task Scheduler 排程是未來選項（Stage 2 設計決策），尚未實作。
+> Hermes 整合軌（Session Bridge／Episode Capture）的最新階段性狀態見
+> [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md)，本檔不重複追蹤該軌細節。
 
 ## 節奏
 

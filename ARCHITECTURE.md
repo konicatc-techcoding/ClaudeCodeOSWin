@@ -94,18 +94,48 @@ ClaudeCodeOS/
 │   └── route_model.py                 ← Model Router 的 script adapter
 ├── memory/
 │   ├── MEMORY.md
-│   └── inbox/                         ← 背景寫入區，只能新增檔案
+│   └── inbox/                         ← 背景寫入區，只能新增檔案（已有真實匯入內容，
+│                                          非永久空白；已整併者移入 inbox/.processed/）
 ├── hermes/
 │   ├── adapter/invoke_cos.sh          ← Hermes → CoS 呼叫（已實作）
 │   ├── sessions/                      ← thread_id → session_id（規劃中）
 │   ├── config/                        ← bot token / cron / rss 設定（gitignore）
-│   └── jobs.db                        ← SQLite job queue（規劃中，尚未建立）
+│   ├── state/                         ← runtime state（含 bridge_state.db，見下）
+│   └── jobs.db                        ← SQLite job queue（已建立、運作中，worker 常駐讀寫）
 └── logs/
 ```
 
 **關鍵同步規則**：`memory/*.md` 正本只有互動式 session 或 consolidation pass 能編輯。**背景 job 永遠只能在 `memory/inbox/` 新增檔案，不能編輯既有檔案**——因為每次背景寫入都是全新檔案，天生無競態，不需要鎖。之後由排程的 consolidation pass（呼叫既有的 `consolidate-memory` skill）把 `inbox/` 整併進正本。取捨：背景產生的事實是最終一致，不是即時同步。
 
 記憶的三層分類（Procedural / Semantic / Episodic）、consolidation 觸發條件（N-gate）、useful 判定與敏感內容 guardrails，定義在 [docs/memory-taxonomy.md](docs/memory-taxonomy.md)（參數正本：`registry/consolidation_policy.yaml`）——那份政策不改變本節的寫入規則，只補「何時整併、哪些內容不該進來」。
+
+### 4.1 Hermes long-lived session → AgentOS episode（概念摘要）
+
+Hermes（Desktop／CLI／TUI）的 session 是**可長期復用的上下文容器**，不是
+「一次用完就結束」的物件——多數 session 從不設定 `ended_at`。ClaudeCodeOS 這邊
+匯入記憶的單位因此不是「整個 session」，而是從 session 裡切出的
+**immutable episode／capture checkpoint**（同一 session 可產生多個 episode，
+各自獨立、互不追溯）；`ended_at`、閒置門檻、使用者手動 archive 都只是「該不該
+切一刀」的 trigger，跟「session 有沒有結束」解耦。這條管線目前落在
+`hermes/bridge_state.py`（repository 層，`claudecodeos.bridge_state.v2`）與
+`hermes/bridge_scanner.py`／`hermes/bridge_importer.py`（偵測與落地）；schema
+與 repository 層已完成，scanner／importer 的 episode 化與部署仍在進行中。細節
+見 [docs/memory-bridge-state.md](docs/memory-bridge-state.md) 與
+[docs/stage2.4d-episode-capture-proposal.md](docs/stage2.4d-episode-capture-proposal.md)
+（已核准設計正本），本節只作概念摘要、不重複維護欄位定義。
+
+### 4.2 Windows/WSL bridge 現況
+
+Windows Hermes（`%LOCALAPPDATA%\hermes\state.db`）是唯一 Source of Truth；bridge
+本身（scanner/importer/repository）跑在 **WSL 部署側**，經 snapshot／唯讀路徑讀取，
+絕不寫回 Hermes 原始資料（見 [docs/hermes-shared-storage-bootstrap.md](docs/hermes-shared-storage-bootstrap.md)）。
+`hermes-bridge-scanner.timer` 已部署為 WSL2 systemd 常駐 timer（每日 08:05）；但
+**目前的 WSL 開發環境是 on-demand，不是 always-on production**——互動 session
+手動用 `wsl.exe` 喚醒才會執行，distro 不常駐開機。這與 timer 的
+`Persistent=true` 行為要分開理解：排定時刻若 distro 睡眠會被跳過，等下次手動
+喚醒時才 catch-up 補跑一次，不代表每天固定時刻真的有人在跑。細節見
+[hermes/README.md](hermes/README.md) 與
+[memory/project_v0_1_status.md](memory/project_v0_1_status.md) 最新一條記錄。
 
 ## 5. Agent Registry 與 Model Router
 
@@ -131,7 +161,7 @@ ClaudeCodeOS/
 - `hermes/db.py` + `hermes/worker.py`（SQLite job queue，設計見 `hermes/DESIGN.md`；狀態機先簡化成 `queued/running/completed/failed/dead_letter` 五種，併發先 `MAX_CONCURRENT_JOBS=1`）——已驗證正常完成、session resume、retry 後成功、dead-letter、reaper 回收 stale job 五種情境
 - `scripts/route_model.py`（Model Router script adapter，可實際呼叫 OpenRouter）
 - `hermes/adapter/invoke_cos.sh`（Hermes → CoS 呼叫，可實際執行）
-- `memory/MEMORY.md`、`memory/inbox/`（空的，尚未累積記憶）
+- `memory/MEMORY.md`、`memory/inbox/`（已有真實匯入內容累積並整併過——非「空的、尚未累積記憶」；已整併者見 `memory/inbox/.processed/`）
 
 **刻意延後（規劃中，未實作）**：
 - `knowledge` 的排程觸發串接（automation 何時該叫它去整併 inbox）——現在 `daily-memory-check` 這個 cron job 本身就是在做這件事了，這條差不多可以視為完成，之後再確認
