@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""hermes/test_bridge_state.py — v0.1（Stage 2.2）
+"""hermes/test_bridge_state.py — v0.2（Stage 2.4d-1）
 
 hermes/bridge_state.py 的測試：init 冪等、schema 與 registry yaml 程式化對齊、
 event_id upsert 去重、get/list、mark_failed 與 retry_count 語義、刪檔重建。
+Stage 2.4d-1 新增：event_id 三層 namespace helpers（含 profile fail-closed）、
+episode_content_hash 純函式、bridge_cursors（只前進不後退）、create_episode
+（原子性＝矩陣 #3、冪等 conflict 路徑＝#23、boundary 一致性＝#24）、
+v1→v2 migrate（冪等＝#13、舊 API 不回歸＝#14）、升級路徑（#2 的 cursor 語義）。
 
 隔離保證（本檔自我驗證，見 setUpModule/tearDownModule 與靜態檢查測試）：
 - 全程只用 temp 目錄的 db，絕不觸碰 Hermes state.db、hermes/config/telegram.json、
@@ -135,7 +139,7 @@ class TestInitAndSchema(BridgeStateTestBase):
                 )
             }
         self.assertEqual(set(cols.keys()), set(fields.keys()),
-                         "SQLite 欄位集合必須等於 registry yaml 的 17 欄")
+                         "SQLite 欄位集合必須等於 registry yaml 的 22 欄")
         for name, spec in fields.items():
             expected_type = bridge_state.SQL_TYPE_BY_SCHEMA_TYPE[spec["type"]]
             self.assertEqual(cols[name]["type"], expected_type,

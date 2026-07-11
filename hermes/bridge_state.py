@@ -198,22 +198,142 @@ def parse_iso_utc(value: str) -> datetime:
 
 
 def session_event_id(session_id: str) -> str:
-    """session 層級去重 key，沿用 adapter 的 event_id 慣例："hermes:<session_id>"。"""
+    """session 層級去重 key（legacy，pre-2.4d），沿用 adapter 的 event_id 慣例：
+    "hermes:<session_id>"。2.4d 起不再新增這個層級的記錄，但既有列原樣保留。"""
     return f"hermes:{session_id}"
 
 
+def _validate_boundary(first_message_id, last_message_id) -> tuple[int, int]:
+    """episode boundary 驗證：兩者都是正整數（Hermes rowid）且 first <= last。"""
+    for name, value in (("first_message_id", first_message_id),
+                        ("last_message_id", last_message_id)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} 必須是 int（Hermes rowid），得到 {value!r}")
+        if value < 1:
+            raise ValueError(f"{name} 必須 >= 1（rowid 從 1 起算），得到 {value}")
+    if first_message_id > last_message_id:
+        raise ValueError(
+            f"boundary 不合法：first_message_id={first_message_id} > "
+            f"last_message_id={last_message_id}")
+    return first_message_id, last_message_id
+
+
+def episode_event_id(session_id: str, first_message_id: int, last_message_id: int) -> str:
+    """episode 層級去重 key："hermes:<sid>:<first>..<last>"（提案 §2）。
+
+    boundary 是穩定值：first/last 在 create_episode 當下固定、之後 immutable
+    ——這滿足「event_id 必含穩定 episode boundary」的拍板公理。格式與既有
+    event_id_range 完全相同。
+    """
+    first, last = _validate_boundary(first_message_id, last_message_id)
+    if not session_id or ":" in str(session_id) or "/" in str(session_id):
+        raise ValueError(f"session_id 不合法（不得含 ':' 或 '/'）：{session_id!r}")
+    return f"hermes:{session_id}:{first}..{last}"
+
+
+_EPISODE_BOUNDS_RE = re.compile(r"^(\d+)\.\.(\d+)$")
+_MESSAGE_ROWID_RE = re.compile(r"^\d+$")
+
+
+def parse_event_id(event_id: str) -> dict:
+    """三層 event_id namespace 的機械判別（提案 §2）。
+
+    回傳 dict：
+    - session（legacy）："hermes:<sid>"        → {"kind": "session", "session_id"}
+    - 訊息層級："hermes:<sid>:<rowid>"          → {"kind": "message", "session_id", "rowid"}
+    - episode："hermes:<sid>:<first>..<last>"   → {"kind": "episode", "session_id",
+                                                   "first_message_id", "last_message_id"}
+
+    區分規則（照提案逐字實作）：含 ".." ＝ episode；含 ":" 但無 ".." 且冒號後
+    是整數 ＝ 訊息；其餘 ＝ session 層級（Hermes sid 不含冒號，無歧義）。
+
+    fail-closed（提案 §6.1）：讀到 "hermes/" 前綴（未來 profile namespace，
+    本階段不啟用）或非 "hermes:" 開頭的值一律丟 ValueError，**不得默默視為
+    default**；含 ".." 但格式不合法（非整數、first > last）同樣拒絕。
+    """
+    if not isinstance(event_id, str) or not event_id:
+        raise ValueError(f"event_id 必須是非空字串，得到 {event_id!r}")
+    if event_id.startswith(PROFILE_NAMESPACE_PREFIX):
+        raise ValueError(
+            f"event_id {event_id!r} 帶 profile namespace 前綴（'hermes/'）——"
+            "本階段僅支援 default profile，一律 fail-closed 拒絕處理"
+            "（提案 §2、§6.1），不得默默視為 default")
+    if not event_id.startswith("hermes:"):
+        raise ValueError(f"未知的 event_id namespace：{event_id!r}（僅支援 'hermes:' 前綴）")
+    rest = event_id[len("hermes:"):]
+    if not rest:
+        raise ValueError(f"event_id 缺 session_id 段：{event_id!r}")
+    if ".." in rest:
+        sid, sep, bounds = rest.rpartition(":")
+        match = _EPISODE_BOUNDS_RE.match(bounds) if sep else None
+        if not sid or match is None:
+            raise ValueError(
+                f"episode event_id 格式不合法：{event_id!r}"
+                "（應為 hermes:<sid>:<first>..<last>，first/last 為整數）")
+        first, last = int(match.group(1)), int(match.group(2))
+        _validate_boundary(first, last)
+        return {"kind": "episode", "session_id": sid,
+                "first_message_id": first, "last_message_id": last}
+    sid, sep, tail = rest.rpartition(":")
+    if sep and sid and _MESSAGE_ROWID_RE.match(tail):
+        return {"kind": "message", "session_id": sid, "rowid": int(tail)}
+    return {"kind": "session", "session_id": rest}
+
+
+def is_episode_event_id(event_id: str) -> bool:
+    """event_id 是否為 episode 層級（含 ".."——提案 §2 的機械區分規則）。
+    注意：這只是快速判別；完整驗證（含 fail-closed）走 parse_event_id()。"""
+    return isinstance(event_id, str) and ".." in event_id
+
+
+def episode_content_hash(events: list[dict]) -> str:
+    """episode 內容雜湊——**純函式**（提案 §4.5），不碰任何 db、不依賴呼叫時間。
+
+    定義：對 eligible events 的 normalized 欄位（EPISODE_HASH_FIELDS：rowid、
+    role、type、content、tool_calls 原始值、timestamp）做固定鍵序 JSON 序列化
+    （sort_keys、緊湊分隔符、不轉義非 ASCII）後 SHA-256，回傳 hex digest。
+
+    - 「eligible」（active=1、rowid ∈ [first..last]）由呼叫端的 snapshot 查詢
+      負責——scanner 切刀與 importer 重算必須餵**同一定義**的事件集合；
+      本函式只做 normalize（取固定欄位、依 rowid 升冪排序）＋序列化＋雜湊。
+    - 排序在函式內做（依 rowid 升冪），輸入順序不影響結果——確定性。
+    - 與 render 格式解耦：render 改版不會假性 mismatch。
+    - 每個 event 必須帶 int 的 rowid；缺欄位的 normalized 值為 None（照實記錄，
+      不同缺欄組合會得到不同 hash——這正是完整性檢查要偵測的差異）。
+    """
+    normalized = []
+    for event in events:
+        rowid = event.get("rowid")
+        if isinstance(rowid, bool) or not isinstance(rowid, int):
+            raise ValueError(
+                f"episode_content_hash：每個 event 必須帶 int 的 rowid，得到 {rowid!r}")
+        normalized.append({key: event.get(key) for key in EPISODE_HASH_FIELDS})
+    normalized.sort(key=lambda item: item["rowid"])
+    payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _load_schema_doc() -> dict:
+    global _schema_doc_cache
+    if _schema_doc_cache is None:
+        import yaml  # lazy import：只有需要驗證/比對 schema 時才要求 pyyaml
+
+        _schema_doc_cache = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
+    return _schema_doc_cache
+
+
 def load_schema_fields() -> dict:
-    """讀取 registry/bridge_state_schema.yaml 的 fields 區塊（cached）。
+    """讀取 registry/bridge_state_schema.yaml 的 fields 區塊（bridge_sessions，cached）。
 
     enum 合法值、required 清單都以這份 registry 正本為準，程式內不複製第二份。
     """
-    global _schema_fields_cache
-    if _schema_fields_cache is None:
-        import yaml  # lazy import：只有需要驗證/比對 schema 時才要求 pyyaml
+    return _load_schema_doc()["fields"]
 
-        doc = yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
-        _schema_fields_cache = doc["fields"]
-    return _schema_fields_cache
+
+def load_cursor_schema() -> dict:
+    """讀取 registry yaml 的 bridge_cursors 區塊（primary_key＋fields，cached）。"""
+    return _load_schema_doc()["bridge_cursors"]
 
 
 def schema_enum_values(field_name: str) -> set[str]:
@@ -248,14 +368,33 @@ def _db(db_path: Path | str = DEFAULT_DB_PATH):
         conn.close()
 
 
+def _ensure_v2_schema_locked(conn: sqlite3.Connection) -> list[str]:
+    """（呼叫端須已持 _lock 與 transaction）冪等確保 v2 schema：
+    建三個 table＋對舊 db 的 bridge_sessions 補 5 個 episode 欄
+    （PRAGMA table_info 查存在性，比照 bridge_meta 升級路徑先例）。
+    回傳本次實際新增的欄位名清單（已齊全時為空——冪等）。"""
+    conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_META_TABLE_SQL)
+    conn.execute(CREATE_CURSOR_TABLE_SQL)
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({TABLE_NAME})")}
+    added = []
+    for name, sql_type in EPISODE_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {name} {sql_type}")
+            added.append(name)
+    return added
+
+
 def init_db(db_path: Path | str = DEFAULT_DB_PATH):
-    """建立 bridge_sessions 與 bridge_meta table（冪等：CREATE TABLE IF NOT
-    EXISTS，重複呼叫不影響既有資料）。db 檔整個刪掉後再呼叫即可重建
-    （disposable）。對 Stage 2.4a 之前只有 bridge_sessions 的舊 db 呼叫時，
-    冪等地補建 bridge_meta（既有 db 的升級路徑）。"""
+    """建立 bridge_sessions／bridge_meta／bridge_cursors table（冪等：CREATE
+    TABLE IF NOT EXISTS，重複呼叫不影響既有資料）。db 檔整個刪掉後再呼叫即可
+    重建（disposable——但 2.4d 起 db 重建後的必要前置是 reconcile recovery，
+    見模組 docstring）。升級路徑（皆冪等）：對 Stage 2.4a 之前的舊 db 補建
+    bridge_meta；對 2.4d 之前的 17 欄 db 補 5 個 episode 欄＋建 bridge_cursors。
+    注意：init/ensure_schema 只補結構，不做資料回填——legacy 列的
+    capture_trigger='legacy' 回填與 cursor 種子屬 migrate()（提案 §3.1）。"""
     with _lock, _db(db_path) as conn:
-        conn.execute(CREATE_TABLE_SQL)
-        conn.execute(CREATE_META_TABLE_SQL)
+        _ensure_v2_schema_locked(conn)
 
 
 def ensure_schema(db_path: Path | str = DEFAULT_DB_PATH):
@@ -299,6 +438,14 @@ def upsert_session_state(
       failed 必附 error_reason（bridge 層錯誤摘要，不得含 session 敏感內容）；
       to_inbox / imported 必附 imported_inbox_path（schema 的必填條件）。
 
+    Stage 2.4d 邊界（v2）：
+    - episode 層級 event_id（含 ".."）的**新列**必須由 create_episode() 建立
+      （五個 episode 欄是條件必填，且要跟 cursor 前進同 transaction）——
+      upsert 只能**更新**既有 episode 列（importer 的狀態轉換路徑），且刻意
+      不把五個 episode 欄放進 INSERT/UPDATE 清單：episode 的 identity 欄位
+      不可能被 upsert 洗掉（immutability，提案 §4.4）。
+    - "hermes/" 前綴（未來 profile namespace）一律 fail-closed 拒絕（§6.1）。
+
     回傳 upsert 後的完整列（dict）。
     """
     _validate_enum("import_status", import_status)
@@ -312,9 +459,31 @@ def upsert_session_state(
 
     if event_id is None:
         event_id = session_event_id(session_id)
+    if event_id.startswith(PROFILE_NAMESPACE_PREFIX):
+        raise ValueError(
+            f"event_id {event_id!r} 帶 'hermes/' profile namespace 前綴——"
+            "本階段 fail-closed 拒絕（提案 §6.1）")
+    episode_parsed = None
+    if is_episode_event_id(event_id):
+        episode_parsed = parse_event_id(event_id)  # 格式不合法會在這裡 fail loud
+        if episode_parsed["kind"] != "episode":
+            raise ValueError(f"event_id {event_id!r} 含 '..' 但非合法 episode 格式")
+        if episode_parsed["session_id"] != session_id:
+            raise ValueError(
+                f"不一致寫入被拒（矩陣 #24）：event_id 的 session_id="
+                f"{episode_parsed['session_id']!r} != 參數 session_id={session_id!r}")
     now = seen_at or _now_iso()
 
     with _lock, _db(db_path) as conn:
+        if episode_parsed is not None:
+            exists = conn.execute(
+                f"SELECT 1 FROM {TABLE_NAME} WHERE event_id=?", (event_id,)
+            ).fetchone()
+            if exists is None:
+                raise ValueError(
+                    f"episode 列 {event_id!r} 不存在——episode 的新列必須由 "
+                    "create_episode() 建立（五個 episode 欄條件必填＋cursor 同 "
+                    "transaction 前進），upsert_session_state 只能更新既有 episode 列")
         conn.execute(
             f"""
             INSERT INTO {TABLE_NAME} (
@@ -506,6 +675,310 @@ def advance_scan_watermark(
         return {"advanced": True, "watermark": normalized}
 
 
+# ---------- Stage 2.4d：episode 建立與 per-session cursor（提案 §1.2） ----------
+
+def _cursor_row_to_dict(row: sqlite3.Row) -> dict:
+    return dict(row)
+
+
+def _get_cursor_locked(conn: sqlite3.Connection, source_profile: str,
+                       session_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT * FROM {CURSOR_TABLE_NAME} WHERE source_profile=? AND session_id=?",
+        (source_profile, session_id),
+    ).fetchone()
+
+
+def _advance_cursor_locked(conn: sqlite3.Connection, source_profile: str,
+                           session_id: str, last_captured_message_id: int,
+                           last_episode_seq: int | None, now: str) -> dict:
+    """（呼叫端須已持 _lock 與 transaction）cursor 前進——**只前進不後退**
+    （比照 scan_watermark 慣例）：兩個值各自取 max(現值, 新值)，都沒變大時
+    no-op（updated_at 也不動）。last_episode_seq=None＝不嘗試推進序號
+    （新建列時取 0）。回傳 {"advanced": bool, "cursor": dict}。"""
+    if isinstance(last_captured_message_id, bool) or not isinstance(last_captured_message_id, int):
+        raise ValueError(
+            f"last_captured_message_id 必須是 int，得到 {last_captured_message_id!r}")
+    if last_captured_message_id < 1:
+        raise ValueError(
+            f"last_captured_message_id 必須 >= 1，得到 {last_captured_message_id}")
+    if last_episode_seq is not None:
+        if isinstance(last_episode_seq, bool) or not isinstance(last_episode_seq, int):
+            raise ValueError(f"last_episode_seq 必須是 int，得到 {last_episode_seq!r}")
+        if last_episode_seq < 0:
+            raise ValueError(f"last_episode_seq 必須 >= 0，得到 {last_episode_seq}")
+
+    row = _get_cursor_locked(conn, source_profile, session_id)
+    if row is None:
+        conn.execute(
+            f"INSERT INTO {CURSOR_TABLE_NAME} (source_profile, session_id, "
+            "last_captured_message_id, last_episode_seq, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (source_profile, session_id, last_captured_message_id,
+             last_episode_seq if last_episode_seq is not None else 0, now),
+        )
+        return {"advanced": True,
+                "cursor": _cursor_row_to_dict(
+                    _get_cursor_locked(conn, source_profile, session_id))}
+    new_msg = max(row["last_captured_message_id"], last_captured_message_id)
+    new_seq = (row["last_episode_seq"] if last_episode_seq is None
+               else max(row["last_episode_seq"], last_episode_seq))
+    if (new_msg == row["last_captured_message_id"]
+            and new_seq == row["last_episode_seq"]):
+        return {"advanced": False, "cursor": _cursor_row_to_dict(row)}
+    conn.execute(
+        f"UPDATE {CURSOR_TABLE_NAME} SET last_captured_message_id=?, "
+        "last_episode_seq=?, updated_at=? WHERE source_profile=? AND session_id=?",
+        (new_msg, new_seq, now, source_profile, session_id),
+    )
+    return {"advanced": True,
+            "cursor": _cursor_row_to_dict(
+                _get_cursor_locked(conn, source_profile, session_id))}
+
+
+def get_cursor(session_id: str, *, source_profile: str = DEFAULT_SOURCE_PROFILE,
+               db_path: Path | str = DEFAULT_DB_PATH) -> dict | None:
+    """讀取 per-session cursor；讀不到回 None。
+
+    純讀取路徑（比照 get_scan_watermark）：db 檔不存在時直接回 None、
+    **不建立 db 檔**；舊 db 尚無 bridge_cursors table 時同樣回 None
+    （table 補建交給 ensure_schema / advance_cursor / migrate 的升級路徑）。
+    「無 cursor」的語義由呼叫端決定（scanner：episode_cutover 底線起算，
+    或 fail-closed 拒切——提案 §3.2、§5.1，2.4d-2/3 實作）。
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    with _db(path) as conn:
+        try:
+            row = _get_cursor_locked(conn, source_profile, session_id)
+        except sqlite3.OperationalError:
+            return None  # 舊版 db 還沒有 cursors table
+        return _cursor_row_to_dict(row) if row else None
+
+
+def advance_cursor(session_id: str, last_captured_message_id: int, *,
+                   last_episode_seq: int | None = None,
+                   source_profile: str = DEFAULT_SOURCE_PROFILE,
+                   seen_at: str | None = None,
+                   db_path: Path | str = DEFAULT_DB_PATH) -> dict:
+    """把 (source_profile, session_id) 的 cursor 推進——**只前進不後退**
+    （新值較小或相等時 no-op，比照 watermark 慣例；recovery 對健康 db 重跑
+    因此天然冪等，提案 §3.2）。對尚無 bridge_cursors 的舊 db 冪等補建
+    （升級路徑）。回傳 {"advanced": bool, "cursor": dict}。
+
+    一般 episode 路徑**不要**直接呼叫這個函式——create_episode() 已在同一
+    transaction 內前進 cursor；這個 API 給 recovery／migration（cursor 種子
+    與重建）用。
+    """
+    now = seen_at or _now_iso()
+    with _lock, _db(db_path) as conn:
+        conn.execute(CREATE_CURSOR_TABLE_SQL)
+        return _advance_cursor_locked(conn, source_profile, session_id,
+                                      last_captured_message_id, last_episode_seq, now)
+
+
+def create_episode(
+    *,
+    session_id: str,
+    source_profile: str,
+    session_source: str,
+    episode_seq: int,
+    capture_trigger: str,
+    first_message_id: int,
+    last_message_id: int,
+    source_content_hash: str,
+    decision_reason: str,
+    import_status: str = "discovered",
+    memory_type: str = "none",
+    useful_chat: bool = False,
+    selected_capability_lane: str | None = None,
+    imported_inbox_path: str | None = None,
+    processed_path: str | None = None,
+    error_reason: str | None = None,
+    event_id_range: str | None = None,
+    seen_at: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """建立一個 episode 列並把 per-session cursor 推進到 boundary 的 last——
+    **兩者在同一個 SQLite transaction 內完成**（核心不變量，提案 §1.2／風險 3：
+    要嘛「episode 列＋cursor 前進」都成立、要嘛都不成立；這條不變量若被未來
+    改動拆開，「每則訊息至多屬於一個 episode」即失效。測試矩陣 #3 釘死）。
+
+    一致性保證（矩陣 #24）：event_id 與 event_id_range 由**同一組** boundary
+    值（session_id, first_message_id, last_message_id）在函式內產生，顯式欄位
+    與 event_id 不可能分家；呼叫端傳入不一致的 event_id_range 會被拒絕。
+    不接受外部傳入 event_id。
+
+    冪等路徑（矩陣 #23）：撞既有 event_id（同 boundary 已存在，UNIQUE
+    conflict 的語義）時視為 no-op——**不動既有列**（狀態、判定、時間戳全部
+    原樣，連 last_seen_at 都不碰），只把 cursor 推進到該 boundary 的 last
+    （只前進語義：cursor 已在更前面時連 cursor 都不動）。這是重掃／recovery
+    後重切同一刀的安全路徑。
+
+    fail-closed（提案 §6.1）：source_profile != 'default' 一律拒絕——現行
+    event_id namespace 無 profile 段，非 default 的 episode 會污染 namespace。
+
+    條件必填（提案 §1.2）：episode 列的五個新欄全必填；capture_trigger 必須是
+    ended/inactivity/manual（'legacy' 保留給 migration 回填的 session-level 列，
+    episode 列用它是語義矛盾）。source_content_hash 必填（scanner 切刀路徑，
+    §4.5）；reconcile 回填（hash 無法自檔案還原，§3.2）屬 2.4d-3，屆時另議
+    放寬方式，本 API 不留後門。
+
+    回傳 {"created": bool, "row": dict, "cursor": dict}。
+    """
+    if source_profile != DEFAULT_SOURCE_PROFILE:
+        raise ValueError(
+            f"episode capture 本階段僅支援 source_profile='{DEFAULT_SOURCE_PROFILE}'"
+            f"（得到 {source_profile!r}）——fail-closed 拒絕（提案 §6.1）：現行 "
+            "event_id namespace 無 profile 段，非 default 會寫出無法區分的 event_id")
+    _validate_enum("import_status", import_status)
+    _validate_enum("memory_type", memory_type)
+    _validate_enum("capture_trigger", capture_trigger)
+    if capture_trigger == "legacy":
+        raise ValueError(
+            "capture_trigger='legacy' 保留給 migration 回填的 legacy session-level "
+            "列——episode 列必須是 ended/inactivity/manual（提案 §1.2）")
+    if isinstance(episode_seq, bool) or not isinstance(episode_seq, int) or episode_seq < 1:
+        raise ValueError(f"episode_seq 必須是 >= 1 的 int（1 起算），得到 {episode_seq!r}")
+    if not source_content_hash or not isinstance(source_content_hash, str):
+        raise ValueError(
+            "source_content_hash 必填（episode 列條件必填，提案 §1.2／§4.5——"
+            "由 scanner 切刀時的同一 snapshot 以 episode_content_hash() 計算）")
+    if import_status == "failed" and not error_reason:
+        raise ValueError("import_status=failed 時 error_reason 必填（schema 約束）")
+    if import_status in ("to_inbox", "imported") and not imported_inbox_path:
+        raise ValueError(
+            "import_status 為 to_inbox/imported 時 imported_inbox_path 必填（schema 約束）")
+
+    event_id = episode_event_id(session_id, first_message_id, last_message_id)
+    if event_id_range is None:
+        event_id_range = event_id
+    elif event_id_range != event_id:
+        raise ValueError(
+            f"不一致寫入被拒（矩陣 #24）：event_id_range={event_id_range!r} != "
+            f"boundary 衍生的 event_id={event_id!r}——兩者必須由同一組 boundary 產生")
+    now = seen_at or _now_iso()
+
+    with _lock, _db(db_path) as conn:
+        _ensure_v2_schema_locked(conn)  # 升級路徑冪等（比照 advance_scan_watermark 先例）
+        existing = conn.execute(
+            f"SELECT * FROM {TABLE_NAME} WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if existing is not None:
+            # 冪等路徑（矩陣 #23）：不動既有列、只推 cursor 到該 boundary 的 last。
+            seq_hint = existing["episode_seq"]
+            cursor_result = _advance_cursor_locked(
+                conn, source_profile, session_id, last_message_id,
+                seq_hint if isinstance(seq_hint, int) else None, now)
+            return {"created": False, "row": _row_to_dict(existing),
+                    "cursor": cursor_result["cursor"]}
+        conn.execute(
+            f"""
+            INSERT INTO {TABLE_NAME} (
+                session_id, source_profile, session_source, import_status,
+                memory_type, useful_chat, selected_capability_lane, decision_reason,
+                imported_inbox_path, processed_path, first_seen_at, last_seen_at,
+                updated_at, retry_count, error_reason, event_id, event_id_range,
+                episode_seq, capture_trigger, first_message_id, last_message_id,
+                source_content_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id, source_profile, session_source, import_status,
+                memory_type, int(bool(useful_chat)), selected_capability_lane,
+                decision_reason, imported_inbox_path, processed_path, now, now,
+                now, error_reason, event_id, event_id_range,
+                episode_seq, capture_trigger, first_message_id, last_message_id,
+                source_content_hash,
+            ),
+        )
+        row = conn.execute(
+            f"SELECT * FROM {TABLE_NAME} WHERE event_id=?", (event_id,)
+        ).fetchone()
+        cursor_result = _advance_cursor_locked(
+            conn, source_profile, session_id, last_message_id, episode_seq, now)
+        return {"created": True, "row": _row_to_dict(row),
+                "cursor": cursor_result["cursor"]}
+
+
+# ---------- Stage 2.4d：v1 → v2 migration（提案 §3.1，冪等） ----------
+
+def migrate(db_path: Path | str = DEFAULT_DB_PATH) -> dict:
+    """v1（17 欄）→ v2 的 migration，**冪等**（重跑第二次全程 no-op）。
+
+    步驟（提案 §3.1，全部在同一 transaction 內）：
+    1. bridge_sessions 補 5 個 episode 欄（PRAGMA table_info 查存在性，已存在
+       則跳過）；
+    2. CREATE TABLE IF NOT EXISTS bridge_cursors（複合主鍵）＋bridge_meta；
+    3. 既有 legacy 列（event_id 不含 ".."）回填 capture_trigger='legacy'
+       （episode_seq 與 boundary／hash 欄維持 NULL——不捏造 boundary）；
+    4. cursor 種子（belt-and-suspenders）：對 import_status='imported' 的
+       legacy 列，若 event_id_range 可解析為 episode 格式
+       （hermes:<sid>:<first>..<last>），把 (source_profile, session_id) 的
+       cursor 推進到 <last>（last_episode_seq=0）——保證已匯入過的內容即使落在
+       episode_cutover 之後也絕不二次擷取。skipped／needs_review 不種
+       （episode_cutover 底線已足以擋自動擷取）。非 default profile 的列
+       fail-closed 跳過不種（提案 §6.1）；只前進語義使重跑天然冪等。
+
+    對象是**既有** db——檔案不存在時 fail loud（FileNotFoundError），
+    不默默建一個空 db 再宣稱 migrate 成功；全新 db 用 init。
+
+    回傳摘要 dict：columns_added（list）、cursor_table_created（bool）、
+    legacy_backfilled（int）、cursors_seeded（int）、
+    seed_skipped_non_default（int）、seed_skipped_unparseable（int）。
+    """
+    path = Path(db_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"bridge_state.db 不存在：{path}——migrate 只對既有 db 執行"
+            "（全新 db 用 init；不默默建空 db）")
+    with _lock, _db(path) as conn:
+        cursor_table_existed = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (CURSOR_TABLE_NAME,),
+        ).fetchone() is not None
+        added = _ensure_v2_schema_locked(conn)
+        backfilled = conn.execute(
+            f"UPDATE {TABLE_NAME} SET capture_trigger='legacy' "
+            "WHERE capture_trigger IS NULL AND event_id NOT LIKE '%..%'"
+        ).rowcount
+        seeded = 0
+        skipped_non_default = 0
+        skipped_unparseable = 0
+        now = _now_iso()
+        imported_legacy = conn.execute(
+            f"SELECT session_id, source_profile, event_id_range FROM {TABLE_NAME} "
+            "WHERE import_status='imported' AND event_id NOT LIKE '%..%' "
+            "AND event_id_range IS NOT NULL"
+        ).fetchall()
+        for row in imported_legacy:
+            if row["source_profile"] != DEFAULT_SOURCE_PROFILE:
+                skipped_non_default += 1  # fail-closed：不動非 default 的任何狀態（§6.1）
+                continue
+            try:
+                parsed = parse_event_id(row["event_id_range"])
+            except ValueError:
+                skipped_unparseable += 1  # 保守不種——episode_cutover 底線仍在（§5.1）
+                continue
+            if parsed["kind"] != "episode" or parsed["session_id"] != row["session_id"]:
+                skipped_unparseable += 1
+                continue
+            result = _advance_cursor_locked(
+                conn, row["source_profile"], row["session_id"],
+                parsed["last_message_id"], 0, now)
+            if result["advanced"]:
+                seeded += 1
+        return {
+            "columns_added": added,
+            "cursor_table_created": not cursor_table_existed,
+            "legacy_backfilled": backfilled,
+            "cursors_seeded": seeded,
+            "seed_skipped_non_default": skipped_non_default,
+            "seed_skipped_unparseable": skipped_unparseable,
+        }
+
+
 def _cli():
     # Windows console 預設 cp950——比照 bridge_scanner，stdout/stderr 強制 UTF-8
     if hasattr(sys.stdout, "reconfigure"):
@@ -532,12 +1005,26 @@ def _cli():
 
     sub.add_parser("watermark", help="顯示目前的 scan watermark（bridge_meta）")
 
+    sub.add_parser(
+        "migrate",
+        help="v1（17 欄）→ v2 migration（冪等；加欄＋建 bridge_cursors＋legacy 回填"
+             "＋imported 列 cursor 種子——提案 §3.1，2.4d-4 部署時執行）")
+
     args = parser.parse_args()
     db_path = Path(args.db_path) if args.db_path else DEFAULT_DB_PATH
 
     if args.cmd == "init":
         init_db(db_path)
         print(f"schema ready: {db_path}")
+    elif args.cmd == "migrate":
+        try:
+            summary = migrate(db_path)
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        print(f"migrate done: {db_path}")
+        for key, value in summary.items():
+            print(f"  {key}: {value}")
     elif args.cmd == "show":
         rec = get_session_state(args.event_id, db_path)
         if rec is None:
