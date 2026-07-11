@@ -264,9 +264,11 @@ imported／skipped／needs_review 各一）。
 
 **migration 步驟（2.4d-4 部署時執行，新增 `bridge_state.py migrate` CLI，冪等）**：
 
-1. `ALTER TABLE bridge_sessions ADD COLUMN episode_seq / capture_trigger`
-   （先查 `PRAGMA table_info`，已存在則跳過——冪等）。
-2. `CREATE TABLE IF NOT EXISTS bridge_cursors`。
+1. `ALTER TABLE bridge_sessions ADD COLUMN`——五個新欄：`episode_seq`、
+   `capture_trigger`、`first_message_id`、`last_message_id`、
+   `source_content_hash`（先查 `PRAGMA table_info`，已存在則跳過——冪等）。
+2. `CREATE TABLE IF NOT EXISTS bridge_cursors`（複合主鍵
+   `(source_profile, session_id)`）。
 3. 既有列回填 `capture_trigger='legacy'`（`episode_seq` 維持 NULL）。
 4. **cursor 種子（belt-and-suspenders，建議做）**：對唯一一筆 imported
    legacy 記錄，若 `event_id_range` 存在，取其 `<last>` 寫入
@@ -574,6 +576,13 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 | 18 | reconcile episode-aware | .processed/ 的 episode 檔 → 回填對應 episode 列 imported；frontmatter event_id_range 優先、檔名 ep 捕獲組次之、無 ep 段回填 legacy |
 | 19 | config gate | `episodes.enabled=false`／區塊缺失 → scanner 行為與 2.4c 位元級一致；enabled 但 episode_cutover 缺失 → fail loud exit 1 |
 | 20 | 靜態守則不回歸 | 排程一律無參數 scan（systemd 測試）；scanner／importer 不 import sqlite3 直連 Hermes；read-only／snapshot 慣例 |
+| 21 | cursor 重建（recovery，§3.2） | 造「落地檔存在＋bridge db 全空」情境跑 reconcile：cursor＝各 session 已落地 episode 的 max(last_message_id)、last_episode_seq 回填；對健康 db 重跑 recovery → cursor 不動（只前進不後退） |
+| 22 | 重建後切刀穩定性（雙 case） | 尾端 episode 有落地檔：recovery 後下一刀 boundary 與未重建時**完全相同**；尾端是無檔 needs_review：recovery 後下一刀吸收該區段（boundary 變寬）、重判仍 needs_review、**inbox 零重複落地** |
+| 23 | 同 boundary 重切的冪等 | create_episode 撞既有 event_id（UNIQUE conflict）→ 既有列不動、cursor 推進到該 boundary 的 last、不新增列 |
+| 24 | boundary 顯式欄位與 event_id 一致 | 任一 episode 列：解析 event_id 所得 first/last ＝ `first_message_id`/`last_message_id` ＝ `event_id_range` ＝ inbox 檔名 ep 段；repository 驗證拒絕不一致的寫入 |
+| 25 | hash 一致（正常路徑） | scanner 切刀存 hash → importer 重算相符 → 正常落地；hash 為純函式（同內容同 snapshot 重算恆等） |
+| 26 | hash 不一致 → needs_review | 切刀後竄改測試 state.db 副本的 boundary 內內容 → importer 比對失敗 → needs_review、decision_reason 只含 `integrity:content_hash_mismatch` 標籤、不落地、cursor 不回退、不進自動重試 |
+| 27 | 非 default profile fail-closed | scanner：`--source-profile` 非 default＋episodes enabled → exit 1；importer：佇列出現非 default episode 列 → `unsupported_profile_fail_closed`、狀態與 cursor 全不動；cursor 表以 (profile, sid) 隔離——同 sid 不同 profile 各自獨立 |
 
 ---
 
@@ -581,10 +590,10 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 
 | 階段 | 內容 | 邊界 | 驗證點 |
 |---|---|---|---|
-| **2.4d-1** schema＋repository | registry v2 yaml；bridge_state.py：加欄 DDL、bridge_cursors、`create_episode`（原子）、episode event_id helpers、`migrate` CLI | 只動 schema 與 repository；scanner／importer 行為零變化 | schema-程式對齊測試、矩陣 #2/#3/#13/#14 全綠；既有 10+25 測試零回歸 |
-| **2.4d-2** scanner episode 偵測 | adapter `list_session_activity()`；scan 加 episode 偵測（config gate 後面）；`checkpoint` 子指令；bridge.yaml 加 episodes 區塊（enabled: false） | 只產 discovered episode 列，不落地；enabled=false 下位元級舊行為；systemd unit 不動 | 矩陣 #1/#7/#10/#15–17/#19/#20；dry-run 輸出逐筆可審 |
-| **2.4d-3** importer episode 化 | adapter range export（boundary 內訊息）＋episode 檔名／frontmatter；importer 佇列改逐 episode；`_find_existing_import` episode-aware；reconcile ep 捕獲組 | importer 仍純手動執行；敏感 fail-closed／落地順序（先檔案後狀態）逐條沿用 | 矩陣 #4–6/#8/#9/#11/#12/#18；2.4c 的 25 tests 對 legacy 路徑零回歸 |
-| **2.4d-4** 部署 migration＋驗證 | sync 下發 → `migrate`（對既有 3 筆）→ dry-run scan 逐筆檢視（預期零湧入）→ 翻 `episodes.enabled: true` → 一次真實 scan → 人工跑一次 importer → 冪等重跑 → fingerprint 檢查（Hermes state.db／jobs.db／inbox 禁區零寫入） | 比照 2.4b 部署劇本：**全部驗證過了才翻 enabled** | 3 筆 legacy 原樣＋cursor 種子正確；首日零 episode（episode_cutover=部署日）或僅預期中的新活動 |
+| **2.4d-1** schema＋repository | registry v2 yaml（22 欄＋cursors 複合主鍵）；bridge_state.py：加欄 DDL（含 boundary 顯式欄與 hash 欄的條件必填驗證）、bridge_cursors、`create_episode`（原子＋UNIQUE conflict 冪等路徑）、episode event_id helpers、content hash 純函式、`migrate` CLI | 只動 schema 與 repository；scanner／importer 行為零變化 | schema-程式對齊測試、矩陣 #2/#3/#13/#14/#23/#24 全綠；既有 10+25 測試零回歸 |
+| **2.4d-2** scanner episode 偵測 | adapter `list_session_activity()`；scan 加 episode 偵測（config gate 後面；切刀時由同一 snapshot 算 hash 存入；無 cursor＋已有 `_ep` 檔 → fail-closed 拒切；非 default profile → fail loud）；`checkpoint` 子指令；bridge.yaml 加 episodes 區塊（enabled: false） | 只產 discovered episode 列，不落地；enabled=false 下位元級舊行為；systemd unit 不動 | 矩陣 #1/#7/#8/#10/#15–17/#19/#20/#27（scanner 部分）；dry-run 輸出逐筆可審 |
+| **2.4d-3** importer episode 化＋recovery | adapter range export（boundary 內訊息）＋episode 檔名／frontmatter；importer 佇列改逐 episode（含 hash 重算比對→mismatch 轉 needs_review、非 default profile 記錄並跳過）；`_find_existing_import` episode-aware；reconcile ep 捕獲組＋**cursor 重建（§3.2）** | importer 仍純手動執行；敏感 fail-closed／落地順序（先檔案後狀態）逐條沿用；回填規則仍只有 reconcile 一份實作 | 矩陣 #4–6/#9/#11/#12/#18/#21/#22/#25/#26/#27（importer 部分）；2.4c 的 25 tests 對 legacy 路徑零回歸 |
+| **2.4d-4** 部署 migration＋驗證 | sync 下發 → `migrate`（對既有 3 筆）→ 跑一次 reconcile（recovery 語義對健康 db 應為 no-op，順帶驗證）→ dry-run scan 逐筆檢視（預期零湧入）→ **記錄當下精確 UTC 時刻寫入 `episode_cutover`（§0.1 拍板）** → 翻 `episodes.enabled: true` → 一次真實 scan → 人工跑一次 importer → 冪等重跑 → fingerprint 檢查（Hermes state.db／jobs.db／inbox 禁區零寫入） | 比照 2.4b 部署劇本：**全部驗證過了才翻 enabled** | 3 筆 legacy 原樣＋cursor 種子正確；啟用時刻之後才有訊息才可能切刀——首次 scan 預期零 episode |
 
 **全程維持「不啟用 importer 排程、不啟用 headless CoS」的方式**：
 
@@ -614,25 +623,20 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
    同動」若被未來改動拆開（例如 cursor 移到別的儲存），「每則訊息至多
    屬一個 episode」的不變量即失效——建議在 repository docstring 與測試
    （矩陣 #3）雙重釘死。
-4. **rowid 與 active flag 的來源假設**：boundary 基於 messages.rowid 單調
-   遞增與 `active=1` 過濾。若 Hermes 未來 compact 機制把舊訊息 active
-   翻轉或重寫 rowid，已切 episode 不受影響（immutable），但 cursor 之前
-   「後來才變 active」的訊息會永久漏擷——接受此限制並明文記錄
-   （原文永在 state.db，可人工補匯），不設計自動回補。
+4. **recovery 紀律依賴**（§3.2）：db 重建後「先 reconcile 再 scan」是
+   操作紀律；scanner 的 fail-closed 拒切（矩陣 #8）擋住最危險的情境
+   （有落地檔卻無 cursor），但「部分重建＋尾端無檔判定」仍會留下
+   boundary 重疊的待人工列——設計上已接受（fail-closed 重判、inbox
+   零重複），屬已知殘留而非缺陷，operator 文件要寫明。
+5. **內容漂移偵測的邊界**：`source_content_hash`（§4.5）偵測「切刀後、
+   匯入前」boundary 內的內容變化；但 cursor 之前「後來才變 active」的
+   訊息不在任何 boundary 內，仍會永久漏擷——接受此限制（原文永在
+   state.db，可人工補匯），不設計自動回補。
 
-**開放問題（待使用者拍板）**：
-
-1. `episode_cutover` 取 **2.4d 部署日**（本提案建議，最保守）還是沿用
-   07-10 掃描 cutover（部署首刀會包含 07-10 起的積累訊息）？
-2. `inactivity_hours` 預設 72 是否符合實際節奏？（切早無資料損失，
-   只影響 episode 粒度。）
-3. 方案 A 的 legacy 列與 episode 列同表共存，是否接受？（若使用者強烈
-   偏好表職責潔癖，方案 B 成本已列於 §1.1。）
-4. `ended` trigger 是否需要對 `ended_at < episode_cutover` 但 cutover 後
-   有新訊息的邊角（ended 後復活的舊 session）特別處理？本提案立場：
-   統一規則已涵蓋（eligible 只看訊息，trigger 只看時機），不加特例。
-5. manual checkpoint 是否需要順手觸發一次 importer（一條龍）？本提案
-   立場：不要——scan／import 職責分離是既有邊界，checkpoint 只切刀。
+**開放問題**：原第一版五項開放問題已全數由使用者拍板，移入 §0.1。
+目前**無 blocker 級開放問題**。留待後續階段（非本次範圍、已有明文
+立場）：多 profile 支援的啟用時點（§6.1 已預留 namespace 與 fail-closed
+邊界）；session 數量級成長後 scan 成本模型的重估時機（風險 2）。
 
 ---
 
