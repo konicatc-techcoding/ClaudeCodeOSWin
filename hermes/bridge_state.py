@@ -823,9 +823,12 @@ def create_episode(
     ended/archived/inactivity/manual（'legacy' 保留給 migration 回填的
     session-level 列，episode 列用它是語義矛盾）。archived＝使用者在 Hermes
     UI 對 session 執行 Archive（2026-07-12 前置任務 2 拍板，實地驗證：
-    archived 是可靠且持久的使用者明確 checkpoint 訊號，不是永久結束）——
-    與 inactivity 的差異只在「誰觸發」與「是否等門檻」，不影響本函式的
-    boundary／immutability 保證。source_content_hash 必填（scanner 切刀路徑，
+    archived 是可靠且持久的使用者明確 checkpoint 訊號，不是永久結束）。
+    本函式只負責「trigger='archived' 的這一刀是否合法建立」，不負責判斷
+    何時該切——scanner 端的判斷是 level-triggered（每次檢查只看 archived
+    當下的值＋eligible 是否非空，不追蹤 0→1 轉換、不記上次的值，2.4d-2
+    實作），與 inactivity 的差異只在「誰觸發」與「是否等門檻」，不影響
+    本函式的 boundary／immutability 保證。source_content_hash 必填（scanner 切刀路徑，
     §4.5）；reconcile 回填（hash 無法自檔案還原，§3.2）屬 2.4d-3，屆時另議
     放寬方式，本 API 不留後門。
 

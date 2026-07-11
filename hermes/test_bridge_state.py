@@ -950,11 +950,15 @@ class TestCreateEpisode(BridgeStateTestBase):
 
 
 class TestArchivedTrigger(BridgeStateTestBase):
-    """矩陣 #28（2026-07-12 前置任務 2）：capture_trigger='archived' 的
-    repository 層契約。**邏輯已測（fixture/mock），非真實 Hermes UI 行為
-    驗證**——Unarchive（1→0）的 live 驗證本次跳過，是明確標注的非阻塞
-    test gap（見提案 §6）；這裡只用假資料驗證「archived true→false 後
-    新增訊息形成下一個獨立 episode」的邏輯本身。"""
+    """矩陣 #28（2026-07-12 前置任務 2；2026-07-12 第五版收斂為
+    level-triggered 措辭）：capture_trigger='archived' 的 repository 層
+    契約。archived 的判斷是 **level-triggered**——scanner 每次檢查只看
+    archived 當下的值是不是 true，不追蹤 0→1 這個轉換瞬間、不需要記住
+    上一次看到的值。**邏輯已測（fixture/mock），非真實 Hermes UI 行為
+    驗證**——Unarchive 的 live 驗證本次跳過，是明確標注的非阻塞 test gap
+    （見提案 §6）；這裡只用假資料驗證「Unarchive 之後（archived 已變回
+    false）新增訊息改由其他成立的 trigger 形成下一個獨立 episode」的
+    邏輯本身。"""
 
     def test_create_episode_accepts_archived_trigger(self):
         result = bridge_state.create_episode(
@@ -979,13 +983,15 @@ class TestArchivedTrigger(BridgeStateTestBase):
                                first_message_id=101, last_message_id=100),
                 db_path=self.db_path)
 
-    def test_archived_true_to_false_then_new_messages_forms_next_episode(self):
-        """fixture 模擬「archived true→false（Unarchive）後新增訊息」：
+    def test_unarchive_then_new_messages_forms_next_episode_via_other_trigger(self):
+        """fixture 模擬 Unarchive 之後（archived 已變回 false）新增訊息：
         ep1（trigger=archived）先切；假設 session 之後 Unarchive 並累積
-        新訊息，下一刀（無論是哪個 trigger）產生 ep2，boundary 相接不重疊，
-        ep1 列與內容完全不變（immutability，與 ended／inactivity 同一
-        規則）。這只驗證邏輯，不是對 Hermes UI Unarchive 行為的 live 驗證
-        （test gap，見提案 §6／類別 docstring）。"""
+        新訊息——此時 archived 條件已不成立，下一刀改由當下成立的其他
+        trigger（本測試用 manual）產生 ep2，boundary 相接不重疊，ep1 列與
+        內容完全不變（immutability，與 ended／inactivity 同一規則）。這只
+        驗證 level-triggered 判斷邏輯本身（不追蹤 archived 狀態轉換），
+        不是對 Hermes UI Unarchive 行為的 live 驗證（test gap，見提案
+        §6／類別 docstring）。"""
         first = bridge_state.create_episode(
             **make_episode(capture_trigger="archived"), db_path=self.db_path)
         ep1_row_before = dict(first["row"])

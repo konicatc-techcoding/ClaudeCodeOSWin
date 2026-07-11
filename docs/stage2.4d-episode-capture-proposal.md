@@ -29,6 +29,15 @@ checkpoint 訊號，語義上不是永久結束**，補進 `capture_trigger` enu
 是 2.4d-4 的事，且**2.4d-1 不得單獨下發部署側**（見第 8 節「不得單獨部署」
 警告）。第 10 節「本提案未動的東西」中「未修改任何既有檔案」等描述現已
 過時，隨本次修訂移除／改寫為現況敘述。
+修訂：2026-07-12 第五版（2.4d-2 開工前收斂）：把 `archived` trigger 的語義
+從措辭上可能暗示的 **edge-triggered**（scanner 需記住上次 archived 狀態、
+偵測 0→1 這個轉換瞬間）明確收斂為 **level-triggered**（scanner 每次檢查
+時只看 `archived` 當下的值是不是 true，加上 eligible 非空——完全不追蹤
+狀態變化本身，也不需要記住上一次看到的值）。§6 trigger 表與測試矩陣 #28
+的措辭已同步改寫。**本次收斂不新增任何欄位**（不加 `last_archived_state`
+或同類狀態追蹤欄位）——level-triggered 判斷＋cursor（`last_captured_message_id`）
+只前進的既有組合已經足以防止重複與遺漏，不需要額外的狀態機。不涉及
+scanner／importer 實作，也不動 `episodes.enabled`。
 
 > **本文件現為已核准的規格正本。** §0.1 所列項目已由使用者拍板；schema／
 > repository 層（2.4d-1）已依本文件核准內容實作完成，scanner／importer／
@@ -519,20 +528,24 @@ max(rowid)、max(timestamp)，read-only、snapshot 模式照舊），避免為�
 | trigger | 條件（皆須 eligible 非空） | 語義 |
 |---|---|---|
 | `ended` | `ended_at` 已設（且 >= episode_cutover） | session 被明確結束——立即切刀，不等 inactivity |
-| `archived` | Hermes `archived` 由 0→1（且 eligible 非空） | 使用者對目前內容明確要求建立 checkpoint（2026-07-12 前置任務 2 拍板，實地驗證：archived 0→1、`ended_at` 不變、message_count／max rowid／內容 sha256 全部不變，重啟後持久）——**不代表 session 永久結束**，不修改 `ended_at`。**立即切刀，不等 72 小時 inactivity 門檻**——這是 archived 與 inactivity 的關鍵差異：使用者主動訊號優先於被動的閒置判定。eligible 為空時不建立空 episode（與其他 trigger 共用同一條通用規則，不設特例）。session 日後 Unarchive（archived 1→0）並新增訊息時，新訊息屬於下一個獨立 episode（immutability 語義與 ended／inactivity 一致） |
+| `archived` | Hermes `archived == true`（level-triggered：每次檢查看當下值是不是 true，不追蹤 0→1 這個轉換瞬間、不需要記住上一次的值；且 eligible 非空） | 使用者對目前內容明確要求建立 checkpoint（2026-07-12 前置任務 2 拍板，實地驗證：Archive 動作使 archived 由 0 變為 1、`ended_at` 不變、message_count／max rowid／內容 sha256 全部不變，重啟後持久）——**不代表 session 永久結束**，不修改 `ended_at`。**立即切刀，不等 72 小時 inactivity 門檻**——這是 archived 與 inactivity 的關鍵差異：使用者主動訊號優先於被動的閒置判定。eligible 為空時不建立空 episode（與其他 trigger 共用同一條通用規則，不設特例）。session 日後 Unarchive（`archived` 變回 false）之後若再新增訊息，那批新訊息不會再滿足 `archived` 條件，會依當下成立的其他 trigger（`inactivity`／`manual`／`ended`）另切一刀，形成下一個獨立 episode（immutability 語義與其他 trigger 一致）；cursor 只前進，天然保證不會與已切的 archived episode 重疊 |
 | `inactivity` | `ended_at` NULL 且 `now - last_message_ts >= inactivity_hours` | 「暫時告一段落」的 checkpoint。session 之後復活＝正常，新訊息屬下一 episode |
 | `manual` | 人工執行 checkpoint 指令 | 立即切刀，無視門檻（例如「這段討論很重要，現在就擷取」） |
 
 **archived 的驗證狀態（誠實區分「邏輯已測」與「真實 UI 行為未驗證」）**：
-Archive（0→1）已用真實 Desktop session 實地驗證（見文首修訂記錄）；
-**Unarchive（1→0）的 live 驗證本次跳過**，是明確列出的非阻塞 test gap——
-2.4d-2 的 scanner 偵測邏輯實作與 fixture（測試矩陣 #28，第 8 節）必須涵蓋
-「archived true→false 後新增訊息應形成下一 episode」的情境，但那是用假
-資料（fixture/mock）驗證邏輯本身，**不代表已驗證過 Hermes UI 對
-Unarchive 的真實行為**。這個 gap 不阻塞本次 enum 定案，因為 archived 的
-trigger 契約（何時切刀、boundary 如何算）不依賴 Unarchive 是否發生——
-Unarchive 只影響「同一 session 之後是否還會有新訊息」，不影響已切
-episode 的語義。
+Archive 動作使 `archived` 由 0 變為 1 已用真實 Desktop session 實地驗證
+（見文首修訂記錄）；**Unarchive（讓 archived 變回 0）的 live 驗證本次
+跳過**，是明確列出的非阻塞 test gap——2.4d-2 的 scanner 判斷邏輯（level-
+triggered：每次檢查只看 `archived` 當下的值＋eligible 是否非空）與 fixture
+（測試矩陣 #28，第 8 節）必須涵蓋「Unarchive 之後新增的訊息，因為此時
+`archived` 已不成立，改由其他 trigger 條件在之後成立時另切一刀，形成下
+一個獨立 episode」的情境，但那是用假資料（fixture/mock）驗證判斷邏輯
+本身，**不代表已驗證過 Hermes UI 對 Unarchive 的真實行為**。這個 gap
+不阻塞本次 enum 定案，因為 archived 的 trigger 契約（何時切刀、boundary
+如何算）是逐次檢查當下狀態的 level-triggered 判斷，不依賴 scanner 記住
+或偵測 Unarchive 這個轉換本身——Unarchive 只影響「同一 session 之後
+`archived` 條件是否還成立」，不影響已切 episode 的語義，也不需要任何
+額外的狀態追蹤欄位。
 
 - 參數位置：`hermes/config/bridge.yaml` 的 `episodes.inactivity_hours`
   （**已拍板 72**，§0.1——比「過幾天拿出來繼續用」的節奏保守；切早了也
@@ -620,7 +633,7 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 | 25 | hash 一致（正常路徑） | scanner 切刀存 hash → importer 重算相符 → 正常落地；hash 為純函式（同內容同 snapshot 重算恆等） |
 | 26 | hash 不一致 → needs_review | 切刀後竄改測試 state.db 副本的 boundary 內內容 → importer 比對失敗 → needs_review、decision_reason 只含 `integrity:content_hash_mismatch` 標籤、不落地、cursor 不回退、不進自動重試 |
 | 27 | 非 default profile fail-closed | scanner：`--source-profile` 非 default＋episodes enabled → exit 1；importer：佇列出現非 default episode 列 → `unsupported_profile_fail_closed`、狀態與 cursor 全不動；cursor 表以 (profile, sid) 隔離——同 sid 不同 profile 各自獨立 |
-| 28 | trigger：archived（2026-07-12 前置任務 2 新增） | **邏輯已測（fixture/mock），非真實 Hermes UI 行為驗證**：repository 層 `create_episode(capture_trigger="archived")` 合法建立 episode（矩陣 #24 一致性檢查同樣適用）；archived 且 eligible 非空 → 不等 inactivity_hours 立即切（scanner 2.4d-2 實作時對照本條）；archived 但 eligible 為空 → 不切空 episode（與其他 trigger 同一通用規則，無特例分支）；fixture 模擬「archived true→false 後新增訊息」→ 新訊息形成下一個獨立 episode、既有 episode 列不變（immutability）。**非阻塞 test gap 明文標注**：Unarchive（1→0）對真實 Hermes Desktop UI 的 live 驗證本次跳過，未做、也不假裝已做 |
+| 28 | trigger：archived（2026-07-12 前置任務 2 新增；2026-07-12 第五版收斂為 level-triggered 措辭） | **邏輯已測（fixture/mock），非真實 Hermes UI 行為驗證**：repository 層 `create_episode(capture_trigger="archived")` 合法建立 episode（矩陣 #24 一致性檢查同樣適用）；`archived == true` 且 eligible 非空（level-triggered：只看當下值，不追蹤轉換）→ 不等 inactivity_hours 立即切（scanner 2.4d-2 實作時對照本條）；`archived == true` 但 eligible 為空 → 不切空 episode（與其他 trigger 同一通用規則，無特例分支）；fixture 模擬「Unarchive 之後（`archived` 已變回 false）新增訊息」→ 新訊息因不再滿足 archived 條件，改由其他成立的 trigger 形成下一個獨立 episode、既有 episode 列不變（immutability）。**非阻塞 test gap 明文標注**：Unarchive 對真實 Hermes Desktop UI 的 live 驗證本次跳過，未做、也不假裝已做 |
 
 ---
 
