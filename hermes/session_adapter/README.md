@@ -56,7 +56,7 @@ normalized memory/event 格式。**只讀，絕不寫回 Hermes 原始資料。*
 ## Read-only 保證（技術上強制）
 
 1. 唯一的 SQLite 連線入口用 URI `mode=ro` + `PRAGMA query_only=ON`——寫入語句直接被 SQLite 拒絕（有測試驗證）。
-2. `snapshot=True` 模式：複製 db（含 `-wal`/`-shm`）到 temp 再讀副本，避開 Hermes live 寫入時的鎖競爭；來源仍然只被讀取。
+2. `snapshot=True` 模式：複製 db（含 `-wal`/`-shm`）到 temp 再讀副本，避開 Hermes live 寫入時的鎖競爭；來源仍然只被讀取。**一致性驗證**：複製前後比對來源三檔的 fingerprint（存在與否、size、mtime_ns），不一致（複製期間來源被寫入，副本可能撕裂）→ 清掉該次 temp 目錄重試；副本另跑唯讀 `PRAGMA quick_check`，非 ok 同樣重試。最多 3 次，全失敗丟 `HermesSessionReadError`（fail loud），任何失敗路徑都不留 temp 目錄。副本一律以 `mode=ro` 開啟，不使用 `immutable=1`。
 3. `write_inbox_file()` 用 `open(mode="x")` 只新增、永不覆寫，且拒絕把輸出寫進來源資料目錄。
 4. 測試含 sha256 前後比對，證明完整讀取流程不改變來源檔任何 byte。
 

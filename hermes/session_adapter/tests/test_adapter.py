@@ -11,11 +11,14 @@ fixtures/seed_state_db.sql 建一個假的 state.db，不碰真正的 Hermes 資
 3. read-only 保證（來源檔 bytes 不變、寫入語句被 SQLite 拒絕、
    inbox 輸出不覆寫既有檔案、拒絕寫進來源目錄）
 4. normalized 輸出 schema 驗證（validate_event）
+5. snapshot 一致性（複製前後 fingerprint 比對、副本 quick_check、
+   失敗 retry 最多 3 次、任何失敗路徑不留 temp 目錄）
 
 執行（Windows）：py -3.11 hermes/session_adapter/tests/test_adapter.py
 執行（WSL/macOS）：python3 hermes/session_adapter/tests/test_adapter.py
 """
 import hashlib
+import os
 import shutil
 import sqlite3
 import sys
@@ -378,6 +381,218 @@ class TestInboxFrontmatter(AdapterTestBase):
             self.export, self.inbox, full=True).read_text(encoding="utf-8")
         self.assertNotIn("…（截斷）", long_body)
         self.assertIn("全部，工具呼叫略過", long_body)
+
+
+class TestSnapshotConsistency(AdapterTestBase):
+    """Stage 2.4d 前置：snapshot 一致性補強。
+
+    - 複製前後比對來源三檔（state.db／-wal／-shm）的 fingerprint
+      （existence, size, mtime_ns），不一致 → 清掉該次 temp 目錄 retry。
+    - 副本跑唯讀 PRAGMA quick_check，非 ok 同樣 retry。
+    - 最多 3 次，全失敗 → HermesSessionReadError，且不留任何 temp 目錄。
+    - 來源永遠只被讀取（含 -wal/-shm 的 fingerprint 零變動）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # 攔截 adapter 內的 tempfile.mkdtemp：記錄每次建立的 snapshot 目錄，
+        # 事後驗證失敗路徑零殘留。只換 adapter_module 上的參照，不動全域模組。
+        self.created_snapshot_dirs: list[Path] = []
+        real_tempfile = adapter_module.tempfile
+        record = self.created_snapshot_dirs
+
+        class _TempfileTracker:
+            @staticmethod
+            def mkdtemp(*args, **kwargs):
+                d = real_tempfile.mkdtemp(*args, **kwargs)
+                record.append(Path(d))
+                return d
+
+            def __getattr__(self, name):
+                return getattr(real_tempfile, name)
+
+        adapter_module.tempfile = _TempfileTracker()
+        self.addCleanup(setattr, adapter_module, "tempfile", real_tempfile)
+
+        # 測試不需要真的等 retry 間隔
+        real_delay = adapter_module._SNAPSHOT_RETRY_DELAY_S
+        adapter_module._SNAPSHOT_RETRY_DELAY_S = 0
+        self.addCleanup(
+            setattr, adapter_module, "_SNAPSHOT_RETRY_DELAY_S", real_delay)
+
+    def tearDown(self):
+        for d in self.created_snapshot_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        super().tearDown()
+
+    def _patch_copy2(self, fake_copy2):
+        """把 adapter 內的 shutil.copy2 換成 fake；rmtree 等其餘函式照舊。"""
+        real_shutil = adapter_module.shutil
+
+        class _ShutilPatch:
+            @staticmethod
+            def copy2(src, dst, **kwargs):
+                return fake_copy2(src, dst, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(real_shutil, name)
+
+        adapter_module.shutil = _ShutilPatch()
+        self.addCleanup(setattr, adapter_module, "shutil", real_shutil)
+
+    @staticmethod
+    def _bump_mtime(path: Path):
+        """模擬「來源被寫入」：mtime_ns +1ms（fingerprint 一定變）。"""
+        st = path.stat()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+    # (1) 穩定來源：第一次就成功，不 retry，close 後副本清掉
+    def test_stable_source_snapshot_first_attempt_succeeds(self):
+        db_copies = []
+        real_copy2 = shutil.copy2
+
+        def counting_copy2(src, dst, **kwargs):
+            if Path(src) == self.db_path:
+                db_copies.append(dst)
+            return real_copy2(src, dst, **kwargs)
+
+        self._patch_copy2(counting_copy2)
+        with HermesSessionAdapter(self.db_path, snapshot=True) as adapter:
+            self.assertEqual(len(adapter.list_sessions()), 3)
+            snapshot_path = adapter._read_path
+        self.assertEqual(len(db_copies), 1)  # 沒有 retry
+        self.assertEqual(len(self.created_snapshot_dirs), 1)
+        self.assertFalse(snapshot_path.exists())
+        self.assertFalse(self.created_snapshot_dirs[0].exists())
+
+    # (2) 第一次複製期間來源變動 → 該次作廢重試，第二次成功
+    def test_source_change_during_first_copy_retries_then_succeeds(self):
+        db_copies = []
+        real_copy2 = shutil.copy2
+        bump = self._bump_mtime
+        src_db = self.db_path
+
+        def flaky_copy2(src, dst, **kwargs):
+            result = real_copy2(src, dst, **kwargs)
+            if Path(src) == src_db:
+                db_copies.append(dst)
+                if len(db_copies) == 1:
+                    bump(src_db)  # 複製後、fingerprint 複查前，來源被寫入
+            return result
+
+        self._patch_copy2(flaky_copy2)
+        with HermesSessionAdapter(self.db_path, snapshot=True) as adapter:
+            self.assertEqual(len(adapter.list_sessions()), 3)
+            # 失敗的第一個 temp 目錄在成功前就已清掉；第二個是使用中的副本
+            self.assertEqual(len(self.created_snapshot_dirs), 2)
+            self.assertFalse(self.created_snapshot_dirs[0].exists())
+            self.assertTrue(self.created_snapshot_dirs[1].exists())
+        self.assertEqual(len(db_copies), 2)
+        self.assertFalse(self.created_snapshot_dirs[1].exists())  # close 後清掉
+
+    # (3) 持續變動 → 3 次全失敗，raise HermesSessionReadError，零殘留
+    def test_persistent_source_change_fails_after_three_attempts(self):
+        db_copies = []
+        real_copy2 = shutil.copy2
+        bump = self._bump_mtime
+        src_db = self.db_path
+
+        def always_changing_copy2(src, dst, **kwargs):
+            result = real_copy2(src, dst, **kwargs)
+            if Path(src) == src_db:
+                db_copies.append(dst)
+                bump(src_db)
+            return result
+
+        self._patch_copy2(always_changing_copy2)
+        with self.assertRaises(HermesSessionReadError) as ctx:
+            HermesSessionAdapter(self.db_path, snapshot=True)
+        self.assertEqual(len(db_copies), 3)  # 正好 3 次，不多不少
+        self.assertIn("fingerprint", str(ctx.exception))
+        self.assertEqual(len(self.created_snapshot_dirs), 3)
+        for d in self.created_snapshot_dirs:
+            self.assertFalse(d.exists(), f"temp 目錄殘留：{d}")
+
+    # (4) 副本損壞（quick_check 非 ok）→ 該次作廢重試，第二次成功
+    def test_quick_check_failure_triggers_retry(self):
+        db_copies = []
+        real_copy2 = shutil.copy2
+        src_db = self.db_path
+
+        def corrupting_copy2(src, dst, **kwargs):
+            result = real_copy2(src, dst, **kwargs)
+            if Path(src) == src_db:
+                db_copies.append(dst)
+                if len(db_copies) == 1:
+                    # 只弄壞「副本」——來源 fingerprint 不變，考驗 quick_check 這關
+                    Path(dst).write_bytes(b"corrupted snapshot, not sqlite")
+            return result
+
+        self._patch_copy2(corrupting_copy2)
+        with HermesSessionAdapter(self.db_path, snapshot=True) as adapter:
+            self.assertEqual(len(adapter.list_sessions()), 3)
+        self.assertEqual(len(db_copies), 2)
+        self.assertFalse(self.created_snapshot_dirs[0].exists())
+
+    # (5) 複製途中 OSError（例：-wal 被 checkpoint 移除）→ retry → 全失敗 fail loud
+    def test_copy_oserror_retries_then_fails_without_leftovers(self):
+        def failing_copy2(src, dst, **kwargs):
+            raise OSError("simulated：來源側檔在複製瞬間消失")
+
+        self._patch_copy2(failing_copy2)
+        with self.assertRaises(HermesSessionReadError):
+            HermesSessionAdapter(self.db_path, snapshot=True)
+        self.assertEqual(len(self.created_snapshot_dirs), 3)
+        for d in self.created_snapshot_dirs:
+            self.assertFalse(d.exists(), f"temp 目錄殘留：{d}")
+
+    # (6) 非預期例外中途炸掉 → 例外照樣往外丟，但 temp 目錄不殘留
+    def test_unexpected_exception_mid_copy_leaves_no_temp_dir(self):
+        def exploding_copy2(src, dst, **kwargs):
+            raise RuntimeError("unexpected explosion")
+
+        self._patch_copy2(exploding_copy2)
+        with self.assertRaises(RuntimeError):
+            HermesSessionAdapter(self.db_path, snapshot=True)
+        self.assertEqual(len(self.created_snapshot_dirs), 1)
+        self.assertFalse(self.created_snapshot_dirs[0].exists())
+
+    # (7) 來源三檔（含 -wal/-shm）fingerprint 零變動；wal 內容有進副本
+    def test_source_fingerprints_untouched_including_wal_shm(self):
+        holder = sqlite3.connect(self.db_path)
+        try:
+            holder.execute("PRAGMA journal_mode=WAL")
+            holder.execute("PRAGMA wal_autocheckpoint=0")
+            holder.execute(
+                "INSERT INTO sessions (id, source, started_at, message_count) "
+                "VALUES ('20260711_000000_walonly', 'cli', 1783500000.0, 0)")
+            holder.commit()
+            wal = Path(str(self.db_path) + "-wal")
+            shm = Path(str(self.db_path) + "-shm")
+            self.assertTrue(wal.is_file())
+            self.assertTrue(shm.is_file())
+
+            def fp(p: Path):
+                st = p.stat()
+                return (st.st_size, st.st_mtime_ns)
+
+            before = {p.name: fp(p) for p in (self.db_path, wal, shm)}
+            with HermesSessionAdapter(self.db_path, snapshot=True) as adapter:
+                sessions = adapter.list_sessions()
+            # 第 4 個 session 只存在 -wal 裡——讀得到代表 wal 有進副本
+            self.assertEqual(len(sessions), 4)
+            after = {p.name: fp(p) for p in (self.db_path, wal, shm)}
+            self.assertEqual(after, before)
+        finally:
+            holder.close()
+
+    # (8) snapshot=False 路徑不回歸：直讀來源、不建任何 temp 目錄
+    def test_snapshot_false_reads_source_directly_no_temp(self):
+        adapter = HermesSessionAdapter(self.db_path, snapshot=False)
+        self.assertEqual(adapter._read_path, self.db_path)
+        self.assertEqual(len(adapter.list_sessions()), 3)
+        adapter.close()  # 沒有 snapshot 目錄時 close 也安全
+        self.assertEqual(self.created_snapshot_dirs, [])
 
 
 class TestSchemaValidation(AdapterTestBase):

@@ -25,6 +25,12 @@ Read-only 保證（技術上強制，不是自律）：
 2. 模組內沒有任何以寫入模式開啟來源路徑的 code path。
 3. 可選的 snapshot 模式（`snapshot=True`）只「讀」來源檔、複製到 temp 目錄
    後開副本——處理 Hermes 正在寫入 WAL 時的鎖競爭，仍然不碰來源。
+   一致性補強（2026-07-11）：複製前後比對來源三檔（state.db／-wal／-shm）
+   的 fingerprint（存在與否、size、mtime_ns），不一致代表複製期間來源被寫入
+   （副本可能撕裂）；副本另跑唯讀 PRAGMA quick_check。兩關任一沒過 → 清掉
+   該次 temp 目錄重試（最多 3 次），全失敗丟 HermesSessionReadError（fail
+   loud），任何失敗路徑都不留 temp 目錄。副本一律用 mode=ro 開啟，不使用
+   immutable=1（來源可能正被寫入，對 live 檔案假設 immutable 是錯的）。
 4. `write_inbox_file()` 只會在指定的 inbox 目錄「新增」檔案（open mode="x"，
    永不覆寫既有檔案），且拒絕把輸出寫進來源 db 所在目錄。
 
@@ -62,6 +68,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -73,6 +80,13 @@ KNOWN_ROLES = {"user", "assistant", "tool", "system", "session_meta"}
 
 # 正常訊息流之外的角色，一律歸成 meta 事件
 _META_ROLES = {"session_meta"}
+
+# snapshot 一致性驗證：重試上限與重試間隔（秒，線性遞增；測試可覆寫歸零）
+_SNAPSHOT_MAX_ATTEMPTS = 3
+_SNAPSHOT_RETRY_DELAY_S = 0.05
+
+# SQLite WAL 模式的側檔（fingerprint 與複製都涵蓋這兩個）
+_DB_SIDECAR_SUFFIXES = ("-wal", "-shm")
 
 
 class HermesSessionReadError(Exception):
@@ -105,6 +119,45 @@ def default_state_db_path() -> Path:
     raise FileNotFoundError(
         "找不到 Hermes state.db，找過：" + "; ".join(str(c) for c in candidates)
     )
+
+
+def _file_fingerprint(path: Path) -> tuple:
+    """單一檔案的 fingerprint：(存在與否, size, mtime_ns)。
+    不存在（或 stat 失敗）→ (False, None, None)。只 stat、不開檔——
+    取 fingerprint 這個動作本身不會動到來源任何東西。"""
+    try:
+        st = path.stat()
+    except OSError:
+        return (False, None, None)
+    return (True, st.st_size, st.st_mtime_ns)
+
+
+def _source_fingerprints(db_path: Path) -> dict[str, tuple]:
+    """來源三檔（state.db、-wal、-shm）各自的 fingerprint。
+    粒度是「每檔一組 (existence, size, mtime_ns)」，複製前後任一檔任一項
+    變動都視為來源在複製期間被寫入。"""
+    fps = {"db": _file_fingerprint(db_path)}
+    for suffix in _DB_SIDECAR_SUFFIXES:
+        fps[suffix] = _file_fingerprint(Path(str(db_path) + suffix))
+    return fps
+
+
+def _open_ro(path: Path) -> sqlite3.Connection:
+    """模組內唯一的 SQLite 連線入口：URI mode=ro + PRAGMA query_only=ON。
+    live 來源與 snapshot 副本都走這裡；一律不用 immutable=1——來源可能
+    正被 Hermes 寫入，副本則沿用同一套 read-only 慣例，不需要 immutable。"""
+    uri = f"file:{path.as_posix()}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=10)
+    except sqlite3.Error as exc:
+        raise HermesSessionReadError(f"無法以 read-only 開啟 {path}：{exc}") from exc
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only=ON")
+    except sqlite3.Error as exc:
+        conn.close()
+        raise HermesSessionReadError(f"無法以 read-only 開啟 {path}：{exc}") from exc
+    return conn
 
 
 def _epoch_to_iso(value) -> str | None:
@@ -164,15 +217,76 @@ class HermesSessionAdapter:
 
     def _make_snapshot(self) -> Path:
         """把 db（含 -wal/-shm，如果存在）複製到 temp 目錄，之後只讀副本。
-        來源只被讀取，永不寫入。"""
-        self._snapshot_dir = tempfile.mkdtemp(prefix="hermes_state_snapshot_")
-        dest = Path(self._snapshot_dir) / self.db_path.name
-        shutil.copy2(self.db_path, dest)
-        for suffix in ("-wal", "-shm"):
-            side = Path(str(self.db_path) + suffix)
-            if side.is_file():
-                shutil.copy2(side, Path(str(dest) + suffix))
-        return dest
+        來源只被讀取，永不寫入。
+
+        一致性保證（Hermes 可能同時在寫來源）：
+        1. 複製前後各取一次來源三檔的 fingerprint（見 _source_fingerprints），
+           兩次不一致代表複製期間來源變動，副本可能撕裂，整組作廢。
+        2. 副本再跑唯讀 PRAGMA quick_check，非 ok 同樣作廢。
+        3. 作廢 → 清掉該次 temp 目錄重試（間隔 _SNAPSHOT_RETRY_DELAY_S 線性
+           遞增），最多 _SNAPSHOT_MAX_ATTEMPTS 次；全部失敗丟
+           HermesSessionReadError（fail loud）。任何失敗路徑（含複製中途
+           例外）都不留 temp 目錄。"""
+        failures: list[str] = []
+        for attempt in range(1, _SNAPSHOT_MAX_ATTEMPTS + 1):
+            if attempt > 1 and _SNAPSHOT_RETRY_DELAY_S > 0:
+                time.sleep(_SNAPSHOT_RETRY_DELAY_S * (attempt - 1))
+            snapshot_dir = tempfile.mkdtemp(prefix="hermes_state_snapshot_")
+            keep = False
+            try:
+                dest = Path(snapshot_dir) / self.db_path.name
+                failure = self._copy_and_verify_snapshot(dest)
+                if failure is None:
+                    keep = True
+                    self._snapshot_dir = snapshot_dir
+                    return dest
+                failures.append(
+                    f"attempt {attempt}/{_SNAPSHOT_MAX_ATTEMPTS}: {failure}")
+            finally:
+                if not keep:
+                    shutil.rmtree(snapshot_dir, ignore_errors=True)
+        raise HermesSessionReadError(
+            f"無法取得 {self.db_path} 的一致 snapshot"
+            f"（重試 {_SNAPSHOT_MAX_ATTEMPTS} 次仍失敗）：" + "；".join(failures))
+
+    def _copy_and_verify_snapshot(self, dest: Path) -> str | None:
+        """單次複製 + 兩關驗證。成功回 None；失敗回原因字串
+        （temp 目錄的清理由 _make_snapshot 的 finally 負責）。"""
+        before = _source_fingerprints(self.db_path)
+        try:
+            shutil.copy2(self.db_path, dest)
+            for suffix in _DB_SIDECAR_SUFFIXES:
+                side = Path(str(self.db_path) + suffix)
+                if side.is_file():
+                    shutil.copy2(side, Path(str(dest) + suffix))
+        except OSError as exc:
+            # 例：-wal 在複製瞬間被 Hermes checkpoint 移除——視同來源變動
+            return f"複製途中讀取來源失敗：{exc}"
+        after = _source_fingerprints(self.db_path)
+        if before != after:
+            changed = sorted(k for k in before if before[k] != after[k])
+            return ("來源在複製期間變動（fingerprint 不一致："
+                    + ", ".join(changed) + "）")
+        return self._snapshot_quick_check(dest)
+
+    @staticmethod
+    def _snapshot_quick_check(dest: Path) -> str | None:
+        """對 snapshot 副本跑唯讀 PRAGMA quick_check（mode=ro + query_only，
+        走 _open_ro 同一入口）。回傳 None = ok；否則回傳失敗原因。"""
+        try:
+            conn = _open_ro(dest)
+        except HermesSessionReadError as exc:
+            return f"副本無法以 read-only 開啟：{exc}"
+        try:
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        except sqlite3.Error as exc:
+            return f"副本 PRAGMA quick_check 執行失敗：{exc}"
+        finally:
+            conn.close()
+        results = [str(row[0]) for row in rows]
+        if results == ["ok"]:
+            return None
+        return "副本 quick_check 回報異常：" + "; ".join(results[:5])
 
     def close(self):
         if self._snapshot_dir:
@@ -186,14 +300,8 @@ class HermesSessionAdapter:
         self.close()
 
     def _connect(self) -> sqlite3.Connection:
-        uri = f"file:{self._read_path.as_posix()}?mode=ro"
+        conn = _open_ro(self._read_path)
         try:
-            conn = sqlite3.connect(uri, uri=True, timeout=10)
-        except sqlite3.Error as exc:
-            raise HermesSessionReadError(f"無法以 read-only 開啟 {self._read_path}：{exc}") from exc
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA query_only=ON")
             conn.execute("SELECT 1 FROM sessions LIMIT 1")
             conn.execute("SELECT 1 FROM messages LIMIT 1")
         except sqlite3.Error as exc:
