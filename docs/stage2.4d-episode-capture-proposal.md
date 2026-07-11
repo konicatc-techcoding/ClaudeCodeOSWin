@@ -2,9 +2,14 @@
 
 日期：2026-07-11　狀態：**提案・待使用者核准（proposal only，未實作、未改任何既有檔案）**
 負責領域：`engineering`
+修訂：2026-07-11 第二版——方向已獲使用者核准（暫不開工），依指示補齊三個
+blocker：(1) cursor DB 重建的誠實修正＋recovery 流程（§3.2）；(2) schema v2
+新增 `first_message_id`／`last_message_id`／`source_content_hash` 完整性欄位
+（§1.2、§4.5）；(3) `bridge_cursors` 複合主鍵＋profile fail-closed 邊界（§1.2、§6.1）。
 
 > **本文件是設計提案，不是決策記錄。** 核准前不得動 schema、程式碼、config、
-> systemd units 或部署側資料。文中「建議」「主推」均待使用者拍板。
+> systemd units 或部署側資料。§0.1 所列項目已由使用者拍板；其餘設計待
+> 本文件整體核准後才進入實作。
 
 ---
 
@@ -34,6 +39,16 @@
 episode 已 immutable、內容不變；新訊息屬於**下一個** episode。session 的
 「復活」在這個模型裡不是異常狀態，而是常態；任何 trigger 都只回答
 「現在要不要切一刀」，不回答「session 是否完結」。
+
+### 0.1 已定案（2026-07-11 使用者拍板，從開放問題移入）
+
+1. **`episode_cutover` ＝ 2.4d 部署啟用的精確 UTC 時刻**——部署當下
+   （翻 `episodes.enabled: true` 之前）記錄的實際時間戳，**不是日期概念值**
+   （不取 00:00、不取部署「日」）。
+2. **`inactivity_hours` ＝ 72**。
+3. **接受方案 A**：legacy 列與 episode 列同表共存。
+4. **ended 後復活不加特例**：統一規則（eligible 只看訊息、trigger 只看時機）。
+5. **manual checkpoint 不觸發 importer**：scan／import 職責分離不破例。
 
 ---
 
@@ -80,24 +95,31 @@ B 會誘發同類複製）。
 
 ### 1.2 欄位層面定義（方案 A）
 
-**`bridge_sessions` 新增欄（17 → 19 欄）**：
+**`bridge_sessions` 新增欄（17 → 22 欄）**：
 
 | 欄位 | 型別 | 必填 | 語義 |
 |---|---|---|---|
 | `episode_seq` | int | optional | 該 session 的第幾個 episode（1 起算）。NULL＝pre-2.4d 的 legacy session-level 記錄。只供人讀與排序；**identity 仍以 event_id 的 boundary 為準** |
 | `capture_trigger` | enum | optional | `ended | inactivity | manual | legacy`。記「這刀是誰切的」，純追蹤；NULL 視同 legacy（migration 會回填 `legacy`） |
+| `first_message_id` | int | optional（episode 列必填） | boundary 顯式欄位：episode 首則訊息的 Hermes rowid。legacy 列 NULL |
+| `last_message_id` | int | optional（episode 列必填） | boundary 顯式欄位：episode 末則訊息的 Hermes rowid。legacy 列 NULL |
+| `source_content_hash` | string | optional（episode 列必填） | episode 內容雜湊（§4.5）：scanner 切刀時由**同一 snapshot** 計算；importer 匯入時重算比對，不一致 → needs_review |
 
-boundary（first/last message rowid）**不另設獨立欄**：episode 列的
-`event_id` 與 `event_id_range` 同值（`hermes:<sid>:<first>..<last>`），
-已完整承載；加冗餘 int 欄會製造第三份真相。程式內需要數值時從
-event_id 解析（repository 提供 helper，單處實作）。
+boundary 承載的立場（**修訂**先前「只由 event_id 承載、不設顯式欄」的版本）：
+`event_id`（＝`event_id_range`＝`hermes:<sid>:<first>..<last>`）仍是**唯一性
+載體**（UNIQUE 去重 key）；`first_message_id`／`last_message_id` 是**顯式
+查詢與 recovery 欄位**——cursor 重建（§3.2）要對 session 取
+`max(last_message_id)`，靠 SQL 直接查比解析字串可靠。兩者不是兩份真相：
+repository 的 `create_episode()` 由同一組 boundary 值同時產生 event_id 與
+顯式欄位，**測試強制兩者一致**（矩陣 #24：任一 episode 列的 event_id 解析
+結果必須等於顯式欄位，不一致即 schema 對齊測試失敗）。
 
 **新表 `bridge_cursors`（per-session 游標，純簿記）**：
 
 | 欄位 | 型別 | 必填 | 語義 |
 |---|---|---|---|
-| `session_id` | string (PK) | required | Hermes session id |
-| `source_profile` | string | required | 同 bridge_sessions 慣例 |
+| `source_profile` | string (PK 之一) | required | 來源 Hermes profile。**複合主鍵 `(source_profile, session_id)`**——不同 profile 的同名 session 絕不共用 cursor（§6.1） |
+| `session_id` | string (PK 之一) | required | Hermes session id |
 | `last_captured_message_id` | int | required | **cursor**：此 rowid（含）以前的訊息已被某個 episode 涵蓋或被判定永不自動擷取。只前進不後退 |
 | `last_episode_seq` | int | required | 已切出的最大 episode 序號（0＝尚無 episode） |
 | `updated_at` | string | required | UTC ISO 8601 |
@@ -105,9 +127,22 @@ event_id 解析（repository 提供 helper，單處實作）。
 cursor 前進與 episode 列建立在**同一個 SQLite transaction** 內完成
 （repository 層新 API，例如 `create_episode(...)`）：要嘛「episode 列
 ＋cursor 前進」都成立，要嘛都不成立——保證每則訊息至多屬於一個
-episode、cursor 永不回退。`bridge_cursors` 與 watermark 同屬部署側
-可拋棄狀態：db 重建後 cursor 消失，第一次 capture 退回 episode_cutover
-底線（第 5 節），event_id 去重保證重疊無害。
+episode、cursor 永不回退。`create_episode()` 撞到既有 event_id
+（`UNIQUE` conflict，同 boundary 已存在）時視為冪等 no-op：不動既有列、
+只把 cursor 推進到該 boundary 的 last（重掃／recovery 後重切同一刀的
+安全路徑）。
+
+**可拋棄語義的誠實界定（修訂）**：`bridge_cursors` 與 watermark 同屬部署側
+可拋棄狀態，但「刪掉重建後直接重掃」**並非無害**——重建後 cursor 消失，
+若逕自從 episode_cutover 重切，切出的 boundary 可能與歷史 episode
+**不同**（例如歷史已匯入 `100..120`，重建後累積新訊息切出 `100..130`），
+而 `UNIQUE(event_id)` **只擋完全相同的 boundary，擋不住不同 boundary 的
+重疊內容**；episode 檔名查重精確到 boundary，同樣擋不住。因此 db 重建後
+的**必要前置**是 §3.2 的 recovery 流程（reconcile 從 inbox 目錄真相重建
+cursor），且 scanner 對「無 cursor 但已存在該 session episode 檔」的情況
+fail-closed 拒切（§3.2）。「可拋棄」的正確含義是：**db 消失不損失任何
+可重建資訊**（cursor 可由落地檔案重建、判定可由重跑重derive），不是
+「消失後不需要 recovery 步驟」。
 
 ### 1.3 registry schema 版本策略：v1 → **v2**
 
@@ -117,10 +152,16 @@ episode、cursor 永不回退。`bridge_cursors` 與 watermark 同屬部署側
 3 筆存量資料與活的寫入者，且本次真的有 migration（加欄＋新表）。
 依同一邏輯反向適用：**升 `claudecodeos.bridge_state.v2`**，yaml 內容：
 
-- `bridge_sessions` 19 欄（17 欄原樣＋2 新欄，enum 值照舊由 yaml 供驗證）；
-- 新增 `bridge_cursors` 區塊（上表 5 欄）；
+- `bridge_sessions` 22 欄（17 欄原樣＋5 新欄：`episode_seq`、
+  `capture_trigger`、`first_message_id`、`last_message_id`、
+  `source_content_hash`；enum 值照舊由 yaml 供驗證）。條件必填規則
+  （比照 `error_reason`／`imported_inbox_path` 慣例，由 repository 驗證）：
+  episode 列（event_id 含 `..`）五個新欄全必填；legacy 列全 NULL；
+- 新增 `bridge_cursors` 區塊（上表 5 欄，複合主鍵
+  `(source_profile, session_id)`）；
 - 修訂 `event_id` description：「session 層級 `hermes:<sid>`（legacy）或
-  episode 層級 `hermes:<sid>:<first>..<last>`」；
+  episode 層級 `hermes:<sid>:<first>..<last>`」，並記載保留的未來
+  profile namespace（§6.1，本階段不啟用）；
 - 檔頭記錄 v1→v2 的 migration 語義（第 3 節）。
 
 `hermes/config/bridge.yaml` 新增（政策層，版控＋同步下發，沿用 fail-loud 慣例）：
@@ -128,8 +169,9 @@ episode、cursor 永不回退。`bridge_cursors` 與 watermark 同屬部署側
 ```yaml
 episodes:
   enabled: false            # 2.4d-4 部署驗證通過後才翻 true（rollout 開關）
-  episode_cutover: "<2.4d 部署日>T00:00:00Z"   # episode 自動擷取的絕對底線（第 5 節）
-  inactivity_hours: 72      # inactivity trigger 門檻（第 4 節）
+  episode_cutover: "<2.4d 部署啟用當下記錄的精確 UTC 時刻>"  # 已拍板（§0.1）：
+                            # 翻 enabled 前取當下時間戳寫入，不是日期概念值
+  inactivity_hours: 72      # 已拍板（§0.1）
 ```
 
 `episodes.enabled=false` 或整個區塊缺失時，scanner 維持 2.4c 行為
@@ -151,6 +193,14 @@ episodes:
 區分規則：含 `..` ＝ episode；含 `:` 但無 `..` 且冒號後是整數 ＝ 訊息；
 其餘 ＝ session 層級。（Hermes sid 格式 `20260630_183709_063b4e40` 不含
 冒號，無歧義。）
+
+**profile namespace 預留（本階段不啟用，§6.1）**：現行三種格式全部隱含
+`source_profile=default`。未來支援多 profile 時的擴充格式**現在就定案**
+（避免屆時再一次 event_id migration）：`hermes/<profile>:<sid>:<first>..<last>`
+（session／訊息層級同理加 `hermes/<profile>:` 前綴）。`/` 不出現在既有
+格式的 source 段（恆為裸 `hermes`），機械可區分。本階段任何元件讀到
+`hermes/` 開頭的 event_id 或非 default 的 source_profile 一律 fail-closed
+拒絕處理（§6.1），**不得默默視為 default**。
 
 **inbox 檔名（deterministic，從 boundary 衍生、不含匯入時間）**：
 
@@ -192,7 +242,9 @@ event_id）→ 檔名 ep 捕獲組 → 無 ep 段退回 legacy session 層級。
 
 ---
 
-## 3. Migration：部署側既有 3 筆的處置（提案七項之三）
+## 3. Migration 與 Recovery（提案七項之三＋cursor 重建）
+
+### 3.1 Migration：部署側既有 3 筆的處置
 
 部署側 `bridge_state.db` 現有 3 筆 session 層級記錄（`hermes:<sid>` 格式；
 imported／skipped／needs_review 各一）。
@@ -231,6 +283,75 @@ imported／skipped／needs_review 各一）。
 `WHERE session_id=? ORDER BY episode_seq NULLS FIRST`。legacy 列的
 needs_review 仍留給互動式 session 人工處置（維持 2.4c 語義），episode
 管線不消費、也不清除它。
+
+### 3.2 Recovery：bridge_state.db 重建後的 cursor 重建（blocker 修訂）
+
+**問題的誠實陳述**：db 重建後 cursor 消失，若直接重掃並從 episode_cutover
+重切，boundary 會隨「重建之後又累積了多少新訊息」而變——歷史已匯入
+`100..120` 的 session，重建後可能切出 `100..130`。`UNIQUE(event_id)` 只擋
+**完全相同**的 boundary；episode 檔名查重也精確到 boundary——兩者都
+**擋不住不同 boundary 的重疊內容重複落地**。所以 recovery 不是可選的
+最佳化，是重建後的**必要步驟**。
+
+**Recovery 流程（整合進 reconcile——目錄真相回填本來就只有這一份實作）**：
+
+reconcile 掃 `memory/inbox/` 本層＋`.processed/`＋`.failed/` 時（既有職責），
+對每個帶 boundary 的 episode 檔（deterministic 檔名 `_ep<first>-<last>` 或
+frontmatter `event_id_range`，兩者都攜帶 boundary）額外做：
+
+1. 回填 episode 列（既有 episode-aware 回填，§2）——含顯式欄位
+   `first_message_id`／`last_message_id`（從 boundary 直接寫入；
+   `source_content_hash` 無法自檔案還原，回填 NULL 並在 decision_reason
+   註明，不影響去重）；
+2. **重建 cursor**：對每個 `(source_profile, session_id)`，取其所有已落地
+   episode 檔的 `max(last_message_id)`，upsert 進 `bridge_cursors`
+   （**只前進不後退**：現值更大時 no-op——recovery 對健康 db 重跑無害，
+   天然冪等）；`last_episode_seq` 取已落地檔 frontmatter `episode` 的最大值
+   （缺 frontmatter 時取檔案數保守估計，只影響序號可讀性、不影響 boundary
+   正確性）。
+
+**scanner 側的 fail-closed 防護（防「忘了跑 recovery 就掃」）**：episode
+偵測遇到「該 session 無 cursor、但 inbox 三層存在該 sid 的 `_ep` 檔」時，
+**拒切**該 session 並回報「cursor 缺失但已有 episode 落地檔——請先跑
+reconcile」（記錄並跳過，不是錯誤退出；其他 session 照常處理）。偵測用的
+「存在性探測」復用 importer 的同一 needle helper（單處實作），不複製
+reconcile 的回填邏輯。
+
+**cursor 重建後切刀位置的穩定性推演（精確結論，逐 case）**：
+
+| Case | 重建後 cursor | 下一刀 boundary | 與歷史的關係 |
+|---|---|---|---|
+| session 的**最後**一個 episode 有落地檔（to_inbox／.processed／.failed） | ＝歷史 cursor（該檔 last） | `[last+1..max]` | **穩定**：與未重建時完全相同 |
+| 最後一個（或多個連續尾端）episode 是**無檔判定**（needs_review／skipped／export-failed——這些依 fail-closed 從不落地） | ＝最後**落地** episode 的 last，**低於**歷史 cursor | 一刀吸收「無檔區段＋新訊息」，boundary **比歷史寬** | **不穩定但受控**（見下） |
+| session 從無任何落地檔（全部 episode 都無檔判定，或從未切過） | 無 cursor → episode_cutover 底線 | `[cutover 後首則..max]` | 同上，boundary 可能與歷史任何一刀都不同 |
+
+「不穩定但受控」的精確含義——後果分析：
+
+- **不會重複落地**：歷史落地內容已被重建 cursor 蓋住（第 1 種 case 的
+  保證）；無檔區段本來就沒落地過，被新刀吸收後**第一次**有機會落地，
+  inbox 無重複。
+- **無檔判定被重判一次**：判定是 deterministic 的（敏感 pattern、結構性
+  排除都是純函式）——敏感區段被吸進新刀後，新刀整刀再次 needs_review
+  （fail-closed 傳染整個 episode，無害且保守）；skipped 區段可能因與新
+  訊息合併而翻成 pass（too_short 門檻被合併內容超過）——這是**擴大保留**
+  而非資料損失，可接受。
+- **DB 列的 boundary 與歷史不同**：舊列已隨 db 消失（整庫重建情境），
+  不產生同庫並存的重疊列。**部分重建**情境（bridge_sessions 倖存、只有
+  bridge_cursors 消失）下，recovery 第 2 步從檔案重建 cursor 後：若無新
+  訊息，重切的刀與倖存列 boundary 相同 → `create_episode` 的 UNIQUE
+  conflict 冪等路徑（§1.2）接住、只推 cursor；若有新訊息且尾端存在無檔
+  判定列，會產生一筆與倖存 needs_review 列 boundary 重疊的新列——
+  **誠實承認：這是設計接受的殘留情況**，兩列都是 needs_review／待人工，
+  內容不落地、人工檢視時一併處置；要根絕它得讓 recovery 也能從「無檔
+  判定」重建 cursor，但那些判定沒有檔案真相可依（唯一來源就是 db 自己），
+  邏輯上不可能，fail-closed 的重判是正確的取捨。
+
+**結論**：切刀位置穩定 ⇔ 「session 尾端最後一次切刀有落地檔」。已落地
+內容在 recovery 後**保證**不重複落地；無檔判定（needs_review／skipped／
+failed-無檔）在重建後會以可能更寬的 boundary 重判一次，結果 deterministic
+且 fail-closed，不造成 inbox 重複、可能多出待人工的重疊 DB 列（僅部分
+重建情境）。文件其他各節不得再出現「event_id 去重保證重建後重疊無害」
+的說法（第一版此類敘述已全數修訂）。
 
 ---
 
