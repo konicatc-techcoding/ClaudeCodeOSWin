@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""hermes/bridge_state.py — v0.1（Stage 2.2）
+"""hermes/bridge_state.py — v0.2（Stage 2.4d-1）
 
 Stage 2 session bridge 的處理狀態（bookkeeping）SQLite 存取層。
-格式契約正本：registry/bridge_state_schema.yaml（claudecodeos.bridge_state.v1，17 欄）；
-設計說明：docs/memory-bridge-state.md。
+格式契約正本：registry/bridge_state_schema.yaml（claudecodeos.bridge_state.v2，
+bridge_sessions 22 欄＋bridge_cursors 5 欄）；設計說明：
+docs/memory-bridge-state.md、docs/stage2.4d-episode-capture-proposal.md
+（已核准提案＝episode capture 的規格正本）。
 
 這個 DB 是什麼、不是什麼（硬邊界，全部沿用既有決策）：
 
@@ -32,20 +34,38 @@ Stage 2 session bridge 的處理狀態（bookkeeping）SQLite 存取層。
 - `error_reason` 只記 bridge 層錯誤摘要，**不得含 session 敏感內容**
   （schema description 的既有約束）。
 
-除了 bridge_sessions（17 欄），另有 bridge_meta（key-value；Stage 2.4a）存放
-scanner 的 scan_watermark——最近一次真實 scan 的窗口上界，**只前進不後退**
-（get_scan_watermark / advance_scan_watermark），同樣是可拋棄的部署側狀態：
-db 重建後 watermark 消失，scanner 退回 hermes/config/bridge.yaml 的 cutover
-底線重掃，event_id 去重保證無害。
+除了 bridge_sessions（22 欄），另有：
 
-CLI（供未來 WSL 部署側手動初始化/檢視用；Windows 開發側不要對預設路徑執行 init）：
+- bridge_meta（key-value；Stage 2.4a）：scanner 的 scan_watermark——最近一次
+  真實 scan 的窗口上界，**只前進不後退**（get_scan_watermark /
+  advance_scan_watermark），同樣是可拋棄的部署側狀態：db 重建後 watermark
+  消失，scanner 退回 hermes/config/bridge.yaml 的 cutover 底線重掃，
+  event_id 去重保證無害。
+- bridge_cursors（Stage 2.4d）：per-session episode 游標（複合主鍵
+  (source_profile, session_id)），純簿記、**沒有狀態機**（session「處理到哪」
+  的答案是它的 episode 列集合，提案 §4.2）。cursor 只前進不後退。
+  可拋棄語義的誠實界定（提案 §1.2）：db 重建後**必要前置**是 reconcile 的
+  recovery 流程（§3.2，從 inbox 目錄真相重建 cursor）再掃——「可拋棄」＝
+  db 消失不損失任何可重建資訊，不是「消失後不需要 recovery 步驟」。
+
+Stage 2.4d 的核心不變量（提案 §1.2、風險 3——**不得被未來改動拆開**）：
+create_episode() 的「episode 列建立＋cursor 前進」在**同一個 SQLite
+transaction** 內完成，要嘛都成立、要嘛都不成立——這是「每則訊息至多屬於
+一個 episode、cursor 永不回退」的機械保證。撞既有 event_id（同 boundary
+已存在）時走冪等路徑：不動既有列、只把 cursor 推進到該 boundary 的 last。
+
+CLI（供 WSL 部署側手動初始化/檢視/migration 用；Windows 開發側不要對預設路徑執行 init/migrate）：
     python3 hermes/bridge_state.py init [--db-path PATH]
     python3 hermes/bridge_state.py show <event_id> [--db-path PATH]
     python3 hermes/bridge_state.py list [--import-status X] [--db-path PATH]
     python3 hermes/bridge_state.py watermark [--db-path PATH]
+    python3 hermes/bridge_state.py migrate [--db-path PATH]   # v1→v2（冪等，提案 §3.1）
 """
 import argparse
 import contextlib
+import hashlib
+import json
+import re
 import sqlite3
 import sys
 import threading
@@ -69,10 +89,13 @@ SQL_TYPE_BY_SCHEMA_TYPE = {
     "int": "INTEGER",
 }
 
-# 17 欄與 registry/bridge_state_schema.yaml 一一對應（順序照 yaml）；
-# required → NOT NULL；event_id 做 UNIQUE（去重 key，session 層級
-# "hermes:<session_id>"）。enum 的合法值不寫進 DDL（SQLite 沒有原生 enum，
-# 也避免寫死第二份）——由 upsert/list 從 yaml 讀取驗證。
+# 22 欄與 registry/bridge_state_schema.yaml 一一對應（順序照 yaml）；
+# required → NOT NULL；event_id 做 UNIQUE（去重 key：session 層級
+# "hermes:<session_id>"（legacy）或 episode 層級 "hermes:<sid>:<first>..<last>"）。
+# enum 的合法值不寫進 DDL（SQLite 沒有原生 enum，也避免寫死第二份）——
+# 由 upsert/list/create_episode 從 yaml 讀取驗證。五個 episode 欄的條件必填
+# （episode 列全必填、legacy 列 NULL）同樣不進 DDL，由 repository 驗證
+# （比照 error_reason／imported_inbox_path 慣例）。
 CREATE_TABLE_SQL = f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         session_id                TEXT    NOT NULL,
@@ -91,9 +114,24 @@ CREATE_TABLE_SQL = f"""
         retry_count               INTEGER NOT NULL DEFAULT 0,
         error_reason              TEXT,
         event_id                  TEXT    NOT NULL UNIQUE,
-        event_id_range            TEXT
+        event_id_range            TEXT,
+        episode_seq               INTEGER,
+        capture_trigger           TEXT,
+        first_message_id          INTEGER,
+        last_message_id           INTEGER,
+        source_content_hash       TEXT
     )
 """
+
+# v1（17 欄）→ v2 的加欄清單：ensure_schema／migrate 對既有 db 冪等補欄
+# （先查 PRAGMA table_info，已存在則跳過——比照 bridge_meta 的升級路徑先例）。
+EPISODE_COLUMNS = (
+    ("episode_seq", "INTEGER"),
+    ("capture_trigger", "TEXT"),
+    ("first_message_id", "INTEGER"),
+    ("last_message_id", "INTEGER"),
+    ("source_content_hash", "TEXT"),
+)
 
 # bridge scanner 的 runtime 中繼資料（key-value；Stage 2.4a）。目前唯一的 key
 # 是 scan_watermark：最近一次「真實」（非 dry-run）scan 成功完成時的掃描窗口
@@ -110,8 +148,35 @@ CREATE_META_TABLE_SQL = f"""
     )
 """
 
+# per-session episode 游標（Stage 2.4d，提案 §1.2）：純簿記、無狀態機。
+# 複合主鍵 (source_profile, session_id)——不同 profile 的同名 session
+# 結構性不可能共用 cursor（提案 §6.1）。
+CURSOR_TABLE_NAME = "bridge_cursors"
+
+CREATE_CURSOR_TABLE_SQL = f"""
+    CREATE TABLE IF NOT EXISTS {CURSOR_TABLE_NAME} (
+        source_profile            TEXT    NOT NULL,
+        session_id                TEXT    NOT NULL,
+        last_captured_message_id  INTEGER NOT NULL,
+        last_episode_seq          INTEGER NOT NULL,
+        updated_at                TEXT    NOT NULL,
+        PRIMARY KEY (source_profile, session_id)
+    )
+"""
+
+# 本階段唯一支援的 profile（提案 §6.1 fail-closed 邊界）：現行 event_id
+# namespace 無 profile 段，非 default 的 episode 會寫出與 default 無法區分的
+# event_id（namespace 污染），create_episode 一律拒絕。未來擴充格式已預留：
+# "hermes/<profile>:..."——本階段讀到這個前綴同樣一律拒絕（parse_event_id）。
+DEFAULT_SOURCE_PROFILE = "default"
+PROFILE_NAMESPACE_PREFIX = "hermes/"
+
+# episode 內容雜湊（提案 §4.5）的 normalized 欄位——固定清單、與 render
+# 格式解耦（render 改版不會假性 mismatch）。
+EPISODE_HASH_FIELDS = ("rowid", "role", "type", "content", "tool_calls", "timestamp")
+
 _lock = threading.Lock()
-_schema_fields_cache: dict | None = None
+_schema_doc_cache: dict | None = None
 
 
 def _now_iso() -> str:

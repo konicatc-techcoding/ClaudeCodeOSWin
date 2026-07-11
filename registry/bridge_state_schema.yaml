@@ -1,14 +1,33 @@
-# registry/bridge_state_schema.yaml — v0.1（2026-07-10 對齊修訂）
+# registry/bridge_state_schema.yaml — v2（2026-07-11，Stage 2.4d-1）
 # Stage 2 session bridge「處理狀態記錄」的格式定義（schema），說明文件見
-# docs/memory-bridge-state.md。
+# docs/memory-bridge-state.md；episode capture 設計見
+# docs/stage2.4d-episode-capture-proposal.md（已核准提案，規格正本）。
 #
-# 修訂記錄：2026-07-10 使用者拍板 Stage 2 前置決策後，依拍板欄位清單對齊
-# （Stage 2 實作第一步，見 docs/memory-bridge-state.md 第 6 節）：
-# 四處改名（status→import_status、inbox_file→imported_inbox_path、
-# error→error_reason、processed_at→updated_at）、新增 first_seen_at／
-# last_seen_at／retry_count／processed_path，共 17 欄。schema 仍為
-# definition-only、無 runtime 寫入者與存量資料，故為 v1 in-place 修訂，
-# marker 不變。
+# 修訂記錄：
+# - 2026-07-10 v1 對齊修訂：使用者拍板 Stage 2 前置決策後，依拍板欄位清單
+#   對齊（四處改名＋新增 first_seen_at／last_seen_at／retry_count／
+#   processed_path，共 17 欄）。當時 schema 仍 definition-only、無 runtime
+#   寫入者與存量資料，故 v1 in-place 修訂、marker 不變。
+# - 2026-07-11 v1 → **v2**（Stage 2.4d episode capture，提案 §1.3）：
+#   in-place 修訂的前提已不成立——部署側有 3 筆存量資料與活的寫入者
+#   （bridge_state.py／bridge_scanner.py／bridge_importer.py），且本次真的有
+#   migration。變更內容：
+#   1. bridge_sessions 17 → 22 欄：新增 episode_seq、capture_trigger、
+#      first_message_id、last_message_id、source_content_hash（全部 optional
+#      ——legacy 列 NULL；episode 列的條件必填由 repository create_episode()
+#      驗證，比照 error_reason／imported_inbox_path 慣例）。
+#   2. 新增 bridge_cursors 表（per-session 游標，複合主鍵
+#      (source_profile, session_id)，純簿記、無狀態機）。
+#   3. event_id description 改記三層 namespace（session legacy／訊息／episode）
+#      ＋未來 profile namespace 預留（"hermes/<profile>:…"，本階段 fail-closed）。
+#   migration 語義（提案 §3.1，由 `hermes/bridge_state.py migrate` 執行，冪等）：
+#   ALTER TABLE 加 5 欄（已存在則跳過）→ CREATE TABLE IF NOT EXISTS
+#   bridge_cursors → 既有列回填 capture_trigger='legacy'（episode_seq 與
+#   boundary／hash 欄維持 NULL）→ 對 imported 的 legacy 列從 event_id_range
+#   的 <last> 種 cursor（last_episode_seq=0；skipped／needs_review 不種——
+#   episode_cutover 底線已足以擋自動擷取）。部署側 3 筆既有記錄視為 legacy
+#   session-level 列原樣保留，不轉 episode 0（捏造 boundary 違反「event_id
+#   必含穩定 boundary」公理）。
 #
 # 為什麼放 registry：registry 放的是版本控管的政策/格式**正本**
 # （consolidation_policy.yaml、delegation_policy.yaml 同類）——這份檔案是
@@ -23,10 +42,14 @@
 # - 只記錄 ClaudeCodeOS 側的處理狀態，用途是去重（idempotent）與可追蹤性。
 # - state.db 是 Episodic 事件來源，不是 canonical memory；本記錄也不是記憶，
 #   只是管線的簿記（bookkeeping）。
+# - Stage 2.4d 起：bridge_sessions 的一列＝「一個匯入單位（episode 或 legacy
+#   session-level 記錄）」的處理狀態；同一 session 可有多個 episode 列，
+#   以 episode_seq IS NULL 區分 legacy 列（提案 §1.1 方案 A）。
 
-schema: claudecodeos.bridge_state.v1
-status: definition-only   # Stage 1 收斂只定義格式；Stage 2 才有寫入者
+schema: claudecodeos.bridge_state.v2
+status: active   # Stage 2.2 起有 runtime 寫入者（bridge_state.py/scanner/importer）；definition-only 前提已不成立
 
+# ---------- bridge_sessions（22 欄：一列＝一個匯入單位） ----------
 fields:
   session_id:
     type: string
@@ -42,6 +65,9 @@ fields:
       profile → profiles/<name>/ 底下的 state.db）。
       2026-07-10 拍板清單的 source 對應 source_profile＋session_source 這一對
       （拍板清單是「至少」非「僅限」，保留拆分不遺失資訊）。
+      Stage 2.4d 邊界（提案 §6.1）：episode capture 本階段僅支援 default
+      ——repository create_episode() 對非 default 一律 fail-closed 拒絕
+      （現行 event_id namespace 無 profile 段，非 default 會污染 namespace）。
 
   session_source:
     type: string
@@ -53,7 +79,7 @@ fields:
     required: true
     values: [discovered, skipped, to_inbox, imported, failed, needs_review]
     description: >
-      discovered＝bridge 偵測到新完結 session、尚未判定；
+      discovered＝bridge 偵測到新匯入單位、尚未判定；
       skipped＝依政策略過（memory-taxonomy 4.2 排除訊號，或 4.3 敏感內容
       fail-closed——headless 遇敏感訊號一律 skip，不落地、不節錄）；
       to_inbox＝已在 memory/inbox/ 新增檔案（進入 Episodic→Semantic 過渡區，
@@ -63,7 +89,8 @@ fields:
       needs_review＝需要互動式 session 人工確認（例如疑似敏感但值得保留，
       留給互動式路徑做遮罩後匯入的決策——headless 自己絕不遮罩）。
       命名為 import_status（而非 status）＝與 hermes jobs table 的 status
-      （job 生命週期）明確區隔。
+      （job 生命週期）明確區隔。Stage 2.4d 起判定對象＝一個匯入單位
+      （episode 列＝boundary 內訊息；legacy 列＝整個 session，歷史快照）。
 
   memory_type:
     type: enum
@@ -109,12 +136,12 @@ fields:
   first_seen_at:
     type: string
     required: true
-    description: bridge 首次發現這個 session 的時間（UTC ISO 8601）
+    description: bridge 首次發現這個匯入單位的時間（UTC ISO 8601）
 
   last_seen_at:
     type: string
     required: true
-    description: 最近一次掃描仍看到這個 session 的時間（UTC ISO 8601）
+    description: 最近一次掃描仍看到這個匯入單位的時間（UTC ISO 8601）
 
   updated_at:
     type: string
@@ -125,10 +152,10 @@ fields:
     type: int
     required: true
     description: >
-      bridge 層級「同一 session 的匯入嘗試次數」，default 0。
+      bridge 層級「同一匯入單位的匯入嘗試次數」，default 0。
       **與 hermes/db.py jobs.attempts 完全不同層、兩者不互通**：
       jobs.attempts 是 job 執行重試（claim 時 +1、達 max_attempts 進
-      dead_letter）；retry_count 記的是 bridge 對同一 session 重新嘗試
+      dead_letter）；retry_count 記的是 bridge 對同一匯入單位重新嘗試
       匯入的次數（例如前次 failed 後重跑）。
 
   error_reason:
@@ -140,8 +167,20 @@ fields:
     type: string
     required: true
     description: >
-      去重（idempotency）依據。session 層級沿用 adapter 的 event_id 慣例：
-      "hermes:<session_id>"；訊息層級範圍記錄在 event_id_range。
+      去重（idempotency）依據，UNIQUE。三層 namespace 機械可區分（提案 §2）：
+      session 層級（legacy）＝"hermes:<session_id>"（既有 3 筆部署記錄與
+      pre-2.4d 慣例，原樣保留、不再新增）；
+      訊息層級＝"hermes:<session_id>:<rowid>"（claudecodeos.event.v1 既有慣例）；
+      episode 層級＝"hermes:<session_id>:<first>..<last>"（2.4d 起匯入單位的
+      去重 key，boundary 為穩定值——cursor 只前進，first/last 在
+      create_episode 當下固定、之後 immutable）。
+      區分規則：含 ".." ＝ episode；含 ":" 但無 ".." 且冒號後是整數 ＝ 訊息；
+      其餘 ＝ session 層級（Hermes sid 不含冒號，無歧義）。
+      未來 profile namespace 預留（現在定案、本階段不啟用，提案 §6.1）：
+      "hermes/<profile>:<sid>:<first>..<last>"（session／訊息層級同理加前綴）；
+      "/" 不出現在既有格式的 source 段，機械可區分。本階段任何元件讀到
+      "hermes/" 開頭的 event_id 一律 fail-closed 拒絕處理，不得默默視為
+      default（裸 "hermes:" 恆等於 default，向後相容）。
       同一 event_id 重跑 bridge 不得重複 enqueue／重複落地。
 
   event_id_range:
@@ -151,3 +190,106 @@ fields:
       對應 claudecodeos.event.v1 的 event_id 範圍
       （"hermes:<session_id>:<first_rowid>..<last_rowid>"），跟 inbox frontmatter
       （claudecodeos.inbox.v1）的同名欄位互相對照，供內容層級稽核。
+      episode 列＝episode event_id 本身（repository 由同一組 boundary 值產生
+      兩者並拒絕不一致寫入——不是兩份真相）。
+
+  # ---------- v2 新欄（Stage 2.4d episode capture，提案 §1.2） ----------
+  # 條件必填規則（由 repository create_episode() 驗證，schema 層全 optional）：
+  # episode 列（event_id 含 ".."）五個新欄全必填；legacy 列 boundary／hash／
+  # episode_seq 全 NULL、capture_trigger 為 NULL 或 'legacy'（migration 回填）。
+
+  episode_seq:
+    type: int
+    required: false
+    description: >
+      該 session 的第幾個 episode（1 起算）。NULL＝pre-2.4d 的 legacy
+      session-level 記錄。只供人讀與排序；identity 仍以 event_id 的
+      episode boundary 為準。episode 列必填；legacy 列 NULL。
+
+  capture_trigger:
+    type: enum
+    required: false
+    values: [ended, inactivity, manual, legacy]
+    description: >
+      「這刀是誰切的」（純追蹤，trigger 與擷取語義解耦——提案 §0 公理 4）：
+      ended＝session 明確結束；inactivity＝閒置達門檻的 checkpoint；
+      manual＝人工 checkpoint；legacy＝pre-2.4d 的 session-level 記錄
+      （migration 回填）。NULL 視同 legacy。episode 列必填且不得為 legacy；
+      legacy 列 NULL 或 'legacy'。
+
+  first_message_id:
+    type: int
+    required: false
+    description: >
+      boundary 顯式欄位：episode 首則訊息的 Hermes rowid。episode 列必填、
+      legacy 列 NULL。event_id 仍是唯一性載體；顯式欄位供 SQL 查詢與
+      recovery（cursor 重建取 max(last_message_id)）。兩者不是兩份真相：
+      repository 由同一組 boundary 值產生 event_id 與顯式欄位，測試強制
+      解析 event_id 所得必須等於顯式欄位（提案矩陣 #24）。
+
+  last_message_id:
+    type: int
+    required: false
+    description: >
+      boundary 顯式欄位：episode 末則訊息的 Hermes rowid。episode 列必填、
+      legacy 列 NULL。與 first_message_id 同組產生、同受一致性驗證
+      （提案矩陣 #24）；cursor 重建（提案 §3.2）對 session 取
+      max(last_message_id) 依 SQL 直接查。
+
+  source_content_hash:
+    type: string
+    required: false
+    description: >
+      episode 內容雜湊（提案 §4.5 純函式定義）：對 eligible events
+      （active=1、rowid ∈ [first..last]、依 rowid 升冪）的 normalized 欄位
+      （rowid、role、type、content、tool_calls 原始值、timestamp）做固定鍵序
+      JSON 序列化後 SHA-256（hex）。scanner 切刀時由同一 scan snapshot 計算；
+      importer 匯入時以同一純函式重算比對，不一致 → needs_review
+      （decision_reason 只記 integrity:content_hash_mismatch 標籤）。
+      episode 列必填（scanner 路徑）、legacy 列 NULL；reconcile 回填的
+      episode 列可為 NULL（無法自檔案還原，提案 §3.2，不影響去重）。
+
+# ---------- bridge_cursors（v2 新表：per-session 游標，純簿記） ----------
+# episode capture 的 per-session cursor（提案 §1.2）：只有游標與計數，
+# **沒有 import_status**——session 層級不設狀態機（提案 §4.2），「session
+# 處理到哪」的答案就是它的 episode 列集合。
+# cursor 前進與 episode 列建立在同一個 SQLite transaction 內完成
+# （repository create_episode()）：要嘛「episode 列＋cursor 前進」都成立、
+# 要嘛都不成立——保證每則訊息至多屬於一個 episode、cursor 永不回退。
+# 可拋棄語義的誠實界定（提案 §1.2 修訂）：與 watermark 同屬部署側可拋棄
+# 狀態，但 db 重建後**必要前置**是 reconcile 的 recovery 流程（§3.2，
+# 從 inbox 目錄真相重建 cursor）——「可拋棄」＝db 消失不損失任何可重建
+# 資訊，不是「消失後不需要 recovery 步驟」。
+bridge_cursors:
+  primary_key: [source_profile, session_id]
+  fields:
+    source_profile:
+      type: string
+      required: true
+      description: >
+        來源 Hermes profile。複合主鍵 (source_profile, session_id) 之一——
+        不同 profile 的同名 session 絕不共用 cursor（提案 §6.1；本階段僅
+        default 會出現，非 default 由各元件 fail-closed 拒絕）。
+
+    session_id:
+      type: string
+      required: true
+      description: Hermes session id（複合主鍵之一）
+
+    last_captured_message_id:
+      type: int
+      required: true
+      description: >
+        cursor：此 rowid（含）以前的訊息已被某個 episode 涵蓋或被判定永不
+        自動擷取。**只前進不後退**（比照 scan_watermark 慣例；repository
+        advance API 對較小值 no-op）。
+
+    last_episode_seq:
+      type: int
+      required: true
+      description: 已切出的最大 episode 序號（0＝尚無 episode；migration 的 cursor 種子取 0）
+
+    updated_at:
+      type: string
+      required: true
+      description: 最後一次 cursor 前進時間（UTC ISO 8601）
