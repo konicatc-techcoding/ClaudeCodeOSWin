@@ -1,6 +1,10 @@
 # Stage 2.4d — Desktop 長壽 session 的 Episode Capture（設計提案）
 
-日期：2026-07-11　狀態：**提案・待使用者核准（proposal only，未實作、未改任何既有檔案）**
+日期：2026-07-11　狀態：**設計已核准**——2.4d-1（schema＋repository）**已完成**；
+2.4d-2（scanner episode 偵測）／2.4d-3（importer episode 化＋recovery）／
+2.4d-4（部署 migration＋驗證）**尚未開始**。本文件現為**已核准的規格正本**
+（不再是待核准提案），後續實作階段的異動仍以本文件對應章節為準；rollout 與
+migration runbook 見第 8 節。
 負責領域：`engineering`
 修訂：2026-07-11 第二版——方向已獲使用者核准（暫不開工），依指示補齊三個
 blocker：(1) cursor DB 重建的誠實修正＋recovery 流程（§3.2）；(2) schema v2
@@ -15,10 +19,21 @@ checkpoint 訊號，語義上不是永久結束**，補進 `capture_trigger` enu
 §6、測試矩陣新增條目）。Unarchive（1→0）的 live 驗證本次跳過，明確列為
 **非阻塞 test gap**（§6 trigger 表、測試矩陣條目已標注；fixture 可模擬該
 情境，但不代表已驗證真實 Hermes UI 行為）。
+修訂：2026-07-12 第四版（前置任務 3——文件狀態收斂）：核准後的實作進度回填——
+**2.4d-1 已完成並已 commit**（registry v2 yaml 22 欄＋`bridge_cursors`、
+`hermes/bridge_state.py` 加欄 DDL／`create_episode`／content hash 純函式／
+`migrate` CLI、測試矩陣 #2/#3/#13/#14/#23/#24 等全綠，見 git log
+`b71fdee`／`7b6f4c1`／`a747862`／`5f323e6`／`43b97d4`）；**2.4d-1 尚未部署**
+（`hermes/config/bridge.yaml` 的 `episodes` 區塊尚未新增、`episodes.enabled`
+維持不存在＝等同 false，部署側 `bridge_state.db` 尚未跑 `migrate`）——部署
+是 2.4d-4 的事，且**2.4d-1 不得單獨下發部署側**（見第 8 節「不得單獨部署」
+警告）。第 10 節「本提案未動的東西」中「未修改任何既有檔案」等描述現已
+過時，隨本次修訂移除／改寫為現況敘述。
 
-> **本文件是設計提案，不是決策記錄。** 核准前不得動 schema、程式碼、config、
-> systemd units 或部署側資料。§0.1 所列項目已由使用者拍板；其餘設計待
-> 本文件整體核准後才進入實作。
+> **本文件現為已核准的規格正本。** §0.1 所列項目已由使用者拍板；schema／
+> repository 層（2.4d-1）已依本文件核准內容實作完成，scanner／importer／
+> 部署（2.4d-2/3/4）仍待開工，開工時以本文件對應章節為準，若實作中發現
+> 需要修訂設計，回來改本文件再動程式碼。
 
 ---
 
@@ -618,6 +633,56 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 | **2.4d-3** importer episode 化＋recovery | adapter range export（boundary 內訊息）＋episode 檔名／frontmatter；importer 佇列改逐 episode（含 hash 重算比對→mismatch 轉 needs_review、非 default profile 記錄並跳過）；`_find_existing_import` episode-aware；reconcile ep 捕獲組＋**cursor 重建（§3.2）** | importer 仍純手動執行；敏感 fail-closed／落地順序（先檔案後狀態）逐條沿用；回填規則仍只有 reconcile 一份實作 | 矩陣 #4–6/#9/#11/#12/#18/#21/#22/#25/#26/#27（importer 部分）；2.4c 的 25 tests 對 legacy 路徑零回歸 |
 | **2.4d-4** 部署 migration＋驗證 | sync 下發 → `migrate`（對既有 3 筆）→ 跑一次 reconcile（recovery 語義對健康 db 應為 no-op，順帶驗證）→ dry-run scan 逐筆檢視（預期零湧入）→ **記錄當下精確 UTC 時刻寫入 `episode_cutover`（§0.1 拍板）** → 翻 `episodes.enabled: true` → 一次真實 scan → 人工跑一次 importer → 冪等重跑 → fingerprint 檢查（Hermes state.db／jobs.db／inbox 禁區零寫入） | 比照 2.4b 部署劇本：**全部驗證過了才翻 enabled** | 3 筆 legacy 原樣＋cursor 種子正確；啟用時刻之後才有訊息才可能切刀——首次 scan 預期零 episode |
 
+### 8.1 Migration Runbook（2.4d-4 部署順序，正本——2026-07-12 前置任務 3 定稿）
+
+本節是 2.4d-4 部署順序的**唯一正本**；[hermes-integration-roadmap.md](hermes-integration-roadmap.md)
+Stage 2.4d 只連結回本節，不重複維護第二份順序。必須依序執行，**不得跳步、不得
+併步**：
+
+1. **stop／disable `hermes-bridge-scanner.timer`**（`systemctl --user stop
+   hermes-bridge-scanner.timer && systemctl --user disable
+   hermes-bridge-scanner.timer`）。
+2. **確認 `hermes-bridge-scanner.service` 未在執行**（`systemctl --user
+   list-units --type=service | grep bridge-scanner`；若有殘留執行中的
+   oneshot，等它結束或確認非本次相關）。
+3. **`scripts/sync_to_wsl.sh` dry-run／apply**：把 Windows 開發正本（含
+   schema v2 yaml、`bridge_state.py` 等 2.4d-1 程式碼）下發到 WSL 部署側。
+4. **備份 `bridge_state.db`**（複製一份帶時間戳的檔案到安全位置，migrate
+   若需 rollback 靠這份備份）。
+5. **執行 `hermes/bridge_state.py migrate`**（對部署側既有 3 筆記錄執行
+   §3.1 的 migration 步驟：ALTER TABLE 加 5 欄→CREATE TABLE IF NOT EXISTS
+   bridge_cursors→回填 `capture_trigger='legacy'`→cursor 種子）。
+6. **驗證 legacy／cursor**：確認 3 筆既有記錄的新欄位狀態符合 §3.1 預期
+   （legacy 列 `episode_seq` 全 NULL、`capture_trigger='legacy'`；imported
+   那筆的 cursor 種子 `last_captured_message_id` 正確、`last_episode_seq=0`；
+   skipped／needs_review 兩筆未種 cursor）。
+7. **跑一次 `reconcile`（recovery 語義）**：對健康 db 應為 no-op（§3.2），
+   順便驗證 recovery 流程本身在部署側可正常執行。
+8. **`episode` dry-run scan**：`episodes.enabled` 尚為 false／區塊尚未存在
+   時先確認一般 scan 位元級不變；加上 `episodes` 區塊（`enabled: false`）
+   後，用 dry-run 方式檢視 episode 偵測邏輯的輸出是否符合預期（零湧入，
+   §5.2）。
+9. **寫入精確 UTC 時刻到 `episode_cutover`**（§0.1 拍板：翻 `enabled: true`
+   之前的當下實際時間戳，不是日期概念值）。
+10. **翻 `episodes.enabled: true`**。
+11. **最後才重新 enable／start `hermes-bridge-scanner.timer`**。
+
+**特別警告（逐字強調，不得省略）**：
+
+> **sync 到 migrate 之間，不得讓 scanner 或 systemd 的 Persistent catch-up
+> 執行。** 若在 migration 尚未完成、schema 或 cutover 尚未定案時讓 scanner
+> 被觸發（含 WSL 睡眠喚醒後的 timer catch-up 補跑），會跑到舊邏輯或半新
+> 邏輯的中間態，產生不可預期的資料狀態。這正是步驟 1／2 要先做、步驟 11
+> 要放到最後的理由——整個 migration 窗口內 timer 必須是 disabled 狀態。
+
+> **2.4d-1（schema v2）不得單獨下發部署側。** schema v2 若沒有 repository
+> 層的 `migrate` 工具與後續 recovery／rollout 順序配套，部署側會停在一個
+> 「v1 對齊測試會失敗、但又沒有 migrate 工具可用」的中間態——這比停留在
+> v1 更糟。2.4d-1 必須等到至少 `migrate` CLI、recovery 流程都準備好，且本
+> 節完整 rollout 順序確定後，才能跟 2.4d-2／2.4d-3／2.4d-4 一起、依本節順序
+> 一次下發。**目前 2.4d-1 只存在於 Windows 開發正本與 git 歷史，尚未 sync
+> 到 WSL 部署側**（見第 10 節現況）。
+
 **全程維持「不啟用 importer 排程、不啟用 headless CoS」的方式**：
 
 - 不新增任何 systemd unit／timer（importer 沒有 unit 檔可 enable）；
@@ -663,9 +728,21 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 
 ---
 
-## 10. 本提案未動的東西（明文重申）
+## 10. 現況（2026-07-12 修訂，取代原「本提案未動的東西」）
 
-- 未修改任何既有檔案（schema yaml、bridge_state.py、bridge_scanner.py、
-  bridge_importer.py、adapter.py、bridge.yaml、systemd units、任何文件）。
-- 未新增／啟用任何排程；未接 headless CoS；未 commit。
-- 部署側 bridge_state.db 的 3 筆記錄原樣未碰。
+本節原為提案階段「未動任何檔案」的宣告；設計核准後 2.4d-1 已實作並 commit，
+以下改為據實記錄目前真正已動／未動的邊界：
+
+- **已動**：`registry/bridge_state_schema.yaml`（v2，22 欄＋`bridge_cursors`）、
+  `hermes/bridge_state.py`（加欄 DDL、`create_episode`、`migrate` CLI、content
+  hash 純函式等，2.4d-1 範圍）、`hermes/session_adapter/adapter.py`（snapshot
+  一致性補強：fingerprint＋retry＋`quick_check`，前置任務 1）、對應測試檔案。
+  全部已 commit（見文首第四版修訂記錄的 commit hash）。
+- **未動**：`hermes/bridge_scanner.py`、`hermes/bridge_importer.py`（episode
+  相關邏輯尚未實作，2.4d-2/3 範圍）、`hermes/config/bridge.yaml`（尚未新增
+  `episodes` 區塊）、任何 systemd units（不需新增/修改，見第 8 節）。
+- **未新增／啟用任何排程；未接 headless CoS**——這是 Stage 2 既有邊界，
+  2.4d 全程不變（第 8 節「全程維持」小節）。
+- **部署側 `bridge_state.db` 的 3 筆既有記錄原樣未碰**：`migrate` 尚未對
+  部署側執行，這 3 筆記錄仍是 2.4c 當時寫入的原樣（17 欄語義下的內容），
+  尚未補上 v2 五個新欄——`migrate` 執行與部署驗證是 2.4d-4 的工作。
