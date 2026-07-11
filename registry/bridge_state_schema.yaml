@@ -8,6 +8,17 @@
 #   對齊（四處改名＋新增 first_seen_at／last_seen_at／retry_count／
 #   processed_path，共 17 欄）。當時 schema 仍 definition-only、無 runtime
 #   寫入者與存量資料，故 v1 in-place 修訂、marker 不變。
+# - 2026-07-12 v2 in-place 補強（Stage 2.4d 前置任務 2，部署前、非新版）：
+#   capture_trigger enum 擴充 `archived`（真實 Desktop session 實地驗證：
+#   Hermes Archive 動作使 archived 0→1、ended_at 不變、內容與訊息數不變、
+#   重啟後持久——是可靠且持久的使用者明確 checkpoint 訊號，語義上不是永久
+#   結束）。archived 與 inactivity 的關鍵差異：archived 是使用者主動訊號，
+#   eligible 非空時**立即**切 episode，不等 72 小時 inactivity 門檻；archived
+#   但 eligible 為空時不建立空 episode（與其他 trigger 共用同一條「eligible
+#   為空不切刀」通用規則，無需另立特例）。session 之後 archived 由 true 轉
+#   false（Unarchive）並新增訊息時，新訊息屬於下一個獨立 episode（與
+#   ended／inactivity 的 immutability 語義一致）。schema 仍記 v2——v2 尚未
+#   部署（episodes.enabled 尚未翻 true），這是部署前補強而非升版。
 # - 2026-07-11 v1 → **v2**（Stage 2.4d episode capture，提案 §1.3）：
 #   in-place 修訂的前提已不成立——部署側有 3 筆存量資料與活的寫入者
 #   （bridge_state.py／bridge_scanner.py／bridge_importer.py），且本次真的有
@@ -209,13 +220,23 @@ fields:
   capture_trigger:
     type: enum
     required: false
-    values: [ended, inactivity, manual, legacy]
+    values: [ended, archived, inactivity, manual, legacy]
     description: >
       「這刀是誰切的」（純追蹤，trigger 與擷取語義解耦——提案 §0 公理 4）：
-      ended＝session 明確結束；inactivity＝閒置達門檻的 checkpoint；
-      manual＝人工 checkpoint；legacy＝pre-2.4d 的 session-level 記錄
-      （migration 回填）。NULL 視同 legacy。episode 列必填且不得為 legacy；
-      legacy 列 NULL 或 'legacy'。
+      ended＝session 明確結束；archived＝使用者在 Hermes UI 對 session 執行
+      Archive（實地驗證：archived 0→1、ended_at 不變、內容與訊息數不變、
+      重啟後持久——可靠且持久的使用者明確 checkpoint 訊號，語義上**不是**
+      永久結束）；inactivity＝閒置達門檻的 checkpoint；manual＝人工
+      checkpoint；legacy＝pre-2.4d 的 session-level 記錄（migration 回填）。
+      NULL 視同 legacy。episode 列必填且不得為 legacy；legacy 列 NULL 或
+      'legacy'。
+      archived 與 inactivity 的關鍵差異：archived 是使用者主動訊號，
+      eligible 非空時立即切 episode，不等 72 小時 inactivity 門檻；
+      eligible 為空時不建立空 episode（與其他 trigger 共用同一條通用規則，
+      不設特例）。session 之後 Unarchive（archived true→false）並新增
+      訊息時，新訊息屬於下一個獨立 episode——與其他 trigger 的
+      immutability 語義一致（不修改已切 episode 的 ended_at／boundary／
+      內容）。
 
   first_message_id:
     type: int

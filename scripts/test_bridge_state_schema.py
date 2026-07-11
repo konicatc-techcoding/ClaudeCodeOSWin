@@ -29,7 +29,7 @@ EXPECTED_FIELDS = {
 }
 EXPECTED_STATUS_VALUES = {"discovered", "skipped", "to_inbox", "imported", "failed", "needs_review"}
 EXPECTED_MEMORY_TYPES = {"procedural", "semantic", "episodic", "none"}
-EXPECTED_CAPTURE_TRIGGERS = {"ended", "inactivity", "manual", "legacy"}
+EXPECTED_CAPTURE_TRIGGERS = {"ended", "archived", "inactivity", "manual", "legacy"}
 EXPECTED_CURSOR_FIELDS = {
     "source_profile", "session_id", "last_captured_message_id",
     "last_episode_seq", "updated_at",

@@ -949,6 +949,63 @@ class TestCreateEpisode(BridgeStateTestBase):
             120)
 
 
+class TestArchivedTrigger(BridgeStateTestBase):
+    """矩陣 #28（2026-07-12 前置任務 2）：capture_trigger='archived' 的
+    repository 層契約。**邏輯已測（fixture/mock），非真實 Hermes UI 行為
+    驗證**——Unarchive（1→0）的 live 驗證本次跳過，是明確標注的非阻塞
+    test gap（見提案 §6）；這裡只用假資料驗證「archived true→false 後
+    新增訊息形成下一個獨立 episode」的邏輯本身。"""
+
+    def test_create_episode_accepts_archived_trigger(self):
+        result = bridge_state.create_episode(
+            **make_episode(capture_trigger="archived"), db_path=self.db_path)
+        self.assertTrue(result["created"])
+        row = result["row"]
+        self.assertEqual(row["capture_trigger"], "archived")
+        self.assertEqual(row["event_id"], "hermes:sess-ep:100..120")
+        # 矩陣 #24 一致性檢查對 archived 一樣適用。
+        parsed = bridge_state.parse_event_id(row["event_id"])
+        self.assertEqual(parsed["first_message_id"], row["first_message_id"])
+        self.assertEqual(parsed["last_message_id"], row["last_message_id"])
+
+    def test_archived_does_not_bypass_empty_eligible_rule(self):
+        """archived 但無新訊息時不建立空 episode——與其他 trigger 共用同一條
+        「eligible 為空不切刀」通用規則，這裡驗證 repository 層沒有為
+        archived 開特例後門：boundary 不合法（無 eligible 訊息可言）一樣
+        fail loud，不會因為 trigger='archived' 就放行。"""
+        with self.assertRaises(ValueError):
+            bridge_state.create_episode(
+                **make_episode(capture_trigger="archived",
+                               first_message_id=101, last_message_id=100),
+                db_path=self.db_path)
+
+    def test_archived_true_to_false_then_new_messages_forms_next_episode(self):
+        """fixture 模擬「archived true→false（Unarchive）後新增訊息」：
+        ep1（trigger=archived）先切；假設 session 之後 Unarchive 並累積
+        新訊息，下一刀（無論是哪個 trigger）產生 ep2，boundary 相接不重疊，
+        ep1 列與內容完全不變（immutability，與 ended／inactivity 同一
+        規則）。這只驗證邏輯，不是對 Hermes UI Unarchive 行為的 live 驗證
+        （test gap，見提案 §6／類別 docstring）。"""
+        first = bridge_state.create_episode(
+            **make_episode(capture_trigger="archived"), db_path=self.db_path)
+        ep1_row_before = dict(first["row"])
+        second = bridge_state.create_episode(
+            **make_episode(episode_seq=2, first_message_id=121,
+                           last_message_id=150, capture_trigger="manual"),
+            db_path=self.db_path)
+        self.assertTrue(second["created"])
+        ep1_row_after = bridge_state.get_session_state(
+            "hermes:sess-ep:100..120", db_path=self.db_path)
+        self.assertEqual(ep1_row_after, ep1_row_before,
+                         "Unarchive 後新增訊息不得改動已切的 archived episode")
+        self.assertEqual(second["row"]["first_message_id"], 121,
+                         "新訊息（Unarchive 後累積）形成下一個獨立 episode，"
+                         "不併入 ep1")
+        cur = bridge_state.get_cursor("sess-ep", db_path=self.db_path)
+        self.assertEqual(cur["last_captured_message_id"], 150)
+        self.assertEqual(cur["last_episode_seq"], 2)
+
+
 class TestUpsertEpisodeGuard(BridgeStateTestBase):
     """upsert_session_state 的 v2 邊界：episode 新列只能走 create_episode；
     更新既有 episode 列時五個 episode 欄不可能被洗掉（immutability，§4.4）。"""

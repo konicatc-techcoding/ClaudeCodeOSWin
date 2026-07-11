@@ -6,6 +6,15 @@
 blocker：(1) cursor DB 重建的誠實修正＋recovery 流程（§3.2）；(2) schema v2
 新增 `first_message_id`／`last_message_id`／`source_content_hash` 完整性欄位
 （§1.2、§4.5）；(3) `bridge_cursors` 複合主鍵＋profile fail-closed 邊界（§1.2、§6.1）。
+修訂：2026-07-12 第三版——**2.4d-1 checkpoint 之後、部署之前**的 enum 補強
+（前置任務 2，非新 stage）：使用者對真實 Desktop session
+（`20260711_085637_446e3e`）實地驗證 Hermes Archive 動作——`archived` 0→1、
+`ended_at` 不變、message_count／max rowid／內容 sha256 全部不變，Hermes
+重啟後 `archived=1` 持久存在。結論：**archived 是可靠且持久的使用者明確
+checkpoint 訊號，語義上不是永久結束**，補進 `capture_trigger` enum（§1.2、
+§6、測試矩陣新增條目）。Unarchive（1→0）的 live 驗證本次跳過，明確列為
+**非阻塞 test gap**（§6 trigger 表、測試矩陣條目已標注；fixture 可模擬該
+情境，但不代表已驗證真實 Hermes UI 行為）。
 
 > **本文件是設計提案，不是決策記錄。** 核准前不得動 schema、程式碼、config、
 > systemd units 或部署側資料。§0.1 所列項目已由使用者拍板；其餘設計待
@@ -66,8 +75,9 @@ episode 已 immutable、內容不變；新訊息屬於**下一個** episode。se
 - 新增小表 `bridge_cursors`：per-session 游標（`last_captured_message_id`）
   與 episode 序號計數，**純簿記、不是狀態機**。
 - `bridge_sessions` 加 2 欄：`episode_seq`（int、optional；NULL＝legacy
-  session-level 記錄）、`capture_trigger`（enum：`ended | inactivity |
-  manual | legacy`；optional，NULL 視同 legacy）。
+  session-level 記錄）、`capture_trigger`（enum：`ended | archived |
+  inactivity | manual | legacy`；optional，NULL 視同 legacy；`archived`
+  為 2026-07-12 前置任務 2 拍板新增）。
 
 **方案 B：獨立 `bridge_episodes` table；`bridge_sessions` 降為 session
 游標/彙總表。**
@@ -100,7 +110,7 @@ B 會誘發同類複製）。
 | 欄位 | 型別 | 必填 | 語義 |
 |---|---|---|---|
 | `episode_seq` | int | optional | 該 session 的第幾個 episode（1 起算）。NULL＝pre-2.4d 的 legacy session-level 記錄。只供人讀與排序；**identity 仍以 event_id 的 boundary 為準** |
-| `capture_trigger` | enum | optional | `ended | inactivity | manual | legacy`。記「這刀是誰切的」，純追蹤；NULL 視同 legacy（migration 會回填 `legacy`） |
+| `capture_trigger` | enum | optional | `ended | archived | inactivity | manual | legacy`。記「這刀是誰切的」，純追蹤；NULL 視同 legacy（migration 會回填 `legacy`）。`archived`＝2026-07-12 前置任務 2 拍板新增（實地驗證見文首修訂記錄） |
 | `first_message_id` | int | optional（episode 列必填） | boundary 顯式欄位：episode 首則訊息的 Hermes rowid。legacy 列 NULL |
 | `last_message_id` | int | optional（episode 列必填） | boundary 顯式欄位：episode 末則訊息的 Hermes rowid。legacy 列 NULL |
 | `source_content_hash` | string | optional（episode 列必填） | episode 內容雜湊（§4.5）：scanner 切刀時由**同一 snapshot** 計算；importer 匯入時重算比對，不一致 → needs_review |
@@ -494,8 +504,20 @@ max(rowid)、max(timestamp)，read-only、snapshot 模式照舊），避免為�
 | trigger | 條件（皆須 eligible 非空） | 語義 |
 |---|---|---|
 | `ended` | `ended_at` 已設（且 >= episode_cutover） | session 被明確結束——立即切刀，不等 inactivity |
+| `archived` | Hermes `archived` 由 0→1（且 eligible 非空） | 使用者對目前內容明確要求建立 checkpoint（2026-07-12 前置任務 2 拍板，實地驗證：archived 0→1、`ended_at` 不變、message_count／max rowid／內容 sha256 全部不變，重啟後持久）——**不代表 session 永久結束**，不修改 `ended_at`。**立即切刀，不等 72 小時 inactivity 門檻**——這是 archived 與 inactivity 的關鍵差異：使用者主動訊號優先於被動的閒置判定。eligible 為空時不建立空 episode（與其他 trigger 共用同一條通用規則，不設特例）。session 日後 Unarchive（archived 1→0）並新增訊息時，新訊息屬於下一個獨立 episode（immutability 語義與 ended／inactivity 一致） |
 | `inactivity` | `ended_at` NULL 且 `now - last_message_ts >= inactivity_hours` | 「暫時告一段落」的 checkpoint。session 之後復活＝正常，新訊息屬下一 episode |
 | `manual` | 人工執行 checkpoint 指令 | 立即切刀，無視門檻（例如「這段討論很重要，現在就擷取」） |
+
+**archived 的驗證狀態（誠實區分「邏輯已測」與「真實 UI 行為未驗證」）**：
+Archive（0→1）已用真實 Desktop session 實地驗證（見文首修訂記錄）；
+**Unarchive（1→0）的 live 驗證本次跳過**，是明確列出的非阻塞 test gap——
+2.4d-2 的 scanner 偵測邏輯實作與 fixture（測試矩陣 #28，第 8 節）必須涵蓋
+「archived true→false 後新增訊息應形成下一 episode」的情境，但那是用假
+資料（fixture/mock）驗證邏輯本身，**不代表已驗證過 Hermes UI 對
+Unarchive 的真實行為**。這個 gap 不阻塞本次 enum 定案，因為 archived 的
+trigger 契約（何時切刀、boundary 如何算）不依賴 Unarchive 是否發生——
+Unarchive 只影響「同一 session 之後是否還會有新訊息」，不影響已切
+episode 的語義。
 
 - 參數位置：`hermes/config/bridge.yaml` 的 `episodes.inactivity_hours`
   （**已拍板 72**，§0.1——比「過幾天拿出來繼續用」的節奏保守；切早了也
@@ -583,6 +605,7 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 | 25 | hash 一致（正常路徑） | scanner 切刀存 hash → importer 重算相符 → 正常落地；hash 為純函式（同內容同 snapshot 重算恆等） |
 | 26 | hash 不一致 → needs_review | 切刀後竄改測試 state.db 副本的 boundary 內內容 → importer 比對失敗 → needs_review、decision_reason 只含 `integrity:content_hash_mismatch` 標籤、不落地、cursor 不回退、不進自動重試 |
 | 27 | 非 default profile fail-closed | scanner：`--source-profile` 非 default＋episodes enabled → exit 1；importer：佇列出現非 default episode 列 → `unsupported_profile_fail_closed`、狀態與 cursor 全不動；cursor 表以 (profile, sid) 隔離——同 sid 不同 profile 各自獨立 |
+| 28 | trigger：archived（2026-07-12 前置任務 2 新增） | **邏輯已測（fixture/mock），非真實 Hermes UI 行為驗證**：repository 層 `create_episode(capture_trigger="archived")` 合法建立 episode（矩陣 #24 一致性檢查同樣適用）；archived 且 eligible 非空 → 不等 inactivity_hours 立即切（scanner 2.4d-2 實作時對照本條）；archived 但 eligible 為空 → 不切空 episode（與其他 trigger 同一通用規則，無特例分支）；fixture 模擬「archived true→false 後新增訊息」→ 新訊息形成下一個獨立 episode、既有 episode 列不變（immutability）。**非阻塞 test gap 明文標注**：Unarchive（1→0）對真實 Hermes Desktop UI 的 live 驗證本次跳過，未做、也不假裝已做 |
 
 ---
 

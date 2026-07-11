@@ -820,8 +820,12 @@ def create_episode(
     event_id namespace 無 profile 段，非 default 的 episode 會污染 namespace。
 
     條件必填（提案 §1.2）：episode 列的五個新欄全必填；capture_trigger 必須是
-    ended/inactivity/manual（'legacy' 保留給 migration 回填的 session-level 列，
-    episode 列用它是語義矛盾）。source_content_hash 必填（scanner 切刀路徑，
+    ended/archived/inactivity/manual（'legacy' 保留給 migration 回填的
+    session-level 列，episode 列用它是語義矛盾）。archived＝使用者在 Hermes
+    UI 對 session 執行 Archive（2026-07-12 前置任務 2 拍板，實地驗證：
+    archived 是可靠且持久的使用者明確 checkpoint 訊號，不是永久結束）——
+    與 inactivity 的差異只在「誰觸發」與「是否等門檻」，不影響本函式的
+    boundary／immutability 保證。source_content_hash 必填（scanner 切刀路徑，
     §4.5）；reconcile 回填（hash 無法自檔案還原，§3.2）屬 2.4d-3，屆時另議
     放寬方式，本 API 不留後門。
 
@@ -838,7 +842,7 @@ def create_episode(
     if capture_trigger == "legacy":
         raise ValueError(
             "capture_trigger='legacy' 保留給 migration 回填的 legacy session-level "
-            "列——episode 列必須是 ended/inactivity/manual（提案 §1.2）")
+            "列——episode 列必須是 ended/archived/inactivity/manual（提案 §1.2）")
     if isinstance(episode_seq, bool) or not isinstance(episode_seq, int) or episode_seq < 1:
         raise ValueError(f"episode_seq 必須是 >= 1 的 int（1 起算），得到 {episode_seq!r}")
     if not source_content_hash or not isinstance(source_content_hash, str):
