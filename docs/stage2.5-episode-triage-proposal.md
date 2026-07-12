@@ -46,7 +46,12 @@ blocker，見第 18 節）**
   v6 把分支 4c／4d 的測試改寫為**決定性的 fault injection**（第 4.1d
   節），並把真實並行的兩個 process／thread 整合測試**收斂為只驗證聚合
   不變量**、不再假設哪一方會贏、也不要求重現特定的 SQLite 例外路徑。
-  測試矩陣與 2.5a DoD 同步更新（第 14、16 節）。
+  測試矩陣與 2.5a DoD 同步更新（第 14、16 節）。**本次修訂另外修正一處
+  措辭精確度**：文件先前有幾處把測試矩陣第 8、21、22 項合稱為「三種
+  deterministic fault-injection 測試」，但實際上只有第 21、22 項使用
+  fault injection；第 8 項是不需要 fault injection 的決定性
+  `rowcount=0` 測試。已在第 13、14、16 節逐一修正這個分類措辭（見下方
+  對應章節），不影響任何測試設計本身的內容或斷言。
 
 以下所有章節內容即 v6 定案；凡與 v5 不同之處，第 19 節列出完整差異對照。
 
@@ -434,6 +439,15 @@ mock／monkeypatch 讓它在指定時機拋出指定的例外（模擬 `SQLITE_B
 第 14 節第 21、22 項（分別對應分支 4c、4d）依此設計；第 23 項則是**真實
 的並行整合測試**，範圍收斂為只驗證聚合不變量，不依賴、也不要求重現任何
 特定的 SQLite 例外路徑（詳見第 14 節）。
+
+**注意（措辭精確度）**：只有分支 4c／4d（測試矩陣第 21、22 項）需要、也
+使用這個 fault-injection 注入點；分支 3（測試矩陣第 8 項，`rowcount=0`
+且無例外）**不使用 fault injection**——它本身就是決定性情境，直接用一個
+現在不是 `dead_letter` 的 job 呼叫 `requeue_dead_letter()` 即可每次重現，
+不需要任何注入或 mock。第 13、14、16 節先前把第 8、21、22 項合稱為「三種
+fault-injection 測試」的地方，已在本次修訂統一改寫為「三類決定性 requeue
+測試，其中只有第 21、22 項使用 fault injection」，避免誤讀成第 8 項也需要
+注入機制。
 
 ### 4.2 `requeue_count`／`last_requeued_at` 與 `job_requeue_events` 的關係：**決定兩者並存，明確給出理由（不留模糊）**
 
@@ -847,11 +861,12 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
   並行呼叫 `enqueue_once` 只產生一筆 job；`requeue_dead_letter` 對非
   `dead_letter` 狀態一律拒絕且不寫稽核列；requeue 後 identity／
   `payload_hash`／`prompt_version` 不變、`attempts` 歸零、`requeue_count`
-  遞增、`job_requeue_events` 正確寫入；**三種決定性 fault-injection 測試
-  類別**（第 14 節第 8、21、22 項：conditional-update 乾淨落空／busy 後
-  發現已被搶先／busy 後發現狀態未變）**＋一個只驗證聚合結果的真實並行
-  整合測試**（第 14 節第 23 項）；**`actor` 驗證測試**（第 14 節第
-  30–32 項）。
+  遞增、`job_requeue_events` 正確寫入；**三類決定性 requeue 測試，其中
+  只有第 21、22 項使用 fault injection、第 8 項是不需要 fault injection
+  的決定性 `rowcount=0` 測試**（第 14 節第 8、21、22 項：
+  conditional-update 乾淨落空／busy 後發現已被搶先／busy 後發現狀態
+  未變）**＋一個只驗證聚合結果的真實並行整合測試**（第 14 節第 23
+  項）；**`actor` 驗證測試**（第 14 節第 30–32 項）。
 
 ### 2.5b — 手動 enqueuer CLI
 
@@ -903,7 +918,7 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
 
 ---
 
-## 14. 測試矩陣（v6：拿掉依賴環境時機的措辭，改寫為決定性 fault-injection 分類；新增第 21–23 項，第 8 項加註分類標籤，第 24 項起順延）
+## 14. 測試矩陣（v6：拿掉依賴環境時機的措辭，拆為三類決定性 requeue 測試——僅第 21、22 項使用 fault injection、第 8 項不使用——外加一個聚合整合測試；新增第 21–23 項，第 8 項加註分類標籤，第 24 項起順延）
 
 1. 既有 `rss`／`telegram`／`cron` job 的建立、claim、完成、失敗、reap 全部
    行為不受影響（回歸測試）。
@@ -921,12 +936,12 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
    更新，identity／`payload_hash`／`prompt_version`／`payload` 不變；
    `job_requeue_events` 新增一列，`previous_error`／`previous_attempts`
    正確捕捉 requeue **之前**的值，`actor`／`reason` 正確寫入。
-8. **（決定性測試分類 1：conditional-update 乾淨落空，無例外）**
-   `requeue_dead_letter` 對 `queued`／`running`／`completed` 狀態（或查無
-   此 job_id）的 job 一律拒絕（`rowcount=0`，沒有拋出任何例外——這本身就
-   是決定性情境，不需要 fault injection，直接用非 `dead_letter` 狀態的
-   job 呼叫即可每次重現），不修改任何欄位、**不寫入任何
-   `job_requeue_events` 稽核列**。
+8. **（決定性測試分類 1：conditional-update 乾淨落空，無例外，
+   不使用 fault injection）** `requeue_dead_letter` 對 `queued`／
+   `running`／`completed` 狀態（或查無此 job_id）的 job 一律拒絕
+   （`rowcount=0`，沒有拋出任何例外——這本身就是決定性情境，不需要
+   fault injection，直接用非 `dead_letter` 狀態的 job 呼叫即可每次
+   重現），不修改任何欄位、**不寫入任何 `job_requeue_events` 稽核列**。
 9. 這個 job source 從未使用 `thread_id`／`--resume`。
 10. Episode 檔案被 N-gate 移到 `.processed/` 之後，2.5c 仍能依序搜尋三個
     目錄找到它。
@@ -950,25 +965,26 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
 20. **（僅在第 18 節唯一 blocker 解除、確認技術機制後才可執行）** 故意在
     episode 內容中誘導呼叫某個工具，斷言呼叫在技術層面被拒絕／不可能
     發生，而不是只斷言「模型選擇不呼叫」。
-21. **（決定性測試分類 2：busy 之後發現狀態已變，取代舊版依賴真實排程
-    競爭的描述）** 依第 4.1d 節的注入點，強制讓 conditional `UPDATE` 拋出
-    fault-injected 的 `sqlite3.OperationalError`（代表 `SQLITE_BUSY` 或
-    `SQLITE_BUSY_SNAPSHOT`，測試不需要區分是哪一種）；測試在
-    `requeue_dead_letter()` 觸發重新查詢之前，用另一個獨立的直接 DB
-    操作把該 job 的 `status` 改成非 `dead_letter`（決定性地模擬「已被
-    搶先」，不使用 `sleep()` 或依賴真實排程）。斷言：
+21. **（決定性測試分類 2：busy 之後發現狀態已變，使用 fault injection；
+    取代舊版依賴真實排程競爭的描述）** 依第 4.1d 節的注入點，強制讓
+    conditional `UPDATE` 拋出 fault-injected 的 `sqlite3.OperationalError`
+    （代表 `SQLITE_BUSY` 或 `SQLITE_BUSY_SNAPSHOT`，測試不需要區分是
+    哪一種）；測試在 `requeue_dead_letter()` 觸發重新查詢之前，用另一個
+    獨立的直接 DB 操作把該 job 的 `status` 改成非 `dead_letter`（決定性
+    地模擬「已被搶先」，不使用 `sleep()` 或依賴真實排程）。斷言：
     - 結果是 `RequeueRejected`（不是 `RequeueRetryableDBError`）。
     - 這次呼叫**不**新增任何 `job_requeue_events` 稽核列。
     - 這次呼叫本身**不**改動 `jobs.requeue_count`／`last_requeued_at`
       （這兩者若有變化，只可能是測試自己模擬的「搶先者」那次操作造成的，
       不是這次被拒絕的呼叫造成的）。
     - 不會建立第二筆 job。
-22. **（決定性測試分類 3：busy 之後發現狀態未變，取代 v5 帶有「若測試
-    環境中能穩定重現」這種環境依賴措辭的舊版第 21 項）** 依第 4.1d 節的
-    注入點，強制讓 conditional `UPDATE` 拋出同一種 fault-injected
-    `sqlite3.OperationalError`，但**不**竄改該 job 的狀態——重新查詢時
-    `status` 仍是 `dead_letter`。斷言（逐項對應完整清單，這個測試必須
-    每次執行都得到相同結果，不依賴 SQLite 鎖爭用是否真的發生）：
+22. **（決定性測試分類 3：busy 之後發現狀態未變，使用 fault injection；
+    取代 v5 帶有「若測試環境中能穩定重現」這種環境依賴措辭的舊版第 21
+    項）** 依第 4.1d 節的注入點，強制讓 conditional `UPDATE` 拋出同一種
+    fault-injected `sqlite3.OperationalError`，但**不**竄改該 job 的
+    狀態——重新查詢時 `status` 仍是 `dead_letter`。斷言（逐項對應完整
+    清單，這個測試必須每次執行都得到相同結果，不依賴 SQLite 鎖爭用是否
+    真的發生）：
     - job 的 `status` 仍是 `dead_letter`（未被轉換成 `queued`）。
     - `requeue_count` 不變。
     - `last_requeued_at` 不變。
@@ -980,13 +996,14 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
     - 回傳／拋出的是 `RequeueRetryableDBError`，**不得**被誤報成
       `RequeueRejected`（也就是不得被誤判為「已被別的並行 requeue 搶
       走」）。
-23. **（真實並行整合測試——範圍收斂為只驗證聚合不變量，不假設哪一條
-    SQLite 例外路徑會實際發生，也不假設哪一方贏）** 兩個真正的
-    process／thread 同時對同一 `job_id` 呼叫 `requeue_dead_letter`
-    （真實競爭，**不**做 fault injection、**不**用 `sleep()` 或固定
-    執行順序去人為製造勝負）。測試**只**斷言以下聚合結果——分支 4c／4d
-    各自的細節分流已經由第 21、22 項的決定性 fault-injection 測試覆蓋，
-    這個整合測試不重複驗證那些細節、也不要求重現特定的 SQLite 例外：
+23. **（真實並行整合測試——不使用 fault injection，範圍收斂為只驗證
+    聚合不變量，不假設哪一條 SQLite 例外路徑會實際發生，也不假設哪一方
+    贏）** 兩個真正的 process／thread 同時對同一 `job_id` 呼叫
+    `requeue_dead_letter`（真實競爭，**不**做 fault injection、**不**用
+    `sleep()` 或固定執行順序去人為製造勝負）。測試**只**斷言以下聚合
+    結果——分支 4c／4d 各自的細節分流已經由第 21、22 項的決定性
+    fault-injection 測試覆蓋，這個整合測試不重複驗證那些細節、也不要求
+    重現特定的 SQLite 例外：
     - 至多一個呼叫成功完成 requeue。
     - 最終**恰好新增一列** `job_requeue_events`。
     - `requeue_count` 恰好遞增一次。
@@ -1031,7 +1048,7 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 
 ---
 
-## 16. 完成定義（Definition of Done，逐子階段，v6：拿掉環境依賴措辭，改為決定性 fault-injection 分類與聚合整合測試並列）
+## 16. 完成定義（Definition of Done，逐子階段，v6：拿掉環境依賴措辭，拆為三類決定性 requeue 測試——僅第 21、22 項使用 fault injection——與聚合整合測試並列）
 
 ### 2.5a DoD
 
@@ -1046,12 +1063,13 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
   順序**；拒絕邏輯、稽核列正確寫入（`previous_error`／
   `previous_attempts`／`actor`／`reason`）皆有測試覆蓋（第 14 節第 7、
   8 項）。
-- **三種決定性 fault-injection 測試類別全數通過**（第 14 節第 8、21、
-  22 項：conditional-update 乾淨落空／busy 後發現已被搶先／busy 後發現
-  狀態未變），**且真實並行整合測試也通過**（第 14 節第 23 項：至多一個
-  成功、恰好一列稽核、`requeue_count` 恰好遞增一次、不假設哪一方贏、不
-  要求重現特定 SQLite 例外——這個整合測試的職責範圍明確收斂為聚合結果，
-  細節分流的正確性由前述三個決定性測試負責）。
+- **三類決定性 requeue 測試全數通過，其中只有第 21、22 項使用 fault
+  injection；第 8 項是不需要 fault injection 的決定性 `rowcount=0`
+  測試**（第 14 節第 8、21、22 項：conditional-update 乾淨落空／busy 後
+  發現已被搶先／busy 後發現狀態未變），**且真實並行整合測試也通過**
+  （第 14 節第 23 項：至多一個成功、恰好一列稽核、`requeue_count` 恰好
+  遞增一次、不假設哪一方贏、不要求重現特定 SQLite 例外——這個整合測試的
+  職責範圍明確收斂為聚合結果，細節分流的正確性由前述三類測試負責）。
 - **`RequeueRejected`／`RequeueRetryableDBError` 兩種例外類別行為正確
   區分**（不得混淆——第 22 項明確驗證暫時性爭用不會被誤報成
   `RequeueRejected`）。
@@ -1147,6 +1165,7 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 | 面向 | v5 | v6（本文件） |
 |---|---|---|
 | 分支 4c／4d 的測試方式 | 測試矩陣第 21 項用「若測試環境中能穩定重現分支 4d……」這種依賴真實 SQLite 鎖爭用時機的措辭 | **改為決定性 fault injection**（新增第 4.1d 節）：在 conditional `UPDATE` 這一步留可控制的注入點，用 mock／monkeypatch 決定性地觸發 `sqlite3.OperationalError`，並各自決定性地安排「狀態已變」或「狀態未變」兩種情境，不依賴真實排程競爭、不使用 `sleep()` |
-| 測試矩陣分類 | 單一第 21 項混合描述聚合結果＋busy 情境，且對 4d 帶有環境依賴的hedge | **拆成三個決定性分類＋一個聚合整合測試**：第 8 項（分類 1：乾淨 rowcount=0）、第 21 項（分類 2：busy 後狀態已變 → `RequeueRejected`）、第 22 項（分類 3：busy 後狀態未變 → `RequeueRetryableDBError`，附完整斷言清單）、第 23 項（真實並行整合測試，範圍收斂為只驗證聚合不變量，不假設哪一方贏、不要求重現特定 SQLite 例外） |
+| 測試矩陣分類 | 單一第 21 項混合描述聚合結果＋busy 情境，且對 4d 帶有環境依賴的hedge | **拆成三個決定性分類＋一個聚合整合測試**：第 8 項（分類 1：乾淨 rowcount=0，不使用 fault injection）、第 21 項（分類 2：busy 後狀態已變 → `RequeueRejected`，使用 fault injection）、第 22 項（分類 3：busy 後狀態未變 → `RequeueRetryableDBError`，使用 fault injection，附完整斷言清單）、第 23 項（真實並行整合測試，不使用 fault injection，範圍收斂為只驗證聚合不變量，不假設哪一方贏、不要求重現特定 SQLite 例外） |
 | 2.5a DoD 與測試矩陣的一致性 | DoD 宣稱「四分支都有穩定測試覆蓋」，但測試矩陣對其中一支帶有環境依賴的 hedge，兩者互相矛盾 | **DoD 明確要求分支 4c／4d 的測試必須是決定性 fault-injection，完全不依賴環境**，與測試矩陣的三個決定性分類＋一個聚合整合測試一一對應，不再矛盾 |
 | 後續項目編號 | 第 22–30 項 | 因新增兩項決定性測試（原第 21 項拆成三項），**全部順延為第 24–32 項**，內容不變，只有編號與交叉引用同步更新 |
+| 「三種 fault-injection 測試」措辭精確度（本次修訂新增的小修正） | 第 13、14、16 節有幾處把第 8、21、22 項合稱為「三種 deterministic fault-injection 測試」，未區分第 8 項其實不使用 fault injection | **統一改寫為「三類決定性 requeue 測試，其中只有第 21、22 項使用 fault injection；第 8 項是不需要 fault injection 的決定性 `rowcount=0` 測試」**（或等義措辭），第 4.1d 節結尾新增一段明文小結；不影響任何測試設計本身的內容或斷言 |
