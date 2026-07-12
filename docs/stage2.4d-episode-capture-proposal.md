@@ -38,6 +38,17 @@ checkpoint 訊號，語義上不是永久結束**，補進 `capture_trigger` enu
 或同類狀態追蹤欄位）——level-triggered 判斷＋cursor（`last_captured_message_id`）
 只前進的既有組合已經足以防止重複與遺漏，不需要額外的狀態機。不涉及
 scanner／importer 實作，也不動 `episodes.enabled`。
+修訂：2026-07-12 第六版（2.4d-3 部署前複核修正，資料誠實性）：`reconcile()`
+的 recovery 回填原本對缺 `capture_trigger` frontmatter 的 episode 檔用
+`'manual'` 佔位——這個做法在結構化欄位裡製造假事實，下游若只讀
+`capture_trigger` 欄位會把「recovery 猜測」誤判成「使用者真的按了
+manual checkpoint」。改為 fail-closed（§3.2 新增段落）：episode 檔缺／帶
+非法值的 `capture_trigger` 一律不猜測、不建立/更新 DB 列、不動 cursor，
+回報 `episode_metadata_incomplete`；同一 session 只要有任一 episode 檔
+metadata 不完整，該 session 本輪 cursor 重建步驟整體停止（其他 session
+不受影響）。**不新增 capture_trigger enum 值、不實作
+recovered/unknown、不修改 trigger 判斷邏輯（`_decide_trigger()`，那是
+2.4d-2 的範圍）**。
 
 > **本文件現為已核准的規格正本。** §0.1 所列項目已由使用者拍板；schema／
 > repository 層（2.4d-1）已依本文件核准內容實作完成，scanner／importer／
@@ -346,6 +357,35 @@ frontmatter `event_id_range`，兩者都攜帶 boundary）額外做：
    （缺 frontmatter 時取檔案數保守估計，只影響序號可讀性、不影響 boundary
    正確性）。
 
+**capture_trigger 誠實性 fail-closed（2.4d-3 複核修正，取代已捨棄的
+「缺值時以 'manual' 佔位」做法）**：上面第 1 步回填 episode 列時，
+`capture_trigger` 是「這刀是誰切的」這個事實的唯一記錄欄位——recovery
+**不得**在這個結構化欄位裡捏造 trigger provenance，即使 decision_reason
+另外寫清楚「來源不明」也一樣：下游 Dashboard／統計／政策若只讀
+`capture_trigger` 欄位本身，會把「recovery 猜測」誤判成「使用者真的按了
+manual checkpoint」。因此：
+
+- episode 檔缺 `capture_trigger`，或帶合法枚舉以外的值（`ended│archived│
+  inactivity│manual` 之外——含 `legacy`，那是 migration 回填 session-level
+  列專用，episode 檔用它一樣不合法）→ **一律 fail-closed**：不猜測、不
+  呼叫 `create_episode()`、不建立或更新該 episode 的 `bridge_sessions`
+  列、不動既有 DB 狀態、不動 inbox 實體檔案、不降級成 legacy。reconcile
+  回報 `episode_metadata_incomplete`，category 只記
+  `metadata:capture_trigger_missing` 或 `metadata:capture_trigger_invalid`
+  （不含 session 內容），並指出是哪個檔案／event identity 不完整。
+- **同一 session 的 cursor recovery 語義**：只要該 session 任一落地
+  episode 檔 metadata 不完整，第 2 步的 cursor 重建對這個 session
+  **本輪整體停止**——不得只跳過壞檔、取其餘合法檔案的
+  `max(last_message_id)` 推進 cursor（那等於在不確定的資料基礎上假裝
+  recovery 完整）。其他 session 不受影響，照常回填與 cursor recovery。
+  （備註：同 session 裡個別合法 episode 檔仍會各自正常回填、各自的
+  `create_episode()` 呼叫仍會照其自身 boundary 推進 cursor——這是
+  `create_episode()` 本身「列＋cursor 同 transaction」的既有不變量
+  〔§1.2〕，不是本次新增行為；本次新增的 fail-closed 範圍限定在「第 2 步
+  的 cursor 重建動作」不得因壞檔而把 cursor 推到壞檔的 boundary。）
+- legacy 檔案不受影響：legacy 從不要求 `capture_trigger`，這條規則完全
+  不適用。
+
 **scanner 側的 fail-closed 防護（防「忘了跑 recovery 就掃」）**：episode
 偵測遇到「該 session 無 cursor、但 inbox 三層存在該 sid 的 `_ep` 檔」時，
 **拒切**該 session 並回報「cursor 缺失但已有 episode 落地檔——請先跑
@@ -637,6 +677,7 @@ reconcile 與 N-gate 計數天然以檔案為單位，無需改動。
 | 16 | trigger：inactivity | 未達 inactivity_hours 不切；達門檻切；ended_at NULL 前提 |
 | 17 | trigger：manual | checkpoint 立即切、無視門檻；無新訊息回報不切（exit 0）；--dry-run 零寫入 |
 | 18 | reconcile episode-aware | .processed/ 的 episode 檔 → 回填對應 episode 列 imported；frontmatter event_id_range 優先、檔名 ep 捕獲組次之、無 ep 段回填 legacy |
+| 18a | reconcile capture_trigger 誠實性 fail-closed（2.4d-3 複核修正） | episode 檔缺／帶非法值 capture_trigger → `episode_metadata_incomplete`（不猜值、不建立/更新列、不動 cursor、不拋未處理例外中斷整批）；同 session 有一檔不完整時，該 session 本輪 cursor 重建整體停止（其餘合法檔仍各自正常回填＋各自 create_episode() 的 cursor 前進不受影響）；另一個健康 session 同批不受拖累；legacy 不受此限；dry-run 與真實模式判定一致、dry-run 零寫入 |
 | 19 | config gate | `episodes.enabled=false`／區塊缺失 → scanner 行為與 2.4c 位元級一致；enabled 但 episode_cutover 缺失 → fail loud exit 1 |
 | 20 | 靜態守則不回歸 | 排程一律無參數 scan（systemd 測試）；scanner／importer 不 import sqlite3 直連 Hermes；read-only／snapshot 慣例 |
 | 21 | cursor 重建（recovery，§3.2） | 造「落地檔存在＋bridge db 全空」情境跑 reconcile：cursor＝各 session 已落地 episode 的 max(last_message_id)、last_episode_seq 回填；對健康 db 重跑 recovery → cursor 不動（只前進不後退） |

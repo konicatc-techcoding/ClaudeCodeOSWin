@@ -150,6 +150,15 @@ _FAILED_BACKFILL_REASON = (
     "bridge reconcile 回填：檔案位於 .failed/，原始錯誤原因無法自檔案系統還原"
 )
 
+# episode 檔 frontmatter capture_trigger 的合法值（Stage 2.4d-3 複核修正）：
+# 刻意排除 registry enum 裡也允許的 'legacy'——那是 migration 回填 session-level
+# 列專用（bridge_state.create_episode 本身也拒絕 capture_trigger='legacy'），
+# episode 檔的 frontmatter 若寫了 'legacy' 一樣視為不合法（reconcile 不負責
+# 判斷 trigger，只負責誠實回填檔案已記錄的值——見 reconcile() docstring
+# 「recovery 不得捏造 trigger provenance」）。
+_VALID_EPISODE_CAPTURE_TRIGGERS = frozenset(
+    {"ended", "archived", "inactivity", "manual"})
+
 
 def _parse_iso_utc(value: str) -> datetime:
     """ISO 8601 → aware UTC datetime。接受 'Z' 結尾；naive 視為 UTC。"""
@@ -772,6 +781,28 @@ def reconcile(
     - profile fail-closed（§6.1）：`source_profile` 參數非 default 時，
       episode 相關的建立／更新／cursor 重建一律記錄並跳過（不寫入、不動
       cursor）；legacy 回填不受此限（維持既有行為）。
+
+    episode metadata 誠實性 fail-closed（2.4d-3 複核修正，取代舊版
+    「capture_trigger 缺值時以 'manual' 佔位」的做法——那個佔位會在
+    `capture_trigger` 這個結構化欄位裡製造假事實：下游只讀欄位的人會把
+    「recovery 猜測」誤判成「使用者真的按了 manual checkpoint」）：
+    - episode 檔缺 `capture_trigger`，或帶非法值（不在
+      `ended/archived/inactivity/manual` 之內，含 `legacy`——那是 migration
+      回填 session-level 列專用，episode 檔用它一樣不合法）→ 一律
+      `episode_metadata_incomplete`：不猜測任何 trigger 值、不呼叫
+      `create_episode()`、不建立或更新該 episode 的 `bridge_sessions` 列、
+      不修改既有 DB 狀態（含 touch_last_seen）、不動 inbox/.processed/.failed
+      實體檔案、不降級成 legacy。reason/category 只記
+      `metadata:capture_trigger_missing` 或 `metadata:capture_trigger_invalid`
+      （不含 session 內容）。
+    - **同一 session 的 cursor recovery 語義**：只要該 session 任何一個
+      落地 episode 檔 metadata 不完整，本輪 cursor recovery 對這個 session
+      **整體 fail-closed**——不得只跳過壞檔、取其餘合法檔案的
+      max(last_message_id) 推進 cursor（那等於在不確定的資料基礎上假裝
+      recovery 完整）。其他 session 不受影響，照常 reconcile／cursor
+      recovery。
+    - legacy 檔案不要求 `capture_trigger`，這條規則完全不適用（既有行為
+      不變）。
     """
     inbox_dir = Path(inbox_dir)
     if not inbox_dir.is_dir():
@@ -836,6 +867,13 @@ def reconcile(
         bridge_state.ensure_schema(bridge_db)
     db_readable = bridge_db.exists()
 
+    # 該輪 reconcile 裡，metadata 不完整（缺／非法 capture_trigger）的
+    # episode 檔所屬 session——用來讓 cursor recovery 對整個 session
+    # fail-closed（見 reconcile() docstring「同一 session 的 cursor
+    # recovery 語義」）。value 是不完整檔案的相對路徑清單，讓使用者知道
+    # 要修哪個檔案。
+    metadata_incomplete_sessions: dict[str, list[str]] = {}
+
     actions: list[dict] = [
         {"action": "skip_unrecognized", "path": p} for p in skipped]
     for event_id, entry in sorted(entries.items()):
@@ -859,8 +897,25 @@ def reconcile(
         reason = (f"bridge reconcile：檔案位於 {_LOCATION_LABEL[status]}，"
                   f"session_id 依據：{basis}")
 
+        metadata_category = None
+        if is_episode:
+            trigger = entry["capture_trigger"]
+            if trigger is None:
+                metadata_category = "metadata:capture_trigger_missing"
+            elif trigger not in _VALID_EPISODE_CAPTURE_TRIGGERS:
+                metadata_category = "metadata:capture_trigger_invalid"
+
+        action_category = None
         if is_episode and not episode_profile_ok:
             action_name = "unsupported_profile_fail_closed"
+        elif is_episode and metadata_category is not None:
+            # fail-closed（2.4d-3 複核修正）：不猜測 trigger、不呼叫
+            # create_episode()、不建立/更新 DB 列、不動既有狀態、不動
+            # inbox 實體檔案、不降級成 legacy——見 reconcile() docstring。
+            action_name = "episode_metadata_incomplete"
+            action_category = metadata_category
+            metadata_incomplete_sessions.setdefault(sid, []).append(
+                inbox_path or str(path))
         elif existing is None:
             if is_episode:
                 action_name = f"insert_episode_{status}"
@@ -870,7 +925,7 @@ def reconcile(
                         source_profile=source_profile,
                         session_source=entry["session_source"] or "unknown",
                         episode_seq=entry["episode_seq"],
-                        capture_trigger=(entry["capture_trigger"] or "manual"),
+                        capture_trigger=entry["capture_trigger"],
                         first_message_id=entry["first_message_id"],
                         last_message_id=entry["last_message_id"],
                         source_content_hash=None,
@@ -878,10 +933,7 @@ def reconcile(
                         decision_reason=(
                             reason + "；episode 列由 reconcile 從檔案系統回填"
                             "（source_content_hash 無法自檔案還原，記 NULL，"
-                            "不影響去重，提案 §3.2）"
-                            + ("" if entry["capture_trigger"] else
-                               "；capture_trigger 無法自檔案還原，"
-                               "以 'manual' 佔位")),
+                            "不影響去重，提案 §3.2）"),
                         import_status=status,
                         memory_type="none",
                         useful_chat=(status == "imported"),
@@ -948,13 +1000,30 @@ def reconcile(
                         seen_at=seen_at,
                         db_path=bridge_db,
                     )
-        actions.append({"action": action_name, "event_id": event_id,
-                        "session_id": sid, "path": str(path), "basis": basis})
+        action_entry = {"action": action_name, "event_id": event_id,
+                        "session_id": sid, "path": str(path), "basis": basis}
+        if action_category is not None:
+            action_entry["category"] = action_category
+        actions.append(action_entry)
 
     # cursor 重建（提案 §3.2，核心 recovery 邏輯）：對每個有落地 episode 檔的
     # session，取所有落地檔 max(last_message_id) upsert 進 bridge_cursors
     # （只前進不後退，對健康 db 重跑無害、天然冪等）。
+    #
+    # fail-closed（2.4d-3 複核修正）：該 session 只要有任一落地 episode 檔
+    # metadata 不完整（缺／非法 capture_trigger），本輪 cursor recovery 對
+    # 這個 session 整體停止——不得只取其餘合法檔案的 max(last_message_id)
+    # 推進（那等於在不確定的資料基礎上假裝 recovery 完整）。其他 session
+    # 不受影響，照常 recovery。
     for sid, group in sorted(episode_session_groups.items()):
+        incomplete_paths = metadata_incomplete_sessions.get(sid)
+        if incomplete_paths:
+            actions.append({
+                "action": "cursor_recovery_fail_closed", "session_id": sid,
+                "category": "metadata:capture_trigger_missing_or_invalid",
+                "incomplete_paths": sorted(incomplete_paths),
+            })
+            continue
         max_last = max(e["last_message_id"] for e in group)
         seq_candidates = [e["episode_seq"] for e in group if e["episode_seq"]]
         max_seq = max(seq_candidates) if seq_candidates else len(group)

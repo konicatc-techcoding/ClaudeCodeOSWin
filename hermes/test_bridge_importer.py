@@ -722,12 +722,20 @@ class TestEpisodeImportFlow(EpisodeImporterTestBase):
         first, last = ids[0], ids[-1]
         self.seed_episode("sess_ep_rerun", first, last)
         # 模擬前次已落地成功但 DB 更新失敗：inbox 已有正確檔名的檔案，
-        # DB 仍是 discovered。
+        # DB 仍是 discovered。frontmatter 比照真實 importer 的實際輸出
+        # （adapter._render_frontmatter：episode 檔一律帶 event_id_range／
+        # episode／capture_trigger，見 hermes/session_adapter/adapter.py）
+        # ——2.4d-3 複核修正後 reconcile 對缺 capture_trigger 的 episode 檔
+        # fail-closed，這裡若省略該欄會誤觸發（測試 fixture 必須誠實反映
+        # 真實落地檔的樣貌，不是 reconcile 的行為要遷就不完整的 fixture）。
         name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
             "sess_ep_rerun", first, last)
         (self.inbox / name).write_text(
             "---\nschema: claudecodeos.inbox.v1\nsource: hermes-session\n"
-            "session_id: sess_ep_rerun\n---\n\n先前已落地的內容\n",
+            "session_id: sess_ep_rerun\n"
+            f'event_id_range: "hermes:sess_ep_rerun:{first}..{last}"\n'
+            "episode: 1\ncapture_trigger: inactivity\n"
+            "---\n\n先前已落地的內容\n",
             encoding="utf-8")
         result = self.run_import()
         action = self.action_for(result, "sess_ep_rerun")

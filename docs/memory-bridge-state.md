@@ -288,6 +288,15 @@ Recovery 流程（整合進既有 `reconcile`，不是新工具，回填規則�
    `max(last_message_id)`，upsert 進 `bridge_cursors`（只前進不後退，對健康
    db 重跑無害、天然冪等）。
 
+**capture_trigger 誠實性 fail-closed（2.4d-3 複核修正，取代已捨棄的
+「缺值時以 'manual' 佔位」做法）**：第 1 步回填時，episode 檔缺
+`capture_trigger`，或帶合法枚舉（`ended│archived│inactivity│manual`）以外
+的值，一律 fail-closed——不猜測、不建立/更新該 episode 列、不動 cursor，
+reconcile 回報 `episode_metadata_incomplete`。同一 session 只要有任一
+episode 檔 metadata 不完整，第 2 步的 cursor 重建對這個 session 本輪整體
+停止（不得只跳過壞檔、取其餘合法檔案的 max(last_message_id) 推進）；其他
+session 不受影響。完整規則見提案 §3.2。
+
 scanner 側另有 fail-closed 防護：episode 偵測遇到「該 session 無 cursor、但
 inbox 已存在該 sid 的 `_ep` 落地檔」時，**拒切**並回報「請先跑 reconcile」，
 不是直接切出可能重疊的 boundary。「切刀位置穩定 ⇔ session 尾端最後一次切刀

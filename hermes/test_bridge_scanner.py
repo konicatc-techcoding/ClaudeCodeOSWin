@@ -1207,18 +1207,24 @@ class TestCheckpointCli(EpisodeScannerTestBase):
 # ====================================================================
 
 def _episode_inbox_text(sid: str, first: int, last: int, episode_seq: int,
-                        capture_trigger: str, session_source: str = "cli") -> str:
+                        capture_trigger: str | None, session_source: str = "cli") -> str:
     """手寫的 episode inbox 檔內容（frontmatter 格式對齊
     adapter._render_frontmatter 的實際輸出，不經 adapter 產生——保持測試
-    自成一體、不依賴 Hermes db fixture）。"""
+    自成一體、不依賴 Hermes db fixture）。
+
+    capture_trigger=None：完全省略該 frontmatter 行（模擬 2.4d-3 複核修正
+    測試情境 A「episode 檔缺 capture_trigger」）；帶值時原樣寫入（包含
+    合法值以外的字串，模擬情境 B「非法值」，不做任何驗證——reconcile 才是
+    受測對象）。"""
     event_id_range = f"hermes:{sid}:{first}..{last}"
+    trigger_line = f"capture_trigger: {capture_trigger}\n" if capture_trigger is not None else ""
     return ("---\n"
             "schema: claudecodeos.inbox.v1\n"
             "source: hermes-session\n"
             f"session_id: {sid}\n"
             f'event_id_range: "{event_id_range}"\n'
             f"episode: {episode_seq}\n"
-            f"capture_trigger: {capture_trigger}\n"
+            f"{trigger_line}"
             "created_at: 2026-07-09T00:00:00Z\n"
             "usefulness: pending\n"
             "sensitivity: pending\n"
@@ -1242,7 +1248,7 @@ class ReconcileEpisodeTestBase(unittest.TestCase):
         self._tmp.cleanup()
 
     def _write_episode_file(self, directory: Path, sid: str, first: int, last: int,
-                            episode_seq: int, capture_trigger: str = "inactivity",
+                            episode_seq: int, capture_trigger: str | None = "inactivity",
                             session_source: str = "cli") -> Path:
         name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
             sid, first, last)
@@ -1307,17 +1313,21 @@ class TestReconcileEpisodeAware(ReconcileEpisodeTestBase):
         self.assertTrue(row["error_reason"])
 
     def test_filename_ep_group_used_when_frontmatter_missing(self):
-        """檔名 ep 捕獲組回填（無 frontmatter 時）。"""
+        """檔名 ep 捕獲組仍可正確判定 identity／boundary（無 frontmatter
+        時）——但 2.4d-3 複核修正後，無 frontmatter 必然也缺
+        `capture_trigger`，所以正確結果是 fail-closed（`episode_metadata_
+        incomplete`），不再像舊版那樣用 'manual' 佔位建立列（見
+        TestReconcileEpisodeMetadataFailClosed 情境 A）。"""
         sid = "sess-d"
         name = adapter_module.HermesSessionAdapter.episode_inbox_filename(sid, 7, 9)
         (self.processed / name).write_text("無 frontmatter 的殘骸\n",
                                            encoding="utf-8")
-        self.reconcile()
+        result = self.reconcile()
         eid = "hermes:sess-d:7..9"
-        row = self.rows()[eid]
-        self.assertEqual(row["import_status"], "imported")
-        self.assertEqual(row["first_message_id"], 7)
-        self.assertEqual(row["last_message_id"], 9)
+        action = next(a for a in result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(action["action"], "episode_metadata_incomplete")
+        self.assertEqual(action["category"], "metadata:capture_trigger_missing")
+        self.assertNotIn(eid, self.rows())
 
     def test_legacy_file_still_backfills_legacy_row_unaffected(self):
         """episode 檔與 legacy 檔同時存在時互不干擾（零回歸）。"""
@@ -1385,13 +1395,20 @@ class TestReconcileCursorRecovery(ReconcileEpisodeTestBase):
         self.assertEqual(self.cursor("sess-b")["last_captured_message_id"], 120)
 
     def test_episode_seq_falls_back_to_positional_estimate_without_frontmatter(self):
-        """缺 frontmatter 時取檔案數保守估計（提案 §3.2：只影響序號可讀性，
-        不影響 boundary 正確性）。"""
+        """缺 `episode:` 序號欄位時取檔案數保守估計（提案 §3.2：只影響序號
+        可讀性，不影響 boundary 正確性）——但仍必須帶合法 `capture_trigger`：
+        2.4d-3 複核修正後，「無 frontmatter」不再是可以連 capture_trigger
+        都一併佔位補值的理由（那個情境已改由 fail-closed 涵蓋，見情境 A／
+        `test_filename_ep_group_used_when_frontmatter_missing`），這裡改成
+        只缺 `episode:` 欄、其餘 frontmatter（含合法 capture_trigger）齊全，
+        測試序號 fallback 這個獨立於 capture_trigger 誠實性之外的機制。"""
         sid = "sess-z"
         name1 = adapter_module.HermesSessionAdapter.episode_inbox_filename(sid, 1, 5)
         name2 = adapter_module.HermesSessionAdapter.episode_inbox_filename(sid, 6, 10)
-        (self.processed / name1).write_text("殘骸1\n", encoding="utf-8")
-        (self.processed / name2).write_text("殘骸2\n", encoding="utf-8")
+        minimal_fm = ("---\nschema: claudecodeos.inbox.v1\nsource: hermes-session\n"
+                     f"session_id: {sid}\ncapture_trigger: inactivity\n---\n\n殘骸\n")
+        (self.processed / name1).write_text(minimal_fm, encoding="utf-8")
+        (self.processed / name2).write_text(minimal_fm, encoding="utf-8")
         self.reconcile()
         cur = self.cursor(sid)
         self.assertEqual(cur["last_captured_message_id"], 10)
@@ -1413,6 +1430,174 @@ class TestReconcileProfileFailClosed(ReconcileEpisodeTestBase):
         self.assertIsNone(self.cursor("sess-p"), "非 default profile 不動 cursor")
         actions = [a["action"] for a in result["actions"]]
         self.assertIn("unsupported_profile_fail_closed", actions)
+
+
+class TestReconcileEpisodeMetadataFailClosed(ReconcileEpisodeTestBase):
+    """Stage 2.4d-3 複核修正：episode 檔缺／非法 capture_trigger 時 reconcile
+    必須 fail-closed（不猜 trigger、不佔位、不寫 DB、不動 cursor），且同一
+    session 的 cursor recovery 因此整體停止；其他 session 不受影響。
+    情境 A-G（對應任務規格）。"""
+
+    # ---- A：episode 檔缺 capture_trigger ----
+
+    def test_a_missing_capture_trigger_is_metadata_incomplete_no_writes(self):
+        path = self._write_episode_file(self.processed, "sess-miss", 1, 5,
+                                         episode_seq=1, capture_trigger=None)
+        before_bytes = path.read_bytes()
+        result = self.reconcile(seen_at=T1)
+        eid = "hermes:sess-miss:1..5"
+        action = next(a for a in result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(action["action"], "episode_metadata_incomplete")
+        self.assertEqual(action["category"], "metadata:capture_trigger_missing")
+        self.assertNotIn(eid, self.rows(), "缺 capture_trigger 不得建立 episode DB 列")
+        self.assertIsNone(self.cursor("sess-miss"), "缺 capture_trigger 不得推進/建立 cursor")
+        self.assertEqual(path.read_bytes(), before_bytes, "不得改動 inbox 實體檔案")
+
+    # ---- B：episode capture_trigger 為非法值 ----
+
+    def test_b_invalid_capture_trigger_is_metadata_incomplete_no_exception(self):
+        self._write_episode_file(self.processed, "sess-bad", 1, 5, episode_seq=1,
+                                 capture_trigger="recovered")
+        result = self.reconcile(seen_at=T1)  # 不得拋未處理例外（本行本身就是斷言）
+        eid = "hermes:sess-bad:1..5"
+        action = next(a for a in result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(action["action"], "episode_metadata_incomplete")
+        self.assertEqual(action["category"], "metadata:capture_trigger_invalid")
+        self.assertNotIn(eid, self.rows())
+        self.assertIsNone(self.cursor("sess-bad"))
+
+    def test_b_legacy_value_in_episode_file_also_rejected(self):
+        """capture_trigger='legacy' 是 migration 回填 session-level 列專用，
+        episode 檔帶這個值一樣視為非法（不得被 create_episode 的
+        ValueError 中斷整批 reconcile）。"""
+        self._write_episode_file(self.processed, "sess-legacyval", 1, 2,
+                                 episode_seq=1, capture_trigger="legacy")
+        result = self.reconcile()
+        eid = "hermes:sess-legacyval:1..2"
+        action = next(a for a in result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(action["action"], "episode_metadata_incomplete")
+        self.assertEqual(action["category"], "metadata:capture_trigger_invalid")
+        self.assertNotIn(eid, self.rows())
+
+    # ---- C：同 session 一個合法 episode ＋ 一個 metadata 不完整 episode ----
+
+    def test_c_mixed_session_cursor_recovery_fails_closed_entirely(self):
+        self._write_episode_file(self.processed, "sess-mixed", 1, 5,
+                                 episode_seq=1, capture_trigger="archived")
+        self._write_episode_file(self.inbox, "sess-mixed", 6, 10,
+                                 episode_seq=2, capture_trigger=None)
+        result = self.reconcile(seen_at=T1)
+        rows = self.rows()
+        # 合法的那一檔仍正常回填（fail-closed 範圍是「cursor recovery 重建
+        # 步驟」，不是「同 session 其他合法檔各自的 create_episode() 呼叫」——
+        # 兩者是不同機制，見 reconcile() docstring）
+        self.assertIn("hermes:sess-mixed:1..5", rows)
+        self.assertEqual(rows["hermes:sess-mixed:1..5"]["capture_trigger"], "archived")
+        # 不完整的那一檔不建立列
+        self.assertNotIn("hermes:sess-mixed:6..10", rows)
+        # ep1 自己的 create_episode() 呼叫（獨立的 atomic 列＋cursor 不變量，
+        # 提案 §1.2）本來就會把 cursor 推進到它自己的 boundary（5）——這只
+        # 反映「訊息 1..5 確實已被合法 trigger 擷取」的事實，不是猜測。真正
+        # 被 fail-closed 擋下的是 reconcile 的「cursor 重建」步驟：不得因為
+        # 壞檔（6..10）在同一組裡，就把 cursor 推到 10——那會把未經驗證的
+        # boundary 當成已擷取事實。
+        cursor = self.cursor("sess-mixed")
+        self.assertIsNotNone(cursor)
+        self.assertEqual(cursor["last_captured_message_id"], 5,
+                         "cursor 不得因同 session 的壞檔而被推到 10")
+        actions = [a for a in result["actions"]
+                  if a["action"] == "cursor_recovery_fail_closed"
+                  and a["session_id"] == "sess-mixed"]
+        self.assertEqual(len(actions), 1)
+        self.assertIn("metadata:capture_trigger_missing_or_invalid", actions[0]["category"])
+        # 明確指出是哪個 path 不完整
+        self.assertTrue(any("sess-mixed" in p for p in actions[0]["incomplete_paths"]))
+        # 且沒有一般的 cursor_recovery action 混進來（該 session 的重建步驟
+        # 確實被整條跳過，不是重建到不同值）
+        self.assertFalse(any(a["action"] == "cursor_recovery"
+                             and a["session_id"] == "sess-mixed"
+                             for a in result["actions"]))
+
+    # ---- D：另一個完全合法 session 同批存在 ----
+
+    def test_d_unrelated_healthy_session_in_same_batch_unaffected(self):
+        self._write_episode_file(self.processed, "sess-mixed", 1, 5,
+                                 episode_seq=1, capture_trigger="archived")
+        self._write_episode_file(self.inbox, "sess-mixed", 6, 10,
+                                 episode_seq=2, capture_trigger=None)
+        self._write_episode_file(self.processed, "sess-clean", 1, 8,
+                                 episode_seq=1, capture_trigger="inactivity")
+        result = self.reconcile(seen_at=T1)
+        # 壞 session 依然 fail-closed：cursor 只到合法檔自己的 boundary（5，
+        # 由 ep1 的 create_episode() 本身推進），不會被壞檔（10）拖寬，
+        # 也不會被 reconcile 的 cursor 重建步驟另外推進
+        mixed_cursor = self.cursor("sess-mixed")
+        self.assertIsNotNone(mixed_cursor)
+        self.assertEqual(mixed_cursor["last_captured_message_id"], 5)
+        # 乾淨 session 正常 recovery，不被拖垮
+        clean_cursor = self.cursor("sess-clean")
+        self.assertIsNotNone(clean_cursor)
+        self.assertEqual(clean_cursor["last_captured_message_id"], 8)
+        rows = self.rows()
+        self.assertIn("hermes:sess-clean:1..8", rows)
+        self.assertEqual(rows["hermes:sess-clean:1..8"]["import_status"], "imported")
+        recovery_actions = {a["session_id"]: a["action"] for a in result["actions"]
+                           if a["action"] in ("cursor_recovery", "cursor_recovery_fail_closed")}
+        self.assertEqual(recovery_actions["sess-clean"], "cursor_recovery")
+        self.assertEqual(recovery_actions["sess-mixed"], "cursor_recovery_fail_closed")
+
+    # ---- E：合法 episode（既有行為回歸確認） ----
+
+    def test_e_valid_episode_keeps_existing_trigger_and_cursor_advances(self):
+        self._write_episode_file(self.processed, "sess-ok", 1, 5, episode_seq=1,
+                                 capture_trigger="manual")
+        result = self.reconcile(seen_at=T1)
+        eid = "hermes:sess-ok:1..5"
+        row = self.rows()[eid]
+        self.assertEqual(row["capture_trigger"], "manual")
+        self.assertEqual(row["import_status"], "imported")
+        action = next(a for a in result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(action["action"], "insert_episode_imported")
+        cursor = self.cursor("sess-ok")
+        self.assertEqual(cursor["last_captured_message_id"], 5)
+        recovery = next(a for a in result["actions"]
+                        if a["action"] == "cursor_recovery" and a["session_id"] == "sess-ok")
+        self.assertEqual(recovery["last_captured_message_id"], 5)
+
+    # ---- F：legacy 無 capture_trigger（不被誤標 metadata incomplete） ----
+
+    def test_f_legacy_file_without_capture_trigger_not_flagged(self):
+        (self.inbox / "hermes_session_sess-legacy2.md").write_text(
+            "---\nschema: claudecodeos.inbox.v1\nsource: hermes-session\n"
+            "session_id: sess-legacy2\n---\n\n內容\n", encoding="utf-8")
+        result = self.reconcile()
+        eid = "hermes:sess-legacy2"
+        action = next(a for a in result["actions"] if a.get("event_id") == eid)
+        self.assertNotEqual(action["action"], "episode_metadata_incomplete")
+        self.assertEqual(action["action"], "insert_to_inbox")
+        row = self.rows()[eid]
+        self.assertIsNone(row["episode_seq"])
+        self.assertIsNone(row["capture_trigger"])
+
+    # ---- G：dry-run 與真實模式一致，dry-run 零寫入 ----
+
+    def test_g_dry_run_matches_real_mode_action_zero_writes(self):
+        self._write_episode_file(self.processed, "sess-dry", 1, 5, episode_seq=1,
+                                 capture_trigger=None)
+        eid = "hermes:sess-dry:1..5"
+
+        dry_result = self.reconcile(dry_run=True)
+        self.assertFalse(self.bridge_db.exists(), "dry-run 零寫入：連 db 檔都不建立")
+        dry_action = next(a for a in dry_result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(dry_action["action"], "episode_metadata_incomplete")
+        self.assertEqual(dry_action["category"], "metadata:capture_trigger_missing")
+
+        real_result = self.reconcile(seen_at=T1)
+        real_action = next(a for a in real_result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(real_action["action"], dry_action["action"])
+        self.assertEqual(real_action["category"], dry_action["category"])
+        self.assertNotIn(eid, self.rows())
+        self.assertIsNone(self.cursor("sess-dry"))
 
 
 class TestReconcileCursorRecoveryStability(EpisodeScannerTestBase):
@@ -1517,7 +1702,7 @@ class TestReconcileCursorRecoveryStability(EpisodeScannerTestBase):
                          "此時只有 ep1 落地過；widened episode 尚未匯入（scan 不落地）")
 
     def _write_episode_file(self, directory: Path, sid: str, first: int, last: int,
-                            episode_seq: int, capture_trigger: str = "inactivity",
+                            episode_seq: int, capture_trigger: str | None = "inactivity",
                             session_source: str = "cli") -> Path:
         name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
             sid, first, last)
