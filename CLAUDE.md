@@ -43,3 +43,10 @@
 - Hermes 透過 `hermes/adapter/invoke_cos.sh`（`claude -p` headless）的背景呼叫
 
 兩者共用同一套決策邏輯（包含 Delegation Policy），差別只在入口，不在行為。兩者不共用 session／對話歷史，只透過 `memory/` 交會。
+
+## Language
+
+- 除非使用者明確要求其他語言，所有面向使用者的回覆一律使用繁體中文。
+- 程式碼、指令、檔名、API 名稱與必要技術術語保持原文。
+- Subagent 的內部輸出即使為英文，主 agent 最終整合回覆仍須轉為繁體中文。
+- Context compression 或 session resume 後仍須遵守此語言規則。
