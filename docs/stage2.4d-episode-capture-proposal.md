@@ -266,7 +266,7 @@ already-imported**。因此 2.4d-3 必須把「已匯入掃描」改成 episode-
 session_id: <sid>                 # 既有欄，不變——同 sid 多檔從此合法
 event_id_range: "hermes:<sid>:<first>..<last>"   # 既有欄；episode 檔＝episode event_id 本身
 episode: 3                        # 新欄：episode_seq
-capture_trigger: inactivity       # 新欄：ended | inactivity | manual
+capture_trigger: inactivity       # 新欄：ended | archived | inactivity | manual
 ```
 
 reconcile 對帳優先序：frontmatter `event_id_range`（可直接還原 episode
@@ -502,7 +502,7 @@ eligible 為空 → 不切 episode（episode 永不為空）
 |---|---|
 | `ended_at=None`、episode_cutover 後**無**新訊息（多數） | eligible 為空 → 永遠不產生 episode、不進管線。**44 筆不會批次湧入** |
 | `ended_at=None`、cutover 後**有**新訊息（復用中） | 等 trigger（inactivity 門檻到、或 manual checkpoint）→ 切出**只含新訊息**的 episode 1 |
-| `ended_at` 已設且在掃描範圍（既有路徑曾經處理過的 20 筆） | legacy 列已存在者照舊（touch-only）；episode 判準下若 cutover 後還有新訊息（罕見：ended 後復活）才會多切 episode |
+| `ended_at` 已設且在掃描範圍（既有路徑曾經處理過的 20 筆） | legacy 列已存在者照舊（touch-only）；episode 判準下若 cutover 後還有新訊息（罕見：ended 後復活），這個 `ended_at` 視為 stale（§6 stale-ended 說明），改由 `archived`／`inactivity` 判斷是否切出新 episode，不會被「ended_at 已設」永久擋住 |
 | 全新 session（cutover 後才開始） | 全部訊息 >= cutover，行為即「正常 episode 生命週期」 |
 
 ### 5.3 watermark 與 inactivity 的結構性衝突（設計發現，必須明文）
@@ -527,10 +527,23 @@ max(rowid)、max(timestamp)，read-only、snapshot 模式照舊），避免為�
 
 | trigger | 條件（皆須 eligible 非空） | 語義 |
 |---|---|---|
-| `ended` | `ended_at` 已設（且 >= episode_cutover） | session 被明確結束——立即切刀，不等 inactivity |
-| `archived` | Hermes `archived == true`（level-triggered：每次檢查看當下值是不是 true，不追蹤 0→1 這個轉換瞬間、不需要記住上一次的值；且 eligible 非空） | 使用者對目前內容明確要求建立 checkpoint（2026-07-12 前置任務 2 拍板，實地驗證：Archive 動作使 archived 由 0 變為 1、`ended_at` 不變、message_count／max rowid／內容 sha256 全部不變，重啟後持久）——**不代表 session 永久結束**，不修改 `ended_at`。**立即切刀，不等 72 小時 inactivity 門檻**——這是 archived 與 inactivity 的關鍵差異：使用者主動訊號優先於被動的閒置判定。eligible 為空時不建立空 episode（與其他 trigger 共用同一條通用規則，不設特例）。session 日後 Unarchive（`archived` 變回 false）之後若再新增訊息，那批新訊息不會再滿足 `archived` 條件，會依當下成立的其他 trigger（`inactivity`／`manual`／`ended`）另切一刀，形成下一個獨立 episode（immutability 語義與其他 trigger 一致）；cursor 只前進，天然保證不會與已切的 archived episode 重疊 |
-| `inactivity` | `ended_at` NULL 且 `now - last_message_ts >= inactivity_hours` | 「暫時告一段落」的 checkpoint。session 之後復活＝正常，新訊息屬下一 episode |
+| `ended` | `ended_at` 已設，且**同時滿足** `ended_at >= episode_cutover` 與 `ended_at >= last_message_ts`（該 session 目前最新訊息時間）——後者是 2.4d-2 複核加上的條件，見下方 stale-ended 說明 | session 被明確結束——立即切刀，不等 inactivity |
+| `archived` | Hermes `archived == true`（level-triggered：每次檢查看當下值是不是 true，不追蹤 0→1 這個轉換瞬間、不需要記住上一次的值；且 eligible 非空）——**不受 `ended` 是否 stale 影響**，即使 `ended_at` 已設也一樣檢查 | 使用者對目前內容明確要求建立 checkpoint（2026-07-12 前置任務 2 拍板，實地驗證：Archive 動作使 archived 由 0 變為 1、`ended_at` 不變、message_count／max rowid／內容 sha256 全部不變，重啟後持久）——**不代表 session 永久結束**，不修改 `ended_at`。**立即切刀，不等 72 小時 inactivity 門檻**——這是 archived 與 inactivity 的關鍵差異：使用者主動訊號優先於被動的閒置判定。eligible 為空時不建立空 episode（與其他 trigger 共用同一條通用規則，不設特例）。session 日後 Unarchive（`archived` 變回 false）之後若再新增訊息，那批新訊息不會再滿足 `archived` 條件，會依當下成立的其他 trigger（`inactivity`／`manual`／`ended`）另切一刀，形成下一個獨立 episode（immutability 語義與其他 trigger 一致）；cursor 只前進，天然保證不會與已切的 archived episode 重疊 |
+| `inactivity` | （`ended_at` NULL **或** `ended_at` 已設但 stale，見下方說明）且 `now - last_message_ts >= inactivity_hours` | 「暫時告一段落」的 checkpoint。session 之後復活＝正常，新訊息屬下一 episode |
 | `manual` | 人工執行 checkpoint 指令 | 立即切刀，無視門檻（例如「這段討論很重要，現在就擷取」） |
+
+**stale-ended 判斷（2.4d-2 複核修正，§0.1 拍板「ended 後復活不加特例、
+統一規則」）**：`ended_at` 只在同時滿足 `ended_at >= episode_cutover` 且
+`ended_at >= last_message_ts` 時才是「目前訊息尾端的有效結束訊號」。只要
+session 在 `ended_at` 之後又有更新的訊息（`ended_at < last_message_ts`，
+即 ended 後復活），這個 `ended_at` 就視為 **stale**：不得阻擋後續
+`archived`／`inactivity` 判斷——舊版實作只要 `ended_at` 有值就永遠不再
+檢查 inactivity，會讓「曾經 ended、後來復活並新增訊息」的 session 永久
+漏擷取新訊息，已在 scanner `_decide_trigger()` 修正（見
+`hermes/bridge_scanner.py`／`hermes/test_bridge_scanner.py` 的
+`TestEpisodeStaleEndedRevival`）。stale-ended 的 session 接下來一律走跟
+`ended_at` 本來就是 NULL 的 session 相同的 `archived`／`inactivity`
+判斷路徑，不加特例。
 
 **archived 的驗證狀態（誠實區分「邏輯已測」與「真實 UI 行為未驗證」）**：
 Archive 動作使 `archived` 由 0 變為 1 已用真實 Desktop session 實地驗證

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""hermes/bridge_scanner.py — v0.3（Stage 2.3；2.4a cutover 設定化與 watermark；
-2.4d-2 episode 偵測＋manual checkpoint）
+"""hermes/bridge_scanner.py — v0.3.1（Stage 2.3；2.4a cutover 設定化與 watermark；
+2.4d-2 episode 偵測＋manual checkpoint；2.4d-2 複核修正 stale-ended 阻擋
+inactivity 的 blocker，見 `_decide_trigger()`）
 
 Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 session，
 把處理狀態寫進 bridge_state.db（經 hermes/bridge_state.py 的 repository API）。
@@ -52,9 +53,14 @@ episode 偵測與 trigger 判斷（提案 §5／§6，`scan` 與 `checkpoint` �
   watermark（§5.3：inactivity trigger 恰恰在「最近沒有活動」時才成立，若用
   watermark 過濾會系統性漏切）；逐 session 以 per-session cursor
   （`bridge_state.get_cursor`）比對決定有無新訊息。
-- trigger 判定：`ended`（ended_at 已設且 >= episode_cutover，立即切、不等
+- trigger 判定：`ended`（ended_at 已設，且同時滿足 >= episode_cutover 與
+  >= last_message_at〔該 session 目前最新訊息時間，來自
+  `list_session_activity()` 的 max_timestamp〕才算有效結束訊號，立即切、不等
   inactivity）／`archived`（Hermes `archived==true`，level-triggered：只看
-  當下值，立即切、不等 72 小時）／`inactivity`（ended_at NULL 且閒置達
+  當下值，立即切、不等 72 小時，且不受 ended 是否 stale 影響）／
+  `inactivity`（ended_at NULL，**或 ended_at 已設但 < last_message_at——即
+  session 在 ended 後又有新訊息，這個 ended_at 視為 stale，不得阻擋
+  inactivity 判斷，§0.1 拍板：ended 後復活不加特例、統一規則**——且閒置達
   `episodes.inactivity_hours`）。三者任一成立即可切；eligible 為空一律
   不建立空 episode（通用規則、無特例）。
 - cursor 遺失防護（矩陣 #8）：session 無 cursor 記錄但 inbox 已有該 sid 的
@@ -313,27 +319,34 @@ def _episode_hash_events(events: list[dict]) -> list[dict]:
 def _decide_trigger(sess: dict, cutover_dt: datetime, inactivity_hours: float,
                     last_activity_dt: datetime, now_dt: datetime) -> str | None:
     """§6 trigger 表逐條判斷（scan 用；checkpoint 走獨立的 manual 路徑，
-    不經這個函式）。優先序 ended > archived > inactivity——三者判斷用同一次
-    eligible（由呼叫端另外算），優先序只影響 capture_trigger 標籤紀錄哪個
-    名字，不影響「切不切」：任一成立就切一刀。
+    不經這個函式）。優先序：有效 ended（非 stale，見下）> archived
+    （level-triggered，不受 ended 是否 stale 影響）> inactivity——三者判斷
+    用同一次 eligible（由呼叫端另外算），優先序只影響 capture_trigger
+    標籤紀錄哪個名字，不影響「切不切」：任一成立就切一刀。
 
-    判斷 judgment call（規格未明文的邊界情況，記錄理由）：ended_at 已設但
-    < episode_cutover 的 session（legacy 完結、cutover 前結束）不滿足
-    inactivity 條件（inactivity 明文要求 ended_at NULL）——這類 session 若
-    cutover 後又有新訊息，本階段只靠 archived／manual 觸發，不會自動被
-    inactivity 撿到。這是逐字照 §6 trigger 表的條件寫出的結果，不是遺漏。
+    stale-ended 修正（2.4d-2 複核，§0.1 拍板「ended 後復活不加特例、統一
+    規則」）：`ended_at` 只在**同時滿足** `ended_at >= episode_cutover` 且
+    `ended_at >= last_message_at`（last_activity_dt，來自
+    `list_session_activity()` 的 max_timestamp）時，才視為目前訊息尾端的
+    有效結束訊號、回傳 "ended"。只要 session 有比 `ended_at` 更新的訊息
+    （`ended_at < last_message_at`，代表 session 在 ended 後復活），這個
+    `ended_at` 就視為 **stale**：不得阻擋後續 archived／inactivity 判斷——
+    舊版「只要 ended_at 有值就永遠不再檢查 inactivity」會讓復活後的新訊息
+    永久漏擷取，已修正。stale-ended（或 ended_at 本來就是 NULL）的 session
+    一律走跟未完結 session 相同的 archived／inactivity 判斷路徑，不加特例。
     """
     ended_at = sess["ended_at"]
     if ended_at:
         ended_dt = _parse_iso_utc(ended_at)
-        if ended_dt >= cutover_dt:
+        if ended_dt >= cutover_dt and ended_dt >= last_activity_dt:
             return "ended"
+        # ended_at < cutover 或 < last_activity_dt：stale——落到下面的
+        # archived／inactivity 判斷，不得被 ended_at 有值這件事擋住
     if bool(sess["metadata"].get("archived")):
         return "archived"
-    if not ended_at:
-        idle_hours = (now_dt - last_activity_dt).total_seconds() / 3600.0
-        if idle_hours >= inactivity_hours:
-            return "inactivity"
+    idle_hours = (now_dt - last_activity_dt).total_seconds() / 3600.0
+    if idle_hours >= inactivity_hours:
+        return "inactivity"
     return None
 
 

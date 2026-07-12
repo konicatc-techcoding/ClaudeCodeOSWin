@@ -787,14 +787,21 @@ class TestEpisodeTriggerEnded(EpisodeScannerTestBase):
         self.scan()
         self.assertEqual(self.episode_rows(), {})
 
-    def test_ended_before_cutover_does_not_satisfy_ended_trigger(self):
-        """judgment call（見 _decide_trigger docstring）：ended_at < cutover
-        時 ended 條件不成立；若也不滿足 archived，本階段不會自動切刀。"""
+    def test_ended_before_cutover_with_later_message_is_stale_and_uses_inactivity(self):
+        """2.4d-2 複核 blocker 修正（原本這裡是「judgment call」，已撤銷）：
+        ended_at < cutover 且 session 在 ended 後又有新訊息（cutover 後）——
+        這個 ended_at 視為 stale，不得阻擋 inactivity 判斷；達 inactivity
+        門檻仍應切出 episode（§0.1 拍板：ended 後復活不加特例、統一規則）。"""
         sid = "sess-ended-precutover"
         self.add_session(sid, ended_at=EP_CUTOVER_EPOCH - HOUR)
         self.add_message(1, sid, "user", "hello", EP_CUTOVER_EPOCH + HOUR)
-        self.scan()
-        self.assertEqual(self.episode_rows(), {})
+        self.scan()  # 預設 seen_at=EP_NOW（cutover+24h），遠超 INACTIVITY_HOURS=2
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1)
+        row = next(iter(eps.values()))
+        self.assertEqual(row["capture_trigger"], "inactivity")
+        self.assertEqual(row["first_message_id"], 1)
+        self.assertEqual(row["last_message_id"], 1)
 
 
 class TestEpisodeTriggerInactivity(EpisodeScannerTestBase):
@@ -880,6 +887,59 @@ class TestEpisodeTriggerArchived(EpisodeScannerTestBase):
         ep1_after = self.rows()[ep1_row["event_id"]]
         self.assertEqual(ep1_after["decision_reason"], ep1_row["decision_reason"])
         self.assertEqual(ep1_after["last_message_id"], 1)
+
+
+class TestEpisodeStaleEndedRevival(EpisodeScannerTestBase):
+    """2.4d-2 複核 blocker 修正：`ended_at` 有值但 session 在 ended 後又有
+    更新的訊息（`ended_at < last_message_at`）——這個 ended_at 視為 stale，
+    不得阻擋 inactivity／archived 判斷（§0.1 拍板：ended 後復活不加特例、
+    統一規則）。舊版只要 ended_at 有值就永遠不再檢查 inactivity，會讓復活
+    後的新訊息永久漏擷取；本類別驗證修正後的行為。"""
+
+    def test_ended_after_cutover_but_stale_relative_to_later_message_uses_inactivity(self):
+        """ended_at 本身 >= episode_cutover，但比該 session 最後一則訊息舊
+        （復活）——仍視為 stale，達 inactivity 門檻照樣切出 inactivity
+        episode，boundary 涵蓋 ended 前後所有 eligible 訊息。"""
+        sid = "sess-ended-then-revived"
+        ended_at = EP_CUTOVER_EPOCH + HOUR
+        self.add_session(sid, ended_at=ended_at)
+        self.add_message(1, sid, "user", "ended 前", EP_CUTOVER_EPOCH + 0.5 * HOUR)
+        self.add_message(2, sid, "user", "復活後的新訊息", ended_at + 2 * HOUR)
+        seen_at = datetime.fromtimestamp(
+            ended_at + 5 * HOUR, tz=timezone.utc).isoformat()  # 距最後訊息 3h >= 門檻 2h
+        self.scan(seen_at=seen_at)
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1)
+        row = next(iter(eps.values()))
+        self.assertEqual(row["capture_trigger"], "inactivity")
+        self.assertEqual(row["first_message_id"], 1)
+        self.assertEqual(row["last_message_id"], 2)
+
+    def test_stale_ended_below_inactivity_threshold_does_not_cut(self):
+        """stale ended 但尚未達 inactivity 門檻：不切（eligible 存在但還沒
+        到 inactivity 時間，不是「有 ended_at 就不切」的舊邏輯）。"""
+        sid = "sess-ended-then-revived-recent"
+        ended_at = EP_CUTOVER_EPOCH + HOUR
+        self.add_session(sid, ended_at=ended_at)
+        self.add_message(1, sid, "user", "復活後的新訊息", ended_at + HOUR)
+        seen_at = datetime.fromtimestamp(
+            ended_at + 1.5 * HOUR, tz=timezone.utc).isoformat()  # 距最後訊息僅 0.5h < 門檻 2h
+        self.scan(seen_at=seen_at)
+        self.assertEqual(self.episode_rows(), {})
+
+    def test_stale_ended_with_archived_true_uses_archived_trigger_immediately(self):
+        """stale-ended + archived=true：archived 優先序不受 ended 是否
+        stale 影響，立即切 archived，不等 inactivity 門檻。"""
+        sid = "sess-ended-then-revived-archived"
+        ended_at = EP_CUTOVER_EPOCH + HOUR
+        self.add_session(sid, ended_at=ended_at, archived=True)
+        self.add_message(1, sid, "user", "復活後的新訊息", ended_at + HOUR)
+        seen_at = datetime.fromtimestamp(
+            ended_at + 1.1 * HOUR, tz=timezone.utc).isoformat()  # 遠低於 inactivity 門檻
+        self.scan(seen_at=seen_at)
+        eps = self.episode_rows()
+        self.assertEqual(len(eps), 1)
+        self.assertEqual(next(iter(eps.values()))["capture_trigger"], "archived")
 
 
 class TestEpisodeMultipleAndRerun(EpisodeScannerTestBase):
