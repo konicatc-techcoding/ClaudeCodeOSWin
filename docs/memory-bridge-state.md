@@ -3,8 +3,8 @@
 日期：2026-07-09　狀態：**格式 v2（2026-07-11 升版，22 欄＋`bridge_cursors`）／
 ✅ 全鏈路已完成並上線（2026-07-12，schema／scanner／importer／migration／
 部署，見 roadmap Stage 2.4d 與第一筆正常 episode 端到端驗收）／
-第 9 節（2026-07-12，2026-07-12 第二次修訂為 v3 對齊）：與 Stage 2.5
-（`jobs.db` triage）的邊界說明，不涉及本檔案 schema 變更**
+第 9 節（2026-07-12，2026-07-12 第三次修訂為對齊 Stage 2.5 提案 v4）：與
+Stage 2.5（`jobs.db` triage）的邊界說明，不涉及本檔案 schema 變更**
 負責領域：`engineering`
 
 這份文件定義 Stage 2 session bridge（[hermes-integration-roadmap.md](hermes-integration-roadmap.md)
@@ -15,7 +15,7 @@ legacy session-level 記錄），要記下「處理到哪、判定成什麼、�
 （`claudecodeos.bridge_state.v2`）。Episode capture 完整設計見
 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
 （已核准，規格正本）；本文件第 8 節只記與 v1 的差異摘要與交叉引用，細節不重複維護。
-Stage 2.5（Episode Triage & Queue Foundation，目前為 **v3** 規劃提案）的完整設計見
+Stage 2.5（Episode Triage & Queue Foundation，目前為 **v4** 規劃提案）的完整設計見
 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)——
 **本檔案不因 Stage 2.5 新增任何欄位**，第 9 節只記交叉邊界說明。
 
@@ -46,11 +46,12 @@ Stage 2.5（Episode Triage & Queue Foundation，目前為 **v3** 規劃提案）
    `memory/inbox/` 新增檔案，不能編輯既有檔案、不能碰 `memory/*.md` 正本**
    （ARCHITECTURE.md 第 4 節）。
 5. **這份記錄不回答「這個 episode 有沒有被排進 job 去處理」**——job
-   生命週期（enqueue／執行／重試／dead-letter／人工 requeue）是
-   `hermes/jobs.db` 的職責，與本檔案是兩份正交、互不寫入的簿記
+   生命週期（enqueue／執行／重試／dead-letter／人工 requeue／requeue 稽核）
+   是 `hermes/jobs.db` 的職責，與本檔案是兩份正交、互不寫入的簿記
    （2026-07-12 因 Stage 2.5 規劃明文補上這條聲明；完整說明見第 9 節，
-   Stage 2.5 v3 收斂後 `jobs.db` 這側新增了 identity 三元組與
-   dead-letter recovery 兩欄，本檔案依然不受影響、不新增任何欄位）。
+   Stage 2.5 提案 v4 收斂後 `jobs.db` 這側新增了 identity 三元組、
+   dead-letter recovery 兩欄，以及一張獨立的 append-only 稽核表
+   `job_requeue_events`，本檔案依然不受影響、不新增任何欄位）。
 
 ## 2. 欄位摘要
 
@@ -120,7 +121,7 @@ Stage 2.5（Episode Triage & Queue Foundation，目前為 **v3** 規劃提案）
   指的是「bridge 自己不會對同一個匯入單位重複偵測／重複匯入」，**不是**
   指 Stage 2.5 引入的 `hermes/jobs.db` enqueue 機制（第 9 節）。Stage 2.5
   的 triage job 是否「恰好一次」建立，靠的是 `jobs.db` 自己的
-  `(source, external_key, prompt_version)` 唯一索引（提案 v3 第 2 節），
+  `(source, external_key, prompt_version)` 唯一索引（提案第 2 節），
   跟本段講的 bridge 層級 `event_id` UNIQUE 去重是兩件獨立的保證，分別存在
   兩個不同的 DB 裡，不要混為一談。
   訊息層級的 `event_id_range` 跟 inbox frontmatter（`claudecodeos.inbox.v1`）
@@ -355,42 +356,52 @@ inbox 已存在該 sid 的 `_ep` 落地檔」時，**拒切**並回報「請先�
 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
 第 8.1 節，本文件不重複維護第二份順序。
 
-## 9. 與 `jobs.db` 的邊界（Stage 2.5，2026-07-12 補充，2026-07-12 第二次修訂對齊 v3；**不涉及本檔案 schema 變更**）
+## 9. 與 `jobs.db` 的邊界（Stage 2.5，2026-07-12 補充，2026-07-12 第三次修訂對齊提案 v4；**不涉及本檔案 schema 變更**）
 
-Stage 2.5（Episode Triage & Queue Foundation，規劃提案目前為 **v3**，見
+Stage 2.5（Episode Triage & Queue Foundation，規劃提案目前為 **v4**，見
 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)）
 引入了一條新的、對 `to_inbox`／`imported` episode 做唯讀結構化分診的側支線，
 它的 job 生命週期（enqueue、claim、attempts、backoff、dead_letter、人工
-requeue）記在 `hermes/jobs.db`，**不是**本檔案。這裡明文補上交叉邊界說明，
-避免日後有人以為 `bridge_state.db` 需要跟著擴充：
+requeue、requeue 稽核）記在 `hermes/jobs.db`，**不是**本檔案。這裡明文補上
+交叉邊界說明，避免日後有人以為 `bridge_state.db` 需要跟著擴充：
 
 - **dispatch／job 生命週期完全由 `hermes/jobs.db` 擁有與管理**，與
   `bridge_state.db` 無關——本檔案**不新增、也不需要新增**任何欄位去追蹤
-  「這筆記錄是否已經被 enqueue 去做 triage」或「被 requeue 過幾次」。這些
-  資訊完全可以從 `jobs.db` 用
+  「這筆記錄是否已經被 enqueue 去做 triage」或「被 requeue 過幾次、每次
+  requeue 是誰做的、為什麼」。這些資訊完全可以從 `jobs.db` 用
   `(source='bridge_episode_triage', external_key=<event_id>,
   prompt_version=<版本>)` 查到，不需要在兩份 DB 之間維護平行狀態。
-  **v3 更新**：`jobs.db` 這側因為新設計了 dead-letter 人工復原機制，新增
-  了 `requeue_count`／`last_requeued_at` 兩欄（連同識別用的
+  **v4 更新**：`jobs.db` 這側因為新設計了 dead-letter 人工復原機制，除了
+  v3 已新增的 `requeue_count`／`last_requeued_at` 兩欄（連同識別用的
   `external_key`／`payload_hash`／`prompt_version` 三欄，共五欄，一次
-  migration 加入）——這些全部是 `jobs.db` 自己的欄位，**與本檔案完全無關**，
-  在此列出只是讓交叉引用保持最新，不代表本檔案有任何變動。
+  migration 加入）之外，v4 **再新增一張獨立的 append-only 稽核表
+  `job_requeue_events`**（`job_id`／`requeue_seq`／`requeued_at`／
+  `actor`／`reason`／`previous_error`／`previous_attempts`），作為
+  requeue 操作的稽核正本（`jobs` 表上的兩個聚合欄位只是可推導的快取）。
+  這些全部是 `jobs.db` 自己的欄位／表，**與本檔案完全無關**，在此列出
+  只是讓交叉引用保持最新，不代表本檔案有任何變動。
 - 第 3 節既有的「`retry_count` 與 `hermes/db.py` 的 `jobs.attempts` 不同層、
   不互通」立場，在 Stage 2.5 引入 `jobs.db` 新的
-  `(source, external_key, prompt_version)` 三元組去重機制後**依然成立且
-  延伸**：**`bridge_state.db` 只回答「這個 episode 匯入判定成什麼、落在哪個
-  檔案」；`jobs.db` 只回答「這個 episode 有沒有被排進某個工作、跑得怎樣、
-  被人工救回幾次」**——兩者是正交的兩份簿記，互不寫入、也不依賴對方的欄位
-  才能運作。
-- **候選查詢的精確定義**（Stage 2.5 提案 v3 第 6 節新增內容，本檔案只做
-  交叉引用、不重複維護）：2.5b 判斷「哪些 episode 該被送去 triage」時，讀的
-  是本檔案的 `import_status ∈ {'to_inbox', 'imported'}`（不是只查
-  `to_inbox`——查證確認 `imported` 這個狀態值只能由人工執行的
-  `bridge_scanner.py reconcile` 依 `.processed/` 目錄真相回填，而
-  `consolidate-memory` 本身完全不寫本檔案，見第 3 節新增的說明），
-  **不需要**本檔案新增任何時間戳或狀態轉換歷史欄位就能正確回答。
+  `(source, external_key, prompt_version)` 三元組去重機制、以及新的
+  `job_requeue_events` 稽核表後**依然成立且延伸**：**`bridge_state.db`
+  只回答「這個 episode 匯入判定成什麼、落在哪個檔案」；`jobs.db` 只回答
+  「這個 episode 有沒有被排進某個工作、跑得怎樣、被誰救回幾次、為什麼」**
+  ——兩者是正交的兩份簿記，互不寫入、也不依賴對方的欄位才能運作。
+- **候選查詢的精確定義**（Stage 2.5 提案第 6 節內容，本檔案只做交叉引用、
+  不重複維護）：2.5b 判斷「哪些 episode 該被送去 triage」時，讀的是本檔案
+  的 `import_status ∈ {'to_inbox', 'imported'}`（不是只查 `to_inbox`——
+  查證確認 `imported` 這個狀態值只能由人工執行的 `bridge_scanner.py
+  reconcile` 依 `.processed/` 目錄真相回填，而 `consolidate-memory` 本身
+  完全不寫本檔案，見第 3 節新增的說明），**不需要**本檔案新增任何時間戳
+  或狀態轉換歷史欄位就能正確回答。**提案 v4 額外澄清**：這個候選查詢只讀
+  本檔案的狀態與掃描 `memory/inbox/` 目錄，**不**對 `jobs.db` 做任何前置
+  過濾——「這個 episode 是否已經 enqueue 過」完全交給 `jobs.db` 自己的
+  `enqueue_once()` 判斷，不會影響本檔案的候選定義，本檔案這條交叉引用
+  維持不變。
 - 完整設計（`jobs.db` 的 schema migration、`enqueue_once`／
-  `requeue_dead_letter` API、exactly-once／at-most-one-automatic-attempt
-  語意、triage handler 的最小權限設計等）一律以
+  `requeue_dead_letter` API 與其 atomic conditional 語意、
+  `job_requeue_events` 稽核表、exactly-once／at-most-one-automatic-attempt
+  語意、triage handler 的最小權限設計、`hermes/worker.py` 的
+  source-specific dispatch 等）一律以
   [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)
-  （目前 v3）為規格正本，本文件不重複維護第二份。
+  （目前 v4）為規格正本，本文件不重複維護第二份。

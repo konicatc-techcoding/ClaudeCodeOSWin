@@ -16,6 +16,15 @@ job identity 改為三元組、正式設計 dead-letter recovery 機制、修正
 解決 2.5b 候選查詢的 N-gate 遺漏、鎖定 no-tools 入口點設計（但技術可行性列為
 明確的 start blocker）、鎖定模型／決定性契約參數。**v3 仍有 2 項 start blocker
 尚未解除**（見提案文件第 18 節），Stage 2.5c 在解除之前不建議開工。
+**更新（2026-07-12，第三次）**：Stage 2.5 提案依使用者 8 點精確度回饋收斂為
+**v4**——拿掉 2.5b 候選資格判定裡會靜默略過 `payload_hash` 漂移的前置過濾
+條件（改為每個候選一律呼叫或模擬呼叫 `enqueue_once`）；dead-letter recovery
+補上 append-only 稽核表 `job_requeue_events` 並改寫為 atomic conditional
+state transition；把 `hermes/worker.py` 的 source-specific dispatch 正式
+納入 2.5c 範圍；精確化「不能寫檔案」的邊界（handler／模型層 vs queue
+infrastructure 層）；**統一 blocker 敘事——v4 現在只剩一項真正的硬 start
+blocker**（no-tools 技術強制力，見提案第 18 節），另一項移為 2.5c 實作期間
+的技術決策（提案第 8 節）。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -306,25 +315,43 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
 
 ---
 
-## Stage 2.5 — Episode Triage & Queue Foundation（規劃中，2026-07-12 提案，v3）
+## Stage 2.5 — Episode Triage & Queue Foundation（規劃中，2026-07-12 提案，目前 v4）
 
-**狀態**：規劃提案 **v3**，**待使用者核准，尚未開工**。完整設計正本：
+**狀態**：規劃提案 **v4**，**待使用者核准，尚未開工**。完整設計正本：
 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)（`planning`
 domain 起草，交叉核對本文件、[memory-bridge-state.md](memory-bridge-state.md)、
 [memory-taxonomy.md](memory-taxonomy.md)、`hermes/db.py`、`hermes/worker.py`、
 `hermes/bridge_importer.py`、`hermes/bridge_state.py`、`hermes/bridge_scanner.py`、
 `.claude/skills/consolidate-memory/SKILL.md`、`registry/delegation_policy.yaml` 後定稿）。
-**v3 是依使用者 7 點回饋對 v2 的收斂版本**，重點決定：job identity 改為
-`(source, external_key, prompt_version)` 三元組；新增正式的
-`requeue_dead_letter()` dead-letter recovery 機制（`jobs.db` 因此需新增
-`requeue_count`／`last_requeued_at` 兩欄，連同 identity 三欄共五欄，皆在 2.5a
-一次 migration 內完成，`bridge_state.db` 依然不擴充）；執行語意更正為
-「at-most-one automatic attempt」（Option A）而非先前錯誤的「at-least-once」；
-2.5b 候選查詢修正為 `import_status ∈ {to_inbox, imported}`（不只查
-`to_inbox`，否則會漏掉已被人工 `reconcile` 回填的合法內容）；no-tools 呼叫
-入口點決定為獨立腳本 `invoke_cos_triage.sh`，但其技術可行性**未確認、明確
-列為 start blocker**；模型／決定性契約參數（capability、timeout、最大輸入
-長度等）已鎖定為具體建議值。
+
+**v4 是依使用者 8 點精確度回饋對 v3 的修正版本**，重點決定：
+
+- **2.5b 候選資格**：episode 曾合法到達 `to_inbox`，目前 bridge 狀態可為
+  `to_inbox` 或 `imported`，且 artifact 可在 `memory/inbox/`／
+  `.processed/`／`.failed/` 三目錄中被唯一定位到——**不再**額外要求
+  「jobs.db 尚無既有 identity」這個前置過濾條件；每個滿足前述條件的候選，
+  一律呼叫（或 dry-run 模擬呼叫）`enqueue_once()`，由它做唯一權威判斷
+  （created／exists／conflict），避免 `payload_hash` 內容漂移被候選層
+  靜默略過。
+- **Dead-letter recovery**：新增 append-only 稽核表 `job_requeue_events`
+  （`job_id`／`requeue_seq`／`requeued_at`／`actor`／`reason`／
+  `previous_error`／`previous_attempts`），`requeue_dead_letter()` 改寫為
+  atomic conditional state transition
+  （`UPDATE ... WHERE status='dead_letter'`＋`rowcount` 檢查），確保並行
+  requeue 呼叫恰好一個成功；`jobs.requeue_count`／`last_requeued_at` 明確
+  定位為可從稽核表推導的 denormalized 快取，正本是稽核表。
+- **Worker dispatch**：正式把 `hermes/worker.py` 的 source-specific
+  dispatch 邏輯納入 2.5c 範圍——triage source 走獨立入口點
+  `invoke_cos_triage.sh`、專屬 timeout、絕不 resume、呼叫前安全前置檢查
+  失敗即 fail closed、絕不 silently fallback 回一般用途的
+  `invoke_cos.sh`；其餘既有 source 完全不受影響。
+- **寫入邊界精確化**：拆解「不能寫入任何檔案」為 handler／模型層（禁止：
+  episode 檔案本身、`memory/inbox/`、`memory/*.md`、`bridge_state.db`）與
+  queue infrastructure 層（允許：`jobs.db` 記帳、per-job log、
+  `job_requeue_events`）兩種不同的寫入責任。
+- **Blocker 敘事統一**：v4 現在只保留**一項**真正的硬 start blocker
+  ——no-tools 技術強制力尚未確認；v3 曾經並列的第二項（structured output
+  支援）改為 2.5c 實作期間的技術決策，不是開工前必解的阻塞。
 
 **定位（與 Stage 2.4c/2.4d、daily N-gate 的邊界，刻意寫清楚避免職責重疊）**：
 Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox）、落地
@@ -340,13 +367,17 @@ Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox�
 
 - **2.5a**：`jobs.db` migration（新增 `external_key`／`payload_hash`／
   `prompt_version`／`requeue_count`／`last_requeued_at` 五欄＋
-  `UNIQUE(source, external_key, prompt_version)`）、`enqueue_once`／
-  `requeue_dead_letter` API、回歸測試。
-- **2.5b**：手動 enqueuer CLI（`--dry-run`，不呼叫模型，候選查詢已修正為
-  涵蓋 `to_inbox`／`imported` 兩種狀態）。
-- **2.5c**：no-tools 結構化 triage handler（固定 JSON schema 輸出，最小
-  權限——**開工前須先解除「no-tools 技術可行性未確認」這項 start
-  blocker**，見提案第 18 節）。
+  `UNIQUE(source, external_key, prompt_version)`＋新表
+  `job_requeue_events`）、`enqueue_once`／`requeue_dead_letter` API、
+  回歸測試。
+- **2.5b**：手動 enqueuer CLI（`--dry-run`，不呼叫模型；候選資格＝
+  「episode 曾合法到達 to_inbox，目前 bridge 狀態可為 to_inbox 或
+  imported，artifact 可唯一定位」，對每個候選都無條件呼叫／模擬呼叫
+  `enqueue_once`）。
+- **2.5c**：no-tools 結構化 triage handler ＋ `hermes/worker.py` 的
+  source-specific dispatch（固定 JSON schema 輸出，最小權限——**開工前須
+  先解除唯一的 start blocker「no-tools 技術可行性未確認」**，見提案第 18
+  節）。
 - **2.5d**：3–5 次人工實跑驗收（初始上限每日 1 次）。
 
 **明確排除於本階段之外**：`action_candidate` 的實際使用者核准與 domain 分派
@@ -382,10 +413,11 @@ Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox�
 1. ~~Stage 1~~ ✅ 完成（Pre-Bridge Foundation，見 [stage1-checkpoint.md](stage1-checkpoint.md)）。
 2. ~~Stage 2 必要前置~~ ✅ gate 已解（2026-07-10）：DoD 1/2 實走完成、三項前置決策拍板並記錄。
 3. ~~Stage 2（2.1–2.4d）~~ ✅ 全鏈路完成並上線（2026-07-12，見上方 Stage 2.4d 節）。
-4. **Stage 2.5**（現在的第一優先）：規劃提案已收斂為 v3
+4. **Stage 2.5**（現在的第一優先）：規劃提案已收斂為 v4
    （[stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)），
    待使用者核准；2.5a/2.5b 可在核准後即開工，**2.5c 需先解除提案第 18 節列出的
-   2 項 start blocker（尤以 no-tools 技術可行性查驗為要）才能開工**。
+   唯一 start blocker（no-tools 技術可行性查驗）才能開工**——若查驗結果只能
+   達到降級保證，需使用者另外一次獨立核准，不得悄悄預設接受。
 5. **Stage 3**：觀測性收尾。
 
 ## 持續事項（不設 stage，跨階段有效）
@@ -413,4 +445,4 @@ Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox�
 | ~~Windows 開發正本無版控~~ **已解**（2026-07-09 `git init`，baseline `03c7a0e`） | （解除前）程式層 rollback 只能靠 WSL pre-sync tarball；bridge 這種長期演化元件無變更歷史 | 已完成 `git init` 與 baseline commit，後續變更均入版控；git-based sync 仍列 sync plan v0.2 升級路徑；rollback 現況索引見 checkpoint 第 6 節 |
 | state.db 訊息數相對 Stage 0 基準下降（2026-07-09 觀察） | 若是讀錯 profile db，bridge 會處理錯的資料集 | Stage 2 DoD 5 基準複查；讀取一律 `--profile default` ＋ snapshot |
 | **bridge_state schema v1 與拍板欄位清單有出入**（2026-07-10 新增） | 不先對齊就實作，會產生兩套欄位語意並存 | 對齊明文列為 Stage 2 實作第一步（memory-bridge-state.md 第 6 節）；schema／測試／文件三者同動 |
-| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節「no-tools 技術可行性」這個未解除的 start blocker**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容 |
+| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容 |
