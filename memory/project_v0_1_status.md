@@ -46,19 +46,46 @@ Model Router 改成 capability-based：`registry/agents.yaml` 每個領域新增
 偵測→discovered→inbox 落地全部可動；尚未 enqueue、尚未接 headless CoS、尚未裝
 importer 排程**（人工 CLI 執行，維持 2.4c 既有邊界）。
 
-**2026-07-11／12（Stage 2.4d-1 完成：episode capture schema v2＋repository 層；
-schema 已完成但尚未部署）**：實測發現 Desktop／TUI 的 `ended_at` 結構性不可靠
-（64 個既有 session 只有 20 個有值，Desktop 0/2、TUI 8/46），Stage 2 匯入單位改為
-episode／capture checkpoint（同一 session 可切多個 immutable episode），設計見
+**2026-07-11／12（Stage 2.4d-1 完成：episode capture schema v2＋repository 層）**：
+實測發現 Desktop／TUI 的 `ended_at` 結構性不可靠（64 個既有 session 只有 20 個
+有值，Desktop 0/2、TUI 8/46），Stage 2 匯入單位改為 episode／capture checkpoint
+（同一 session 可切多個 immutable episode），設計見
 docs/stage2.4d-episode-capture-proposal.md（已核准）。`registry/bridge_state_schema.yaml`
 升級為 v2（`bridge_sessions` 17→22 欄＋新表 `bridge_cursors`）；`hermes/bridge_state.py`
 加上 `create_episode`（原子＋UNIQUE conflict 冪等）、`migrate` CLI、content hash 純函式；
 `hermes/session_adapter/adapter.py` snapshot 一致性補強（fingerprint＋retry＋
 `quick_check`）；archived trigger 契約已用真實 Desktop session 實地驗證（Archive
-0→1 持久、`ended_at`／內容不變）。**2.4d-1 已完成並已 commit，但尚未部署**——
-部署側 `bridge_state.db` 尚未跑 `migrate`、`bridge.yaml` 尚未加 `episodes` 區塊；
-2.4d-2（scanner episode 偵測）／2.4d-3（importer episode 化）／2.4d-4（部署
-migration）尚未開始。
+0→1 持久、`ended_at`／內容不變，後續收斂為 level-triggered 語義：只看當下值，
+不追蹤轉換）。
+
+**2026-07-12（Stage 2.4d 全鏈路完成並上線：operational acceptance checkpoint）**：
+2.4d-2（scanner episode 偵測：`ended`／`archived`／`inactivity` 三型 trigger、
+`checkpoint` 手動子指令，含 stale-ended 修正——`ended_at` 過期時正確回退檢查
+inactivity，不再永久卡死復活 session）→ 2.4d-3（importer episode 化：range
+export、episode-aware 查重、reconcile cursor recovery，含 capture_trigger 缺失
+fail-closed 修正——recovery 不猜測 trigger 來源）→ 2.4d-4（部署 migration＋上線）
+全部完成，測試矩陣（提案 §10）全綠。
+
+**部署現況**：`episodes.enabled=true`、`episode_cutover=2026-07-12T06:36:18Z`
+（部署翻 enabled 前的精確 UTC 時刻）；`hermes-bridge-scanner.timer` active／
+enabled，每日 08:05 CST，WSL 睡眠期間錯過的觸發由 `Persistent=true` 補跑
+（既有行為）。importer 仍未排程化（人工 CLI）、未 enqueue、未接 headless CoS。
+
+**✅ 第一筆真實正常 episode 端到端驗收通過**：`session_id=20260712_164627_419d23`、
+`event_id=hermes:20260712_164627_419d23:6991..7022`、`trigger=archived`、
+boundary `6991..7022`、cursor `last_captured_message_id=7022`／`episode_seq=1`。
+政策 allow（useful／length／sensitive／hash 全通過）→ 落地
+`memory/inbox/hermes_session_20260712_164627_419d23_ep6991-7022.md`（檔名／
+event_id／frontmatter 三處一致）→ 最終狀態 `to_inbox`／`episodic`／
+`useful_chat=true`。scan／importer／reconcile 重跑皆冪等（boundary／hash／
+cursor／`imported_inbox_path` 不變、零重複落地）。Hermes `state.db`／
+`jobs.db`／`telegram.json` 全程 fingerprint 零 bridge 寫入。過程中另有一筆
+too_short 的 archived episode 正確判定 `skipped`（4 事件僅 2 個 message 型，
+低於 4 則門檻——字元數足夠但 message 型事件不足，證明結構性排除非 bug）。
+
+**已知非阻塞缺口**：Unarchive（`archived` 1→0）對真實 Hermes Desktop UI 的
+live round-trip 驗證尚未執行（僅 fixture 邏輯驗證），不影響已上線的
+level-triggered 判斷。
 
 **WSL 開發環境現況（2026-07-12 釐清，避免與 scanner timer 的 Persistent catch-up
 行為混淆）**：目前 WSL 側是 **on-demand**——互動 session 手動用 `wsl.exe` 呼叫、
@@ -73,4 +100,5 @@ systemd 的 `Persistent=true` 才會觸發 catch-up 補跑一次錯過的排程�
 尚未動工：
 - Model Router 的 MCP server 版本（目前 script adapter 夠用）
 - Dashboard 要不要開放 Telegram 以外的投遞管道
-- Stage 2.4d-2／2.4d-3／2.4d-4：episode capture 的 scanner／importer 實作與部署 migration
+- Stage 2.5：episode/legacy discovered → enqueue → headless CoS 的自動化串接（importer 排程化）
+- Unarchive live round-trip 對真實 Hermes Desktop UI 的驗證（非阻塞 test gap）

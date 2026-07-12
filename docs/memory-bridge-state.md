@@ -1,7 +1,8 @@
 # Memory Bridge State — Stage 2 session bridge 的處理狀態記錄
 
 日期：2026-07-09　狀態：**格式 v2（2026-07-11 升版，22 欄＋`bridge_cursors`）／
-儲存載體已拍板（2026-07-10）／repository 層（2.4d-1）已實作＝已完成、但尚未部署**
+✅ 全鏈路已完成並上線（2026-07-12，schema／scanner／importer／migration／
+部署，見 roadmap Stage 2.4d 與第一筆正常 episode 端到端驗收）**
 負責領域：`engineering`
 
 這份文件定義 Stage 2 session bridge（[hermes-integration-roadmap.md](hermes-integration-roadmap.md)
@@ -13,8 +14,9 @@ legacy session-level 記錄），要記下「處理到哪、判定成什麼、�
 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
 （已核准，規格正本）；本文件第 8 節只記與 v1 的差異摘要與交叉引用，細節不重複維護。
 
-**本文件定義格式並記錄 repository 層現況；scanner／importer 的 episode 化與部署
-migration（2.4d-2/3/4）尚未實作**，見第 8 節與 roadmap Stage 2.4d。
+**本文件定義格式；scanner／importer 的 episode 化與部署 migration
+（2.4d-2/3/4）已全數完成並上線**，見第 8 節與 roadmap Stage 2.4d（含第一筆
+真實正常 episode 端到端驗收：`hermes:20260712_164627_419d23:6991..7022`）。
 
 > **決策更新（2026-07-10，使用者拍板）**：儲存載體定案為**獨立 SQLite
 > `hermes/state/bridge_state.db`**（第 4 節）。拍板時的最少欄位清單與 schema v1
@@ -228,8 +230,11 @@ state——db 整個刪掉重建後 watermark 消失，scanner 退回 cutover �
 **本節只記與本文件既有內容（v1／17 欄）的差異摘要**——完整設計（欄位取捨分析、
 狀態機、trigger 語義、測試矩陣）正本在
 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
-（已核准，不重複維護第二份）。**目前只完成 schema 與 repository 層（2.4d-1）；
-scanner／importer 的 episode 化與部署 migration（2.4d-2/3/4）尚未實作**。
+（已核准，不重複維護第二份）。**schema／repository（2.4d-1）、scanner episode
+偵測（2.4d-2）、importer episode 化＋recovery（2.4d-3）、部署 migration
+（2.4d-4）全數完成並上線（2026-07-12）**，`episodes.enabled=true`、
+`episode_cutover=2026-07-12T06:36:18Z`，第一筆真實正常 episode 端到端驗收
+通過（詳見 roadmap Stage 2.4d 節）。
 
 ### 8.1 schema v1 → v2：22 欄 ＋ `bridge_cursors`
 
@@ -305,9 +310,13 @@ inbox 已存在該 sid 的 `_ep` 落地檔」時，**拒切**並回報「請先�
 
 ### 8.5 部署現況
 
-**2.4d-1（schema＋repository）已完成並已 commit，但尚未部署**：部署側
-`bridge_state.db` 現有 3 筆既有記錄仍是 v1／17 欄語義下的內容，尚未執行
-`hermes/bridge_state.py migrate`；`hermes/config/bridge.yaml` 尚未新增
-`episodes` 區塊。部署順序（migration runbook）正本在
+**✅ 已部署並上線（2026-07-12）**：部署側 `bridge_state.db` 已跑
+`hermes/bridge_state.py migrate`（7 筆既有 legacy 記錄回填
+`capture_trigger='legacy'`）；`hermes/config/bridge.yaml` 已加入 `episodes`
+區塊（`enabled=true`、`episode_cutover=2026-07-12T06:36:18Z`、
+`inactivity_hours=72`）；`hermes-bridge-scanner.timer` active／enabled，
+每日 08:05 CST。第一筆真實正常 episode 端到端驗收通過：
+`hermes:20260712_164627_419d23:6991..7022`（`trigger=archived`，
+落地 `to_inbox`）。部署順序（migration runbook）正本在
 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
 第 8.1 節，本文件不重複維護第二份順序。

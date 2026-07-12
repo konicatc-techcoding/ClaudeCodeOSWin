@@ -168,12 +168,42 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > immutable episode），**不再是整個 session**。schema 隨之升級為
 > `claudecodeos.bridge_state.v2`（`bridge_sessions` 22 欄＋新表 `bridge_cursors`，
 > 見 [memory-bridge-state.md](memory-bridge-state.md)）。
-> **2.4d-1（schema＋repository）已完成**（`registry/bridge_state_schema.yaml`
-> v2、`hermes/bridge_state.py` 的 `create_episode`／`migrate` CLI／content hash
-> 純函式，測試矩陣全綠）——**但尚未部署**：部署側 `bridge_state.db` 尚未跑
-> `migrate`、`hermes/config/bridge.yaml` 尚未加入 `episodes` 區塊，部署是
-> 2.4d-4 的工作（migration runbook 見提案第 8.1 節）。2.4d-2（scanner episode
-> 偵測）／2.4d-3（importer episode 化＋recovery）尚未開始。
+> **✅ Stage 2.4d 全鏈路完成並上線（2026-07-12）**：2.4d-1（schema v2＋
+> repository：`create_episode`／`migrate` CLI／content hash 純函式）→ 2.4d-2
+> （scanner episode 偵測：`ended`／`archived`／`inactivity` 三型 trigger、
+> `checkpoint` 手動子指令，含 stale-ended 修正與 archived level-triggered
+> 語義收斂）→ 2.4d-3（importer episode 化：range export、episode-aware 查重、
+> reconcile cursor recovery，含 capture_trigger 缺失 fail-closed 修正）→
+> 2.4d-4（部署 migration＋上線）——全部完成，測試矩陣（提案 §10，27＋條）
+> 全綠，全程遵守既有硬邊界（唯讀 snapshot、不寫 Hermes 原始資料、不建第二份
+> state.db）。
+>
+> **部署現況**：`episodes.enabled=true`、`episode_cutover=2026-07-12T06:36:18Z`
+> （2.4d-4 部署翻 enabled 前的精確 UTC 時刻，非日期概念值）；
+> `hermes-bridge-scanner.timer` **active／enabled**，每日 08:05 CST 觸發
+> （落在 08:00 memory-check 與 08:10 skill-sync 之間）；WSL 睡眠期間錯過的
+> 觸發由 systemd `Persistent=true` 於下次喚醒時補跑（既有行為，2.4b 起即如此）。
+> importer **仍未排程化**（人工 CLI 執行）、**未 enqueue、未接 headless CoS**——
+> 這些維持既有邊界，屬後續階段。
+>
+> **✅ 第一筆真實正常 episode 端到端驗收通過（2026-07-12）**：
+> `session_id=20260712_164627_419d23`、
+> `event_id=hermes:20260712_164627_419d23:6991..7022`、`trigger=archived`、
+> boundary `6991..7022`、cursor `last_captured_message_id=7022`、
+> `episode_seq=1`。政策判定 allow（useful／length／sensitive／hash 全通過）→
+> 落地 `memory/inbox/hermes_session_20260712_164627_419d23_ep6991-7022.md`
+> （檔名／DB event_id／frontmatter `event_id_range` 三處一致）→ 最終狀態
+> `to_inbox`／`memory_type=episodic`／`useful_chat=true`。scan／importer／
+> reconcile 各自重跑皆冪等（boundary／hash／cursor／`imported_inbox_path`
+> 全不變、零重複落地）。Hermes `state.db`／`jobs.db`／`telegram.json` 全程
+> fingerprint 零 bridge 寫入（唯一異動來自 Hermes 本身與既有 worker 的正常
+> 運作）。過程中另處理一筆 too_short 的 archived episode（結構性排除，`skipped`，
+> 4 事件中只有 2 個 message 型、低於 4 則門檻）——驗證了「字元數足夠但 message
+> 型事件不足」也會正確觸發結構性排除，非 bug。
+>
+> **已知非阻塞缺口**：Unarchive（`archived` 1→0）對真實 Hermes Desktop UI
+> 的 live round-trip 驗證尚未執行（僅 fixture 邏輯驗證），不影響已上線的
+> archived trigger 判斷（level-triggered，不依賴追蹤這個轉換本身）。
 
 **目標（原始設計，2026-07-07 定稿；匯入單位已由上方 2.4d 更新為 episode／capture
 checkpoint，`ended_at` 不再是唯一判準——本段保留作歷史脈絡）**：新增一個 cron 觸發
