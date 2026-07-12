@@ -57,6 +57,35 @@ Stage 2.4d-2：`list_session_activity()` 提供每個 session 的 max(rowid)／
 max(timestamp)（active=1 訊息）輕量查詢，供 bridge_scanner 的 episode
 偵測用（不 export 訊息內容，見該方法 docstring 與提案 §5.3）。
 
+Stage 2.4d-3（importer episode 化＋recovery，規格正本：
+docs/stage2.4d-episode-capture-proposal.md）：
+
+- `export_session_range()`／`iter_events(min_rowid=, max_rowid=)`：匯出單一
+  session 在 boundary（[first..last]，含端點）內的訊息，供 importer 重算
+  `source_content_hash`（§4.5）比對，也是 episode 落地內容的來源——匯入
+  單位從整個 session 縮小為單一 episode。
+- episode inbox 檔名（deterministic，§2）：
+  `hermes_session_<sid>_ep<first>-<last>.md`。`episode_inbox_filename()` 產生、
+  `parse_inbox_filename()` 解析（legacy 檔名與 episode 檔名共用同一實作，
+  classmethod 供 bridge_scanner／bridge_importer 共用，避免各自維護一份
+  規則不同的 filename regex）。
+- `write_episode_inbox_file()`：episode 版本的 `write_inbox_file()`，
+  frontmatter 額外帶 `episode`／`capture_trigger`，`event_id_range`＝episode
+  event_id 本身（由呼叫端顯式傳入的 boundary 產生，不靠內容推算）。
+- `_find_existing_import()` 的 episode-aware 修正（§2 的核心陷阱）：加
+  `first_message_id`／`last_message_id` 可選參數——給定時查重 needle 精確到
+  boundary（不誤擋 legacy、不誤擋其他 episode）；不給定時只認 legacy 檔名
+  （無 `_ep` 段）或非 episode 格式的 frontmatter（矩陣 #12 雙向）。
+- `has_landed_episode_file()`（module 層級函式）：episode 落地檔「存在性
+  探測」的單一實作（提案 §3.2）——bridge_scanner 的 cursor 遺失防護
+  （矩陣 #8）與 bridge_importer 共用，不重複維護一份探測邏輯（2.4d-2
+  遺留的收斂債務，2.4d-3 收斂）。放在 adapter.py 而非 bridge_state.py／
+  bridge_importer.py 的理由：filename 的產生與解析本來就是 adapter 的既有
+  職責（`_find_existing_import`／`write_inbox_file`／`_ARCHIVE_SUBDIRS`
+  已在這裡），且 bridge_scanner 與 bridge_importer 都已經 import 這個
+  module，不需要新模組、也不會造成循環 import（scanner／importer 互不
+  import 對方）。
+
 CLI 用法（手動測試/操作用；Windows 用 `py -3.11`，WSL 用 python3；
 `--db`/`--snapshot` 是全域 flag，要放在子指令前面）：
     python3 hermes/session_adapter/adapter.py [--snapshot] [--db PATH] list [--source telegram]
@@ -68,6 +97,7 @@ CLI 用法（手動測試/操作用；Windows 用 `py -3.11`，WSL 用 python3�
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -84,6 +114,15 @@ KNOWN_ROLES = {"user", "assistant", "tool", "system", "session_meta"}
 
 # 正常訊息流之外的角色，一律歸成 meta 事件
 _META_ROLES = {"session_meta"}
+
+# inbox 檔名的單一解析實作（Stage 2.4d-3，提案 §2）：legacy（無 ep 段）與
+# episode（`_ep<first>-<last>` 段）共用同一 regex。sid 用非貪婪 `.+?`——
+# 配合結尾錨點 `$` 與 optional group，回溯時第一個成功的切法必然是「ep 段
+# 存在時優先辨識為 episode」，不會被貪婪 sid 誤吃掉 `_ep` 段（已用手算
+# 回溯驗證過兩種檔名皆正確切分，不能改成貪婪 `.+`）。
+_INBOX_FILENAME_RE = re.compile(
+    r"(?:^|_)hermes_session_(?P<sid>.+?)(?:_ep(?P<first>\d+)-(?P<last>\d+))?\.md$"
+)
 
 # snapshot 一致性驗證：重試上限與重試間隔（秒，線性遞增；測試可覆寫歸零）
 _SNAPSHOT_MAX_ATTEMPTS = 3
@@ -367,9 +406,15 @@ class HermesSessionAdapter:
         }
 
     def iter_events(self, session_id: str | None = None,
-                    include_inactive: bool = False):
+                    include_inactive: bool = False,
+                    min_rowid: int | None = None,
+                    max_rowid: int | None = None):
         """逐筆產出 normalized event（claudecodeos.event.v1）。
-        單筆訊息壞掉不會中斷整批——壞欄位進 metadata.warnings。"""
+        單筆訊息壞掉不會中斷整批——壞欄位進 metadata.warnings。
+
+        min_rowid／max_rowid（Stage 2.4d-3，含端點）：episode boundary 篩選，
+        供 `export_session_range()` 用；預設 None＝不加此限制（既有呼叫端
+        零行為變化）。"""
         query = (
             "SELECT m.id, m.session_id, m.role, m.content, m.tool_call_id, "
             "m.tool_calls, m.tool_name, m.timestamp, m.finish_reason, "
@@ -383,6 +428,12 @@ class HermesSessionAdapter:
             params.append(session_id)
         if not include_inactive:
             conditions.append("m.active = 1")
+        if min_rowid is not None:
+            conditions.append("m.id >= ?")
+            params.append(min_rowid)
+        if max_rowid is not None:
+            conditions.append("m.id <= ?")
+            params.append(max_rowid)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY m.session_id ASC, m.id ASC"
@@ -509,46 +560,138 @@ class HermesSessionAdapter:
                                        include_inactive=include_inactive))
         return {"session": sessions[0], "events": events}
 
+    def export_session_range(self, session_id: str, first_message_id: int,
+                             last_message_id: int,
+                             include_inactive: bool = False) -> dict:
+        """單一 session 在 boundary（[first_message_id..last_message_id]，
+        含端點）內的 normalized 匯出：{session, events}（Stage 2.4d-3）。
+
+        匯入單位從整個 session 縮小為單一 episode（提案 §2／§4.5）：
+        bridge_importer 用這個方法讀取 episode 邊界內的訊息，重算
+        `bridge_state.episode_content_hash()` 與 `source_content_hash` 比對，
+        也是 episode 落地內容（`write_episode_inbox_file()`）的來源。
+        session 不存在丟 KeyError（同 export_session）。"""
+        sessions = [s for s in self.list_sessions() if s["session_id"] == session_id]
+        if not sessions:
+            raise KeyError(f"Hermes state.db 裡沒有 session：{session_id}")
+        events = list(self.iter_events(
+            session_id=session_id, include_inactive=include_inactive,
+            min_rowid=first_message_id, max_rowid=last_message_id))
+        return {"session": sessions[0], "events": events}
+
     # ---------- 落地（只新增，永不覆寫；由呼叫端決定要不要用） ----------
 
     # 已整併/失敗歸檔的子目錄（docs/memory-taxonomy.md：目錄位置是狀態的唯一真相）
     _ARCHIVE_SUBDIRS = (".processed", ".failed")
 
     @staticmethod
-    def _frontmatter_session_id(path: Path) -> str | None:
-        """讀檔案開頭的 YAML frontmatter，取 session_id（沒有就 None）。
-        只掃前 50 行，容錯：讀不到、格式不對都當作沒有。"""
+    def episode_inbox_filename(session_id: str, first_message_id: int,
+                               last_message_id: int) -> str:
+        """episode inbox 檔名（deterministic，Stage 2.4d-3，提案 §2）：
+        `hermes_session_<sid>_ep<first>-<last>.md`——從 boundary 衍生，不含
+        匯入時間；同一 episode 任何時候重跑都對到同一檔名（矩陣 #9）。"""
+        return f"hermes_session_{session_id}_ep{first_message_id}-{last_message_id}.md"
+
+    @classmethod
+    def parse_inbox_filename(cls, name: str) -> dict | None:
+        """解析 inbox 檔名（legacy／episode 共用單一實作，提案 §2）：
+        - legacy（新格式 `hermes_session_<sid>.md` 或舊時間戳格式
+          `<stamp>_hermes_session_<sid>.md`）→
+          {"session_id", "first_message_id": None, "last_message_id": None}
+        - episode（`hermes_session_<sid>_ep<first>-<last>.md`）→
+          {"session_id", "first_message_id": int, "last_message_id": int}
+        不符合樣式（含非 hermes-session 來源的檔名）→ None。
+
+        單一實作供 bridge_scanner（reconcile 對帳、cursor 遺失防護）與
+        bridge_importer（`_find_existing_import` 查重）共用，避免兩處各自
+        維護一份 regex 造成行為漂移（2.4d-2 遺留的收斂債務，2.4d-3 收斂）。
+        """
+        m = _INBOX_FILENAME_RE.search(name)
+        if not m:
+            return None
+        first = m.group("first")
+        last = m.group("last")
+        return {
+            "session_id": m.group("sid"),
+            "first_message_id": int(first) if first is not None else None,
+            "last_message_id": int(last) if last is not None else None,
+        }
+
+    @staticmethod
+    def _frontmatter_fields(path: Path) -> dict:
+        """讀檔案開頭 YAML frontmatter 的 session_id／event_id_range（沒有
+        就缺該 key）。只掃前 50 行，容錯：讀不到、格式不對都回空 dict。"""
+        fields: dict = {}
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 if fh.readline().strip() != "---":
-                    return None
+                    return fields
                 for _ in range(50):
                     line = fh.readline()
                     if not line or line.strip() == "---":
-                        return None
-                    if line.startswith("session_id:"):
-                        return line.split(":", 1)[1].strip().strip("\"'") or None
+                        break
+                    for key in ("session_id", "event_id_range"):
+                        if line.startswith(key + ":"):
+                            fields[key] = line.split(":", 1)[1].strip().strip("\"'")
         except OSError:
-            return None
-        return None
+            return fields
+        return fields
 
-    def _find_existing_import(self, inbox_dir: Path, session_id: str) -> Path | None:
+    @staticmethod
+    def _frontmatter_session_id(path: Path) -> str | None:
+        """讀檔案開頭的 YAML frontmatter，取 session_id（沒有就 None）。
+        薄包裝：實際解析在 `_frontmatter_fields()`（同一實作，供
+        `_find_existing_import` 與既有呼叫端共用）。"""
+        return HermesSessionAdapter._frontmatter_fields(path).get("session_id")
+
+    def _find_existing_import(self, inbox_dir: Path, session_id: str, *,
+                              first_message_id: int | None = None,
+                              last_message_id: int | None = None) -> Path | None:
         """在 inbox 本層與 .processed/ / .failed/ 找同 session 的既有落地檔。
-        比對兩種方式（涵蓋舊時間戳檔名與其他來源命名）：
-        1. 檔名含 `hermes_session_<session_id>` 子字串
-           （新格式 hermes_session_<id>.md 與舊格式 <stamp>_hermes_session_<id>.md 都中）
-        2. frontmatter 的 session_id 欄位相符
+
+        episode-aware（Stage 2.4d-3，提案 §2 的核心陷阱修正）：舊實作用子
+        字串 `hermes_session_<sid>` 掃描——episode 檔名包含這個子字串，若
+        不改，第一個 episode 落地後會把同 session 所有後續 episode 全部
+        誤判為 already-imported。修正後查重精確到「這次查的是哪個層級」：
+
+        - `first_message_id`／`last_message_id` 都給定 ＝ episode 查重：
+          needle 精確到 boundary（檔名 `_ep<first>-<last>` 段完全相符，或
+          frontmatter `event_id_range` 全值等於該 episode 的 event_id）——
+          不誤擋 legacy 檔、不誤擋其他 boundary 的 episode（矩陣 #12）。
+        - 都不給 ＝ legacy 查重（原行為，不變）：檔名相符**且無 `_ep` 段**、
+          或 frontmatter session_id 相符**且該檔 event_id_range 不是
+          episode 格式**——同樣不誤擋 episode 檔（矩陣 #12 反向）。
         """
-        needle = f"hermes_session_{session_id}"
+        if (first_message_id is None) != (last_message_id is None):
+            raise ValueError(
+                "first_message_id 與 last_message_id 必須同時給定或同時省略")
+        episode = first_message_id is not None
+        target_event_id = (
+            f"hermes:{session_id}:{first_message_id}..{last_message_id}"
+            if episode else None)
+
         dirs = [inbox_dir] + [inbox_dir / d for d in self._ARCHIVE_SUBDIRS]
         for directory in dirs:
             if not directory.is_dir():
                 continue
             for candidate in sorted(directory.glob("*.md")):
-                if needle in candidate.name:
-                    return candidate
-                if self._frontmatter_session_id(candidate) == session_id:
-                    return candidate
+                parsed = self.parse_inbox_filename(candidate.name)
+                if episode:
+                    if (parsed and parsed["session_id"] == session_id
+                            and parsed["first_message_id"] == first_message_id
+                            and parsed["last_message_id"] == last_message_id):
+                        return candidate
+                    fm = self._frontmatter_fields(candidate)
+                    if fm.get("event_id_range") == target_event_id:
+                        return candidate
+                else:
+                    if (parsed and parsed["session_id"] == session_id
+                            and parsed["first_message_id"] is None):
+                        return candidate
+                    fm = self._frontmatter_fields(candidate)
+                    if (fm.get("session_id") == session_id
+                            and ".." not in (fm.get("event_id_range") or "")):
+                        return candidate
         return None
 
     def write_inbox_file(self, export: dict, inbox_dir: str | Path,
@@ -588,26 +731,91 @@ class HermesSessionAdapter:
             raise InboxAlreadyImportedError(session_id, path) from None
         return path
 
+    def write_episode_inbox_file(
+        self, export: dict, inbox_dir: str | Path, *,
+        episode_seq: int, capture_trigger: str,
+        first_message_id: int, last_message_id: int,
+        force: bool = False, full: bool = False,
+        max_excerpt_events: int = 30,
+    ) -> Path:
+        """episode 版本的 `write_inbox_file()`（Stage 2.4d-3，提案 §2）。
+
+        - 檔名 deterministic：`hermes_session_<sid>_ep<first>-<last>.md`
+          （見 `episode_inbox_filename()`）——同一 episode 任何時候重跑都對到
+          同一檔名，`open(mode="x")` 天然擋重複落地（矩陣 #9）。
+        - 查重（`_find_existing_import`）精確到 boundary，不誤擋 legacy 檔、
+          不誤擋其他 episode（矩陣 #12）。
+        - frontmatter 額外帶 `episode`／`capture_trigger`；`event_id_range`＝
+          episode event_id 本身，由呼叫端傳入的 boundary 直接產生（不靠
+          `export["events"]` 的 raw_message_id min/max 推算——即使 export
+          只是 boundary 內容的子集，event_id 仍精確等於 DB 那筆 episode 列
+          的 event_id）。
+        - force／拒絕寫進來源目錄／找不到 inbox 目錄的行為與 `write_inbox_file`
+          一致。
+        """
+        inbox_dir = Path(inbox_dir)
+        if inbox_dir.resolve() == self.db_path.parent.resolve():
+            raise ValueError("拒絕把輸出寫進 Hermes 來源資料目錄")
+        if not inbox_dir.is_dir():
+            raise FileNotFoundError(f"inbox 目錄不存在：{inbox_dir}（不代建目錄，避免寫錯地方）")
+
+        session = export["session"]
+        session_id = session["session_id"]
+        if not force:
+            existing = self._find_existing_import(
+                inbox_dir, session_id,
+                first_message_id=first_message_id, last_message_id=last_message_id)
+            if existing is not None:
+                raise InboxAlreadyImportedError(session_id, existing)
+
+        event_id_range = f"hermes:{session_id}:{first_message_id}..{last_message_id}"
+        body = self._render_markdown(
+            export, max_excerpt_events, full=full,
+            episode_seq=episode_seq, capture_trigger=capture_trigger,
+            event_id_range=event_id_range)
+        path = inbox_dir / self.episode_inbox_filename(
+            session_id, first_message_id, last_message_id)
+        try:
+            with open(path, "x", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+        except FileExistsError:
+            raise InboxAlreadyImportedError(session_id, path) from None
+        return path
+
     @staticmethod
-    def _render_frontmatter(export: dict) -> list[str]:
+    def _render_frontmatter(export: dict, *, episode_seq: int | None = None,
+                            capture_trigger: str | None = None,
+                            event_id_range: str | None = None) -> list[str]:
         """claudecodeos.inbox.v1 frontmatter（docs/memory-taxonomy.md §5）。
         usefulness/sensitivity 固定 pending：adapter 不做內容判斷與敏感偵測，
         不假裝判斷完成——那是落地後呼叫端／consolidation 的責任。
-        待處理/已處理狀態依政策不設欄位（目錄位置是唯一真相）。"""
+        待處理/已處理狀態依政策不設欄位（目錄位置是唯一真相）。
+
+        episode 檔（Stage 2.4d-3，additive、不升版，提案 §2）：呼叫端顯式
+        傳入 `event_id_range`（episode 的 boundary）時直接採用，不從
+        `export["events"]` 推算（export 內容可能只是 boundary 子集）；
+        `episode_seq`／`capture_trigger` 給定時額外輸出對應 frontmatter 欄。
+        兩者皆為 None 時＝legacy 檔，行為與 2.4c 完全一致。"""
         session = export["session"]
         session_id = session["session_id"]
-        raw_ids = [e["metadata"]["raw_message_id"] for e in export["events"]
-                   if isinstance(e.get("metadata"), dict)
-                   and isinstance(e["metadata"].get("raw_message_id"), int)]
         lines = [
             "---",
             "schema: claudecodeos.inbox.v1",
             "source: hermes-session",
             f"session_id: {session_id}",
         ]
-        if raw_ids:
-            lines.append(
-                f'event_id_range: "hermes:{session_id}:{min(raw_ids)}..{max(raw_ids)}"')
+        if event_id_range is None:
+            raw_ids = [e["metadata"]["raw_message_id"] for e in export["events"]
+                       if isinstance(e.get("metadata"), dict)
+                       and isinstance(e["metadata"].get("raw_message_id"), int)]
+            if raw_ids:
+                event_id_range = f"hermes:{session_id}:{min(raw_ids)}..{max(raw_ids)}"
+        if event_id_range:
+            lines.append(f'event_id_range: "{event_id_range}"')
+        if episode_seq is not None:
+            lines.append(f"episode: {episode_seq}")
+        if capture_trigger is not None:
+            lines.append(f"capture_trigger: {capture_trigger}")
         lines += [
             "created_at: " + datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "usefulness: pending",
@@ -620,10 +828,14 @@ class HermesSessionAdapter:
 
     @classmethod
     def _render_markdown(cls, export: dict, max_excerpt_events: int,
-                         full: bool = False) -> str:
+                         full: bool = False, *, episode_seq: int | None = None,
+                         capture_trigger: str | None = None,
+                         event_id_range: str | None = None) -> str:
         session = export["session"]
         events = export["events"]
-        lines = cls._render_frontmatter(export)
+        lines = cls._render_frontmatter(export, episode_seq=episode_seq,
+                                        capture_trigger=capture_trigger,
+                                        event_id_range=event_id_range)
         excerpt_note = ("全部，工具呼叫略過" if full
                         else f"最多 {max_excerpt_events} 則，工具呼叫略過")
         lines += [
@@ -661,6 +873,38 @@ class HermesSessionAdapter:
         lines.append("等待 consolidate-memory skill 整併；來源 session 資料未被修改。")
         lines.append("")
         return "\n".join(lines)
+
+
+def has_landed_episode_file(inbox_dir: str | Path, session_id: str) -> bool:
+    """episode 落地檔「存在性探測」的單一實作（Stage 2.4d-3，提案 §3.2）。
+
+    inbox 本層＋.processed/＋.failed/ 是否已有該 session 的**任一** episode
+    落地檔（不論 boundary）。只判斷存在與否，**不回填任何欄位**——回填規則
+    仍只留給 `bridge_scanner.reconcile()` 一份實作。
+
+    單一實作供 bridge_scanner 的 cursor 遺失防護（矩陣 #8）呼叫，取代
+    2.4d-2 遺留的、scanner 自建的 `_has_landed_episode_files()`（收斂債務，
+    見 docs/stage2.4d-episode-capture-proposal.md §3.2：「偵測用的『存在性
+    探測』復用 importer 的同一 needle helper（單處實作），不複製 reconcile
+    的回填邏輯」）——這裡放在 adapter.py 而非 bridge_importer.py／
+    bridge_state.py：檔名產生與解析本來就是 adapter 的既有職責
+    （`_find_existing_import`／`episode_inbox_filename`／
+    `parse_inbox_filename` 都在這裡），且 bridge_scanner／bridge_importer
+    都已經 import 這個 module，不需要新模組，也不會造成循環 import
+    （scanner／importer 互不 import 對方）。純檔案系統操作，不需要開
+    Hermes state.db，也不需要 HermesSessionAdapter 實例。
+    """
+    inbox_dir = Path(inbox_dir)
+    dirs = [inbox_dir] + [inbox_dir / d for d in HermesSessionAdapter._ARCHIVE_SUBDIRS]
+    for directory in dirs:
+        if not directory.is_dir():
+            continue
+        for candidate in directory.glob("*.md"):
+            parsed = HermesSessionAdapter.parse_inbox_filename(candidate.name)
+            if (parsed and parsed["session_id"] == session_id
+                    and parsed["first_message_id"] is not None):
+                return True
+    return False
 
 
 # ---------- CLI ----------

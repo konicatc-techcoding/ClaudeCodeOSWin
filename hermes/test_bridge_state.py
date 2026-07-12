@@ -1072,6 +1072,72 @@ class TestUpsertEpisodeGuard(BridgeStateTestBase):
         self.assertEqual(bridge_state.increment_retry_count(eid, db_path=self.db_path), 1)
 
 
+# ====================================================================
+# Stage 2.4d-3：importer episode 化＋recovery 需要的 repository 層擴充
+# （提案 §3.2／§4.5；矩陣 #21 的 create_episode 放寬前提）
+# ====================================================================
+
+class TestAdapterEventsToHashInput(unittest.TestCase):
+    """adapter_events_to_hash_input()：adapter event → episode_content_hash()
+    輸入的單一映射實作，供 scanner／importer 共用（不各自維護一份）。"""
+
+    def _adapter_event(self, rowid, role="user", type_="message",
+                       content="hi", tool_calls=None, timestamp="t1"):
+        return {
+            "metadata": {"raw_message_id": rowid, "tool_calls": tool_calls},
+            "role": role, "type": type_, "content": content,
+            "timestamp": timestamp,
+        }
+
+    def test_maps_expected_fields(self):
+        events = [self._adapter_event(5, tool_calls=[{"id": "x"}])]
+        mapped = bridge_state.adapter_events_to_hash_input(events)
+        self.assertEqual(mapped, [{
+            "rowid": 5, "role": "user", "type": "message", "content": "hi",
+            "tool_calls": [{"id": "x"}], "timestamp": "t1",
+        }])
+
+    def test_feeds_episode_content_hash_consistently(self):
+        """與 episode_content_hash() 串接：同內容重跑得到相同 hash（純函式）。"""
+        events = [self._adapter_event(1), self._adapter_event(2)]
+        h1 = bridge_state.episode_content_hash(
+            bridge_state.adapter_events_to_hash_input(events))
+        h2 = bridge_state.episode_content_hash(
+            bridge_state.adapter_events_to_hash_input(list(reversed(events))))
+        self.assertEqual(h1, h2, "輸入順序不影響結果（episode_content_hash 內部排序）")
+
+
+class TestCreateEpisodeAllowNullHash(BridgeStateTestBase):
+    """create_episode(allow_null_hash=True)（Stage 2.4d-3，提案 §3.2 明文
+    放寬的位置）：reconcile 從目錄真相回填 episode 列時 hash 無法自檔案還原。
+    一般 scanner／checkpoint 路徑不得傳這個參數（維持預設 False）。"""
+
+    def test_default_still_rejects_missing_hash(self):
+        """一般路徑（不傳 allow_null_hash）行為不變——零回歸。"""
+        with self.assertRaises(ValueError):
+            bridge_state.create_episode(
+                **make_episode(source_content_hash=None), db_path=self.db_path)
+
+    def test_allow_null_hash_permits_none(self):
+        result = bridge_state.create_episode(
+            **make_episode(source_content_hash=None),
+            allow_null_hash=True, db_path=self.db_path)
+        self.assertTrue(result["created"])
+        self.assertIsNone(result["row"]["source_content_hash"])
+
+    def test_allow_null_hash_still_validates_type_when_given(self):
+        """allow_null_hash=True 只放寬「缺值」，不放寬「型別錯誤」。"""
+        with self.assertRaises(ValueError):
+            bridge_state.create_episode(
+                **make_episode(source_content_hash=12345),
+                allow_null_hash=True, db_path=self.db_path)
+
+    def test_allow_null_hash_with_real_hash_behaves_normally(self):
+        result = bridge_state.create_episode(
+            **make_episode(), allow_null_hash=True, db_path=self.db_path)
+        self.assertEqual(result["row"]["source_content_hash"], "a" * 64)
+
+
 # 17 欄的 v1 DDL（2.4c 部署側的既成事實，供 migration 測試建 fixture——
 # 刻意寫死副本，不引用 bridge_state.CREATE_TABLE_SQL：升級測試的起點必須是
 # 歷史 schema，不能跟著現行常數飄）。

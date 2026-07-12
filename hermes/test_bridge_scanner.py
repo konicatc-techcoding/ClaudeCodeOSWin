@@ -1200,6 +1200,335 @@ class TestCheckpointCli(EpisodeScannerTestBase):
         self.assertFalse(self.bridge_db.exists())
 
 
+# ====================================================================
+# Stage 2.4d-3：reconcile 的 episode-aware 回填＋cursor recovery
+# （提案 docs/stage2.4d-episode-capture-proposal.md §2／§3.2；
+#  矩陣 #18/#21/#22/#27（reconcile 側 profile fail-closed））
+# ====================================================================
+
+def _episode_inbox_text(sid: str, first: int, last: int, episode_seq: int,
+                        capture_trigger: str, session_source: str = "cli") -> str:
+    """手寫的 episode inbox 檔內容（frontmatter 格式對齊
+    adapter._render_frontmatter 的實際輸出，不經 adapter 產生——保持測試
+    自成一體、不依賴 Hermes db fixture）。"""
+    event_id_range = f"hermes:{sid}:{first}..{last}"
+    return ("---\n"
+            "schema: claudecodeos.inbox.v1\n"
+            "source: hermes-session\n"
+            f"session_id: {sid}\n"
+            f'event_id_range: "{event_id_range}"\n'
+            f"episode: {episode_seq}\n"
+            f"capture_trigger: {capture_trigger}\n"
+            "created_at: 2026-07-09T00:00:00Z\n"
+            "usefulness: pending\n"
+            "sensitivity: pending\n"
+            "---\n\n"
+            f"# Hermes session 匯入 — {sid}\n\n"
+            f"- 來源：hermes/{session_source}\n\n內容\n")
+
+
+class ReconcileEpisodeTestBase(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.inbox = self.tmp / "inbox"
+        self.processed = self.inbox / ".processed"
+        self.failed = self.inbox / ".failed"
+        for d in (self.inbox, self.processed, self.failed):
+            d.mkdir(parents=True)
+        self.bridge_db = self.tmp / "bridge_state.db"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_episode_file(self, directory: Path, sid: str, first: int, last: int,
+                            episode_seq: int, capture_trigger: str = "inactivity",
+                            session_source: str = "cli") -> Path:
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            sid, first, last)
+        path = directory / name
+        path.write_text(
+            _episode_inbox_text(sid, first, last, episode_seq, capture_trigger,
+                                session_source),
+            encoding="utf-8")
+        return path
+
+    def reconcile(self, **kwargs):
+        kwargs.setdefault("inbox_dir", self.inbox)
+        kwargs.setdefault("bridge_db", self.bridge_db)
+        return bridge_scanner.reconcile(**kwargs)
+
+    def rows(self) -> dict:
+        if not self.bridge_db.exists():
+            return {}
+        with contextlib.closing(sqlite3.connect(self.bridge_db)) as conn:
+            conn.row_factory = sqlite3.Row
+            return {r["event_id"]: dict(r)
+                    for r in conn.execute("SELECT * FROM bridge_sessions")}
+
+    def cursor(self, sid: str):
+        return bridge_state.get_cursor(sid, db_path=self.bridge_db)
+
+
+class TestReconcileEpisodeAware(ReconcileEpisodeTestBase):
+    """矩陣 #18：reconcile episode-aware 回填。"""
+
+    def test_processed_episode_file_backfills_imported_episode_row(self):
+        self._write_episode_file(self.processed, "sess-a", 1, 5, episode_seq=1,
+                                 capture_trigger="archived")
+        result = self.reconcile(seen_at=T1)
+        eid = "hermes:sess-a:1..5"
+        rows = self.rows()
+        self.assertIn(eid, rows)
+        row = rows[eid]
+        self.assertEqual(row["import_status"], "imported")
+        self.assertEqual(row["episode_seq"], 1)
+        self.assertEqual(row["capture_trigger"], "archived")
+        self.assertEqual(row["first_message_id"], 1)
+        self.assertEqual(row["last_message_id"], 5)
+        self.assertIsNone(row["source_content_hash"],
+                          "hash 無法自檔案還原，回填 NULL（提案 §3.2）")
+        action = next(a for a in result["actions"] if a.get("event_id") == eid)
+        self.assertEqual(action["action"], "insert_episode_imported")
+
+    def test_to_inbox_episode_file_backfills_to_inbox(self):
+        self._write_episode_file(self.inbox, "sess-b", 10, 20, episode_seq=2,
+                                 capture_trigger="inactivity")
+        self.reconcile()
+        row = self.rows()["hermes:sess-b:10..20"]
+        self.assertEqual(row["import_status"], "to_inbox")
+
+    def test_failed_episode_file_backfills_failed(self):
+        self._write_episode_file(self.failed, "sess-c", 1, 3, episode_seq=1,
+                                 capture_trigger="manual")
+        self.reconcile()
+        row = self.rows()["hermes:sess-c:1..3"]
+        self.assertEqual(row["import_status"], "failed")
+        self.assertTrue(row["error_reason"])
+
+    def test_filename_ep_group_used_when_frontmatter_missing(self):
+        """檔名 ep 捕獲組回填（無 frontmatter 時）。"""
+        sid = "sess-d"
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(sid, 7, 9)
+        (self.processed / name).write_text("無 frontmatter 的殘骸\n",
+                                           encoding="utf-8")
+        self.reconcile()
+        eid = "hermes:sess-d:7..9"
+        row = self.rows()[eid]
+        self.assertEqual(row["import_status"], "imported")
+        self.assertEqual(row["first_message_id"], 7)
+        self.assertEqual(row["last_message_id"], 9)
+
+    def test_legacy_file_still_backfills_legacy_row_unaffected(self):
+        """episode 檔與 legacy 檔同時存在時互不干擾（零回歸）。"""
+        (self.inbox / "hermes_session_sess-legacy.md").write_text(
+            "---\nschema: claudecodeos.inbox.v1\nsource: hermes-session\n"
+            "session_id: sess-legacy\n---\n\n內容\n", encoding="utf-8")
+        self._write_episode_file(self.inbox, "sess-ep", 1, 2, episode_seq=1)
+        self.reconcile()
+        rows = self.rows()
+        self.assertIn("hermes:sess-legacy", rows)
+        self.assertIsNone(rows["hermes:sess-legacy"]["episode_seq"])
+        self.assertIn("hermes:sess-ep:1..2", rows)
+
+    def test_existing_discovered_episode_row_advances_to_directory_truth(self):
+        """既有 discovered episode 列（scanner 已建立）在檔案落地後回填
+        imported——與 legacy 的既有語義一致（矩陣 #18 的「已存在列」分支）。"""
+        bridge_state.create_episode(
+            session_id="sess-e", source_profile="default", session_source="cli",
+            episode_seq=1, capture_trigger="inactivity",
+            first_message_id=1, last_message_id=5,
+            source_content_hash="a" * 64,
+            decision_reason="scan 建立", seen_at=T1, db_path=self.bridge_db)
+        self._write_episode_file(self.processed, "sess-e", 1, 5, episode_seq=1)
+        self.reconcile(seen_at=T2)
+        row = self.rows()["hermes:sess-e:1..5"]
+        self.assertEqual(row["import_status"], "imported")
+        # hash 是既有列的（scanner 算的），不被回填的 NULL 洗掉
+        self.assertEqual(row["source_content_hash"], "a" * 64)
+
+    def test_dry_run_writes_nothing(self):
+        self._write_episode_file(self.processed, "sess-f", 1, 5, episode_seq=1)
+        result = self.reconcile(dry_run=True)
+        self.assertFalse(self.bridge_db.exists())
+        names = {a["action"] for a in result["actions"]}
+        self.assertIn("insert_episode_imported", names)
+
+
+class TestReconcileCursorRecovery(ReconcileEpisodeTestBase):
+    """矩陣 #21：cursor 重建（db 全空的 recovery 情境）。"""
+
+    def test_rebuilds_cursor_from_landed_files_when_db_absent(self):
+        self._write_episode_file(self.processed, "sess-x", 1, 5, episode_seq=1)
+        self._write_episode_file(self.inbox, "sess-x", 6, 10, episode_seq=2)
+        self.assertFalse(self.bridge_db.exists())
+        self.reconcile(seen_at=T1)
+        cur = self.cursor("sess-x")
+        self.assertIsNotNone(cur)
+        self.assertEqual(cur["last_captured_message_id"], 10)
+        self.assertEqual(cur["last_episode_seq"], 2)
+
+    def test_rerun_on_healthy_db_only_advances_never_retreats(self):
+        self._write_episode_file(self.processed, "sess-y", 1, 5, episode_seq=1)
+        self.reconcile(seen_at=T1)
+        before = self.cursor("sess-y")
+        # 再跑一次（健康 db）：cursor 不動（只前進不後退，天然冪等）
+        self.reconcile(seen_at=T2)
+        after = self.cursor("sess-y")
+        self.assertEqual(before, after)
+
+    def test_multiple_sessions_each_get_independent_cursor(self):
+        self._write_episode_file(self.processed, "sess-a", 1, 5, episode_seq=1)
+        self._write_episode_file(self.processed, "sess-b", 100, 120, episode_seq=1)
+        self.reconcile()
+        self.assertEqual(self.cursor("sess-a")["last_captured_message_id"], 5)
+        self.assertEqual(self.cursor("sess-b")["last_captured_message_id"], 120)
+
+    def test_episode_seq_falls_back_to_positional_estimate_without_frontmatter(self):
+        """缺 frontmatter 時取檔案數保守估計（提案 §3.2：只影響序號可讀性，
+        不影響 boundary 正確性）。"""
+        sid = "sess-z"
+        name1 = adapter_module.HermesSessionAdapter.episode_inbox_filename(sid, 1, 5)
+        name2 = adapter_module.HermesSessionAdapter.episode_inbox_filename(sid, 6, 10)
+        (self.processed / name1).write_text("殘骸1\n", encoding="utf-8")
+        (self.processed / name2).write_text("殘骸2\n", encoding="utf-8")
+        self.reconcile()
+        cur = self.cursor(sid)
+        self.assertEqual(cur["last_captured_message_id"], 10)
+        self.assertEqual(cur["last_episode_seq"], 2, "兩個落地檔的保守估計")
+
+    def test_dry_run_does_not_create_cursor(self):
+        self._write_episode_file(self.processed, "sess-w", 1, 5, episode_seq=1)
+        self.reconcile(dry_run=True)
+        self.assertFalse(self.bridge_db.exists())
+
+
+class TestReconcileProfileFailClosed(ReconcileEpisodeTestBase):
+    """矩陣 #27：reconcile 側非 default profile fail-closed（§6.1）。"""
+
+    def test_non_default_profile_skips_episode_row_and_cursor(self):
+        self._write_episode_file(self.processed, "sess-p", 1, 5, episode_seq=1)
+        result = self.reconcile(source_profile="nemocoding")
+        self.assertEqual(self.rows(), {}, "非 default profile 不建立 episode 列")
+        self.assertIsNone(self.cursor("sess-p"), "非 default profile 不動 cursor")
+        actions = [a["action"] for a in result["actions"]]
+        self.assertIn("unsupported_profile_fail_closed", actions)
+
+
+class TestReconcileCursorRecoveryStability(EpisodeScannerTestBase):
+    """矩陣 #22：cursor 重建後切刀穩定性（雙 case，提案 §3.2 的核心推演）。
+    用完整 scanner+state pipeline（真的呼叫 scan()／reconcile()，不只是
+    手寫檔案）驗證 recovery 後下一刀的 boundary。"""
+
+    def test_tail_episode_has_landed_file_boundary_stable_after_recovery(self):
+        """尾端 episode 有落地檔：recovery 後下一刀 boundary 與未重建時完全
+        相同。"""
+        sid = "sess-stable"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "ep1-a", EP_CUTOVER_EPOCH + HOUR)
+        self.add_message(2, sid, "user", "ep1-b", EP_CUTOVER_EPOCH + 1.1 * HOUR)
+        seen1 = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 1.2 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen1)
+        ep1 = next(iter(self.episode_rows().values()))
+        self.assertEqual((ep1["first_message_id"], ep1["last_message_id"]), (1, 2))
+
+        # ep1 落地（模擬 importer 已成功落地到 .processed/）
+        self._write_episode_file(
+            self.processed, sid, 1, 2, episode_seq=1, capture_trigger="archived")
+
+        # 模擬 bridge_state.db 整個消失（recovery 情境）
+        for p in self.tmp.glob("bridge_state.db*"):
+            p.unlink()
+        self.assertFalse(self.bridge_db.exists())
+
+        # recovery：只跑 reconcile，cursor 從落地檔重建
+        bridge_scanner.reconcile(inbox_dir=self.inbox, bridge_db=self.bridge_db,
+                                 seen_at=seen1)
+        self.assertEqual(self.cursor(sid)["last_captured_message_id"], 2)
+
+        # 新訊息 + 下一刀：boundary 應與「未重建」時完全相同（[3..4]）
+        self.add_message(3, sid, "user", "ep2-a", EP_CUTOVER_EPOCH + 2 * HOUR)
+        self.add_message(4, sid, "user", "ep2-b", EP_CUTOVER_EPOCH + 2.1 * HOUR)
+        seen2 = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 2.2 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen2)
+        eps = self.episode_rows()
+        ep2 = next(r for r in eps.values() if r["episode_seq"] == 2)
+        self.assertEqual((ep2["first_message_id"], ep2["last_message_id"]), (3, 4),
+                         "尾端有落地檔：recovery 後下一刀 boundary 與未重建時完全相同")
+
+    def test_tail_needs_review_without_file_widens_next_cut_no_duplicate_landing(self):
+        """尾端是無檔判定（needs_review，模擬「內容被判定但從未落地」）：
+        recovery 後下一刀吸收該區段＋新訊息（boundary 變寬），且新 boundary
+        與 ep1 已落地內容不重疊（inbox 零重複落地的機械保證：不同 boundary
+        →不同 deterministic 檔名）。"""
+        sid = "sess-widen"
+        self.add_session(sid, archived=True)
+        self.add_message(1, sid, "user", "ep1-a", EP_CUTOVER_EPOCH + HOUR)
+        seen1 = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 1.2 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen1)
+        ep1 = next(iter(self.episode_rows().values()))
+        self.assertEqual((ep1["first_message_id"], ep1["last_message_id"]), (1, 1))
+        self._write_episode_file(
+            self.processed, sid, 1, 1, episode_seq=1, capture_trigger="archived")
+
+        # ep2：切出但從未落地（模擬 importer 判定 needs_review、不落地）——
+        # 用新訊息觸發第二刀，cursor 因此在「重建前」會前進到 3（吸收這段），
+        # 但這段從未寫成檔案。
+        self.add_message(2, sid, "user", "ep2-sensitive", EP_CUTOVER_EPOCH + 2 * HOUR)
+        self.add_message(3, sid, "user", "ep2-sensitive-2",
+                         EP_CUTOVER_EPOCH + 2.05 * HOUR)
+        seen2 = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 2.1 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen2)
+        eps_before_wipe = self.episode_rows()
+        self.assertEqual(len(eps_before_wipe), 2)
+        ep2 = next(r for r in eps_before_wipe.values() if r["episode_seq"] == 2)
+        self.assertEqual((ep2["first_message_id"], ep2["last_message_id"]), (2, 3))
+        # ep2 從未落地（沒有對應 inbox 檔），只有 ep1 的檔案存在
+
+        # 模擬 db 整個消失：recovery 只能看見 ep1 的落地檔
+        for p in self.tmp.glob("bridge_state.db*"):
+            p.unlink()
+        self.assertFalse(self.bridge_db.exists())
+        bridge_scanner.reconcile(inbox_dir=self.inbox, bridge_db=self.bridge_db,
+                                 seen_at=seen2)
+        # recovery 後 cursor 只到 1（ep1 的 last）——比重建前的 3 更小
+        self.assertEqual(self.cursor(sid)["last_captured_message_id"], 1)
+
+        # 新訊息 + 下一刀：吸收「無檔區段（2..3）＋新訊息（4）」，boundary 變寬
+        self.add_message(4, sid, "user", "ep3-new", EP_CUTOVER_EPOCH + 3 * HOUR)
+        seen3 = datetime.fromtimestamp(
+            EP_CUTOVER_EPOCH + 3.1 * HOUR, tz=timezone.utc).isoformat()
+        self.scan(seen_at=seen3)
+        eps_after = self.episode_rows()
+        widened = max(eps_after.values(), key=lambda r: r["last_message_id"])
+        self.assertEqual((widened["first_message_id"], widened["last_message_id"]),
+                         (2, 4), "重建後下一刀吸收無檔區段＋新訊息，boundary 變寬")
+        # inbox 零重複落地：widened 的 deterministic 檔名與 ep1 的檔名不同
+        # （不同 boundary），不會撞名、不會覆寫既有內容
+        ep1_name = adapter_module.HermesSessionAdapter.episode_inbox_filename(sid, 1, 1)
+        widened_name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            sid, widened["first_message_id"], widened["last_message_id"])
+        self.assertNotEqual(ep1_name, widened_name)
+        self.assertEqual(len(list(self.inbox.rglob("*.md"))), 1,
+                         "此時只有 ep1 落地過；widened episode 尚未匯入（scan 不落地）")
+
+    def _write_episode_file(self, directory: Path, sid: str, first: int, last: int,
+                            episode_seq: int, capture_trigger: str = "inactivity",
+                            session_source: str = "cli") -> Path:
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            sid, first, last)
+        path = directory / name
+        path.write_text(
+            _episode_inbox_text(sid, first, last, episode_seq, capture_trigger,
+                                session_source),
+            encoding="utf-8")
+        return path
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")

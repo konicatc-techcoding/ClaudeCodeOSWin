@@ -595,6 +595,200 @@ class TestSnapshotConsistency(AdapterTestBase):
         self.assertEqual(self.created_snapshot_dirs, [])
 
 
+class TestEpisodeRangeExport(AdapterTestBase):
+    """Stage 2.4d-3：export_session_range()／iter_events(min_rowid=,
+    max_rowid=)——boundary 內匯出，不是整個 session（提案 §2／§4.5）。"""
+
+    SID = "20260630_183709_063b4e40"  # rowid 101..105
+
+    def test_export_session_range_filters_to_boundary_inclusive(self):
+        adapter = HermesSessionAdapter(self.db_path)
+        export = adapter.export_session_range(self.SID, 102, 104)
+        self.assertEqual(export["session"]["session_id"], self.SID)
+        ids = [e["metadata"]["raw_message_id"] for e in export["events"]]
+        self.assertEqual(ids, [102, 103, 104], "含端點，boundary 外的 101/105 不含")
+
+    def test_export_session_range_full_boundary_matches_export_session(self):
+        adapter = HermesSessionAdapter(self.db_path)
+        whole = adapter.export_session(self.SID)
+        ranged = adapter.export_session_range(self.SID, 101, 105)
+        self.assertEqual(
+            [e["event_id"] for e in whole["events"]],
+            [e["event_id"] for e in ranged["events"]])
+
+    def test_export_session_range_unknown_session_raises(self):
+        adapter = HermesSessionAdapter(self.db_path)
+        with self.assertRaises(KeyError):
+            adapter.export_session_range("no_such_session", 1, 5)
+
+    def test_iter_events_min_max_rowid_filters(self):
+        adapter = HermesSessionAdapter(self.db_path)
+        events = list(adapter.iter_events(session_id=self.SID,
+                                          min_rowid=103, max_rowid=104))
+        self.assertEqual([e["metadata"]["raw_message_id"] for e in events],
+                         [103, 104])
+
+    def test_iter_events_default_none_bounds_unchanged(self):
+        """既有呼叫端（無 min/max_rowid）行為零變化。"""
+        adapter = HermesSessionAdapter(self.db_path)
+        events = list(adapter.iter_events(session_id=self.SID))
+        self.assertEqual(len(events), 5)
+
+
+class TestEpisodeInboxFilenameHelpers(AdapterTestBase):
+    """Stage 2.4d-3：episode_inbox_filename()／parse_inbox_filename() 單一
+    實作（提案 §2）；has_landed_episode_file()（提案 §3.2，收斂 2.4d-2 遺留
+    的重複探測邏輯）。"""
+
+    def test_episode_inbox_filename_deterministic(self):
+        name = HermesSessionAdapter.episode_inbox_filename("sess_ok", 10, 20)
+        self.assertEqual(name, "hermes_session_sess_ok_ep10-20.md")
+
+    def test_parse_inbox_filename_episode(self):
+        parsed = HermesSessionAdapter.parse_inbox_filename(
+            "hermes_session_sess_ok_ep10-20.md")
+        self.assertEqual(parsed, {"session_id": "sess_ok",
+                                  "first_message_id": 10, "last_message_id": 20})
+
+    def test_parse_inbox_filename_legacy_new_format(self):
+        parsed = HermesSessionAdapter.parse_inbox_filename(
+            "hermes_session_sess_ok.md")
+        self.assertEqual(parsed, {"session_id": "sess_ok",
+                                  "first_message_id": None, "last_message_id": None})
+
+    def test_parse_inbox_filename_legacy_timestamped_format(self):
+        parsed = HermesSessionAdapter.parse_inbox_filename(
+            "20260709T150648Z_hermes_session_sess_ok.md")
+        self.assertEqual(parsed["session_id"], "sess_ok")
+        self.assertIsNone(parsed["first_message_id"])
+
+    def test_parse_inbox_filename_sid_with_underscores_and_episode(self):
+        """sid 本身含底線（Hermes 常見格式）＋episode 段，非貪婪 regex 必須
+        正確切分，不能被貪婪吃掉 ep 段（見 adapter.py 內的回溯推演註解）。"""
+        sid = "20260630_183709_063b4e40"
+        parsed = HermesSessionAdapter.parse_inbox_filename(
+            f"hermes_session_{sid}_ep101-105.md")
+        self.assertEqual(parsed, {"session_id": sid,
+                                  "first_message_id": 101, "last_message_id": 105})
+
+    def test_parse_inbox_filename_unrelated_name_returns_none(self):
+        self.assertIsNone(HermesSessionAdapter.parse_inbox_filename(
+            "2026-07-03T00-00-00Z-project-status.md"))
+
+    def test_has_landed_episode_file_true_and_false(self):
+        inbox = self.tmpdir / "inbox"
+        inbox.mkdir()
+        self.assertFalse(adapter_module.has_landed_episode_file(inbox, "sess_ok"))
+        (inbox / "hermes_session_sess_ok_ep1-5.md").write_text("x", encoding="utf-8")
+        self.assertTrue(adapter_module.has_landed_episode_file(inbox, "sess_ok"))
+        self.assertFalse(
+            adapter_module.has_landed_episode_file(inbox, "sess_other"))
+
+    def test_has_landed_episode_file_checks_processed_and_failed(self):
+        inbox = self.tmpdir / "inbox"
+        processed = inbox / ".processed"
+        failed = inbox / ".failed"
+        for d in (inbox, processed, failed):
+            d.mkdir(parents=True)
+        (processed / "hermes_session_sess_a_ep1-5.md").write_text("x", encoding="utf-8")
+        self.assertTrue(adapter_module.has_landed_episode_file(inbox, "sess_a"))
+        (failed / "hermes_session_sess_b_ep1-5.md").write_text("x", encoding="utf-8")
+        self.assertTrue(adapter_module.has_landed_episode_file(inbox, "sess_b"))
+
+    def test_has_landed_episode_file_ignores_legacy_files(self):
+        """legacy 檔（無 _ep 段）不算 episode 落地檔——矩陣 #8 的探測不得被
+        legacy 檔誤觸發。"""
+        inbox = self.tmpdir / "inbox"
+        inbox.mkdir()
+        (inbox / "hermes_session_sess_ok.md").write_text("x", encoding="utf-8")
+        self.assertFalse(adapter_module.has_landed_episode_file(inbox, "sess_ok"))
+
+
+class TestEpisodeInboxOutput(AdapterTestBase):
+    """Stage 2.4d-3：write_episode_inbox_file()——deterministic 檔名、
+    frontmatter 額外欄位、boundary-aware 查重（矩陣 #9／#12）。"""
+
+    SID = "20260630_183709_063b4e40"
+
+    def setUp(self):
+        super().setUp()
+        self.adapter = HermesSessionAdapter(self.db_path)
+        self.inbox = self.tmpdir / "inbox"
+        self.inbox.mkdir()
+
+    def _write_episode(self, first=101, last=103, episode_seq=1,
+                       capture_trigger="inactivity", **kwargs):
+        export = self.adapter.export_session_range(self.SID, first, last)
+        return self.adapter.write_episode_inbox_file(
+            export, self.inbox, episode_seq=episode_seq,
+            capture_trigger=capture_trigger,
+            first_message_id=first, last_message_id=last, **kwargs)
+
+    def test_filename_is_deterministic_from_boundary(self):
+        path = self._write_episode(101, 103)
+        self.assertEqual(path.name,
+                         f"hermes_session_{self.SID}_ep101-103.md")
+
+    def test_rerun_same_boundary_blocked_idempotent(self):
+        self._write_episode(101, 103)
+        with self.assertRaises(InboxAlreadyImportedError):
+            self._write_episode(101, 103)
+        self.assertEqual(len(list(self.inbox.glob("*.md"))), 1)
+
+    def test_different_boundary_same_session_both_land(self):
+        """同 session 多個 episode 檔合法共存（提案 §2）。"""
+        p1 = self._write_episode(101, 102, episode_seq=1)
+        p2 = self._write_episode(103, 105, episode_seq=2)
+        self.assertNotEqual(p1, p2)
+        self.assertEqual(len(list(self.inbox.glob("*.md"))), 2)
+
+    def test_frontmatter_has_episode_and_capture_trigger_fields(self):
+        path = self._write_episode(101, 103, episode_seq=3,
+                                   capture_trigger="archived")
+        body = path.read_text(encoding="utf-8")
+        self.assertIn("episode: 3", body)
+        self.assertIn("capture_trigger: archived", body)
+        self.assertIn(
+            f'event_id_range: "hermes:{self.SID}:101..103"', body)
+
+    def test_legacy_file_does_not_block_episode_landing(self):
+        """矩陣 #12（反向）：先有 legacy 檔，episode 檔仍可落地。"""
+        legacy_export = self.adapter.export_session(self.SID)
+        self.adapter.write_inbox_file(legacy_export, self.inbox)
+        path = self._write_episode(101, 103)
+        self.assertTrue(path.is_file())
+        self.assertEqual(len(list(self.inbox.glob("*.md"))), 2)
+
+    def test_episode_file_does_not_block_legacy_landing(self):
+        """矩陣 #12（正向）：先有 episode 檔，legacy 檔仍可落地（不同 session
+        層級的查重互不影響）。"""
+        self._write_episode(101, 103)
+        export = self.adapter.export_session(self.SID)
+        path = self.adapter.write_inbox_file(export, self.inbox)
+        self.assertTrue(path.is_file())
+        self.assertEqual(len(list(self.inbox.glob("*.md"))), 2)
+
+    def test_two_different_episodes_do_not_block_each_other(self):
+        """矩陣 #12 精神延伸：ep1 落地後 ep2（不同 boundary）不被誤判為
+        already-imported——這正是 2.4d-2→2.4d-3 陷阱修正要擋的情境。"""
+        self._write_episode(101, 102, episode_seq=1)
+        path2 = self._write_episode(103, 105, episode_seq=2)
+        self.assertTrue(path2.is_file())
+
+    def test_find_existing_import_episode_boundary_exact_match_only(self):
+        self._write_episode(101, 102)
+        adapter = self.adapter
+        self.assertIsNotNone(adapter._find_existing_import(
+            self.inbox, self.SID, first_message_id=101, last_message_id=102))
+        self.assertIsNone(adapter._find_existing_import(
+            self.inbox, self.SID, first_message_id=103, last_message_id=105))
+
+    def test_find_existing_import_legacy_query_ignores_episode_files(self):
+        self._write_episode(101, 102)
+        self.assertIsNone(
+            self.adapter._find_existing_import(self.inbox, self.SID))
+
+
 class TestSchemaValidation(AdapterTestBase):
     def test_all_emitted_events_are_valid(self):
         adapter = HermesSessionAdapter(self.db_path)

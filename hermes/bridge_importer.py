@@ -74,6 +74,16 @@ from adapter import (  # noqa: E402
     InboxAlreadyImportedError,
 )
 
+# Stage 2.4d-3（importer episode 化＋recovery，規格正本：
+# docs/stage2.4d-episode-capture-proposal.md）：佇列除了 legacy session-level
+# 記錄（episode_seq IS NULL）也包含 episode 記錄（episode_seq 非 NULL）。
+# 兩者用完全獨立的處理函式（_process_one_legacy／_process_one_episode），
+# _process_one 只負責依 rec["episode_seq"] 分派——legacy 路徑的程式碼與
+# 2.4c 逐字相同，保證「legacy 路徑零回歸」不是靠測試斷言湊出來、而是程式碼
+# 本身沒有變動。episode 路徑新增：hash 重算比對（§4.5，先於敏感偵測）、
+# episode-aware 落地（`write_episode_inbox_file`／boundary 查重）、非
+# default profile fail-closed（§6.1，防禦性，理論上不該出現在佇列裡）。
+
 DEFAULT_INBOX_DIR = ROOT / "memory" / "inbox"
 DEFAULT_POLICY_PATH = ROOT / "registry" / "consolidation_policy.yaml"
 DEFAULT_BRIDGE_CONFIG = _HERMES_DIR / "config" / "bridge.yaml"
@@ -262,6 +272,25 @@ def _event_id_range(export: dict) -> str | None:
 def _process_one(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
                  inbox_dir: Path, bridge_db: Path, dry_run: bool,
                  max_retries: int, seen_at: str | None) -> dict:
+    """依 rec 是 episode 列（episode_seq 非 None）還是 legacy 列分派——
+    兩條路徑完全獨立（見模組 docstring 的 2.4d-3 說明）。"""
+    if rec.get("episode_seq") is not None:
+        return _process_one_episode(
+            rec, adapter, policy=policy, inbox_dir=inbox_dir,
+            bridge_db=bridge_db, dry_run=dry_run,
+            max_retries=max_retries, seen_at=seen_at)
+    return _process_one_legacy(
+        rec, adapter, policy=policy, inbox_dir=inbox_dir,
+        bridge_db=bridge_db, dry_run=dry_run,
+        max_retries=max_retries, seen_at=seen_at)
+
+
+def _process_one_legacy(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
+                        inbox_dir: Path, bridge_db: Path, dry_run: bool,
+                        max_retries: int, seen_at: str | None) -> dict:
+    """legacy（整個 session）匯入路徑——Stage 2.4c 原班程式碼，逐字未動
+    （2.4d-3「legacy 路徑零回歸」保證：程式碼本身沒有變動，不是靠測試湊出來）。
+    """
     event_id = rec["event_id"]
     sid = rec["session_id"]
     base = {"event_id": event_id, "session_id": sid}
@@ -395,6 +424,204 @@ def _process_one(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
     return {**base, "action": "to_inbox", "label": _rel_to_root(path)}
 
 
+def _process_one_episode(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
+                         inbox_dir: Path, bridge_db: Path, dry_run: bool,
+                         max_retries: int, seen_at: str | None) -> dict:
+    """episode（boundary 內訊息）匯入路徑——Stage 2.4d-3 新行為（提案 §2／
+    §4.5／§6.1）。與 legacy 路徑差異：
+
+    1. **profile fail-closed**（§6.1，矩陣 #27）：`source_profile != 'default'`
+       的 episode 列（防禦性，理論上不該存在於佇列裡——create_episode 早已
+       拒絕非 default）→ `unsupported_profile_fail_closed`：不改狀態、不動
+       cursor、不落地。這條檢查在最前面，連 retry 計數都不遞增。
+    2. **range export**：讀 boundary 內容用 `export_session_range()`，不是
+       整個 session。
+    3. **hash 重算比對**（§4.5）：export → hash 驗證 → 敏感偵測 → 4.2 排除
+       → 落地——完整性是其他判定的前提。不一致 → needs_review，
+       decision_reason 只記 `integrity:content_hash_mismatch` 標籤（不含
+       內容）；不落地、cursor 不回退（immutability 語義不變）、不進自動
+       重試（內容漂移不是暫時性錯誤）。
+    4. **episode-aware 落地**：`write_episode_inbox_file()`／
+       `_find_existing_import(first_message_id=, last_message_id=)`——查重
+       精確到 boundary，不誤擋 legacy、不誤擋其他 episode（矩陣 #12）。
+    5. 每次 `upsert_session_state` 都顯式帶 `event_id=event_id`——episode
+       event_id 含 boundary，不能讓它退回預設的 legacy `hermes:<sid>`
+       （這正是 §2 陷阱在 importer 狀態回寫這一側的對應修正：若沿用
+       legacy 路徑「不傳 event_id 靠預設值」的寫法，episode 列的每一次狀態
+       轉換都會被寫進錯誤的（甚至不存在的）legacy 列）。
+
+    retry／敏感／4.2 排除的狀態機語義與 legacy 完全相同（提案 §4.1：判定
+    範圍縮小到 episode boundary，語義原樣）。
+    """
+    event_id = rec["event_id"]
+    sid = rec["session_id"]
+    base = {"event_id": event_id, "session_id": sid}
+
+    if rec["source_profile"] != bridge_state.DEFAULT_SOURCE_PROFILE:
+        return {**base, "action": "unsupported_profile_fail_closed",
+                "label": f"source_profile={rec['source_profile']!r}"}
+
+    if rec["import_status"] == "failed":  # 重試路徑（與 legacy 同語義）
+        if rec["retry_count"] >= max_retries:
+            if not dry_run:
+                bridge_state.upsert_session_state(
+                    session_id=sid,
+                    source_profile=rec["source_profile"],
+                    session_source=rec["session_source"],
+                    import_status="needs_review",
+                    memory_type=rec["memory_type"],
+                    useful_chat=rec["useful_chat"],
+                    selected_capability_lane=rec["selected_capability_lane"],
+                    decision_reason=(
+                        f"匯入重試已達上限（retry_count={rec['retry_count']} >= "
+                        f"max_import_retries={max_retries}），停止自動重試、"
+                        "轉人工檢視（原文仍在 Hermes state.db）"),
+                    imported_inbox_path=rec["imported_inbox_path"],
+                    processed_path=rec["processed_path"],
+                    error_reason=rec["error_reason"],
+                    event_id=event_id, event_id_range=rec["event_id_range"],
+                    seen_at=seen_at, db_path=bridge_db)
+            return {**base, "action": "retry_exhausted",
+                    "label": (f"retry_count={rec['retry_count']} >= "
+                              f"{max_retries} → needs_review")}
+        if not dry_run:
+            bridge_state.increment_retry_count(event_id, db_path=bridge_db)
+
+    first_id, last_id = rec["first_message_id"], rec["last_message_id"]
+
+    # 1. 讀取 boundary 內容（snapshot 副本，range export——不是整個 session）
+    try:
+        export = adapter.export_session_range(sid, first_id, last_id)
+        full_text = _full_session_text(export)
+    except Exception as exc:
+        reason = (f"匯入失敗（階段：export／讀取 episode boundary 內容；"
+                  f"例外類別：{type(exc).__name__}）——fail-closed，不落地")
+        if not dry_run:
+            bridge_state.mark_failed(event_id, reason, db_path=bridge_db)
+        return {**base, "action": "failed",
+                "label": f"export_error:{type(exc).__name__}"}
+
+    # 2. hash 重算比對（§4.5，先於敏感偵測——完整性是其他判定的前提）。
+    # 回填列（reconcile allow_null_hash）的 hash 為 NULL：跳過比對，
+    # 不進匯入流程（回填列本來就已落地或已判定，理論上不會進到這裡的佇列）。
+    stored_hash = rec.get("source_content_hash")
+    if stored_hash:
+        try:
+            recomputed = bridge_state.episode_content_hash(
+                bridge_state.adapter_events_to_hash_input(export["events"]))
+        except Exception as exc:
+            reason = (f"匯入失敗（階段：hash 重算；例外類別：{type(exc).__name__}）"
+                      "——無法驗證完整性＝不匯入（fail-closed），不落地")
+            if not dry_run:
+                bridge_state.mark_failed(event_id, reason, db_path=bridge_db)
+            return {**base, "action": "failed",
+                    "label": f"hash_error:{type(exc).__name__}"}
+        if recomputed != stored_hash:
+            if not dry_run:
+                bridge_state.upsert_session_state(
+                    session_id=sid,
+                    source_profile=rec["source_profile"],
+                    session_source=rec["session_source"],
+                    import_status="needs_review",
+                    memory_type="none",
+                    useful_chat=False,
+                    decision_reason="integrity:content_hash_mismatch",
+                    error_reason=rec["error_reason"],
+                    event_id=event_id, event_id_range=rec["event_id_range"],
+                    seen_at=seen_at, db_path=bridge_db)
+            return {**base, "action": "needs_review_hash_mismatch",
+                    "label": "integrity:content_hash_mismatch"}
+
+    # 3. 敏感偵測（fail-closed；只記類別標籤）
+    try:
+        hits = detect_sensitive(full_text, policy["sensitive_patterns"])
+    except Exception as exc:
+        reason = (f"匯入失敗（階段：敏感偵測；例外類別：{type(exc).__name__}）"
+                  "——無法判定＝不匯入（fail-closed），不落地")
+        if not dry_run:
+            bridge_state.mark_failed(event_id, reason, db_path=bridge_db)
+        return {**base, "action": "failed",
+                "label": f"detect_error:{type(exc).__name__}"}
+    if hits:
+        labels = ", ".join(f"sensitive:{c}" for c in hits)
+        if not dry_run:
+            bridge_state.upsert_session_state(
+                session_id=sid,
+                source_profile=rec["source_profile"],
+                session_source=rec["session_source"],
+                import_status="needs_review",
+                memory_type="none",
+                useful_chat=False,
+                decision_reason=(
+                    f"guardrail 命中 {labels}——headless fail-closed（taxonomy "
+                    "4.3）：不落地、不節錄；只記類別標籤，不記命中原文；原文仍在 "
+                    "Hermes state.db，可由互動式 session 人工確認補匯"),
+                error_reason=rec["error_reason"],
+                event_id=event_id, event_id_range=rec["event_id_range"],
+                seen_at=seen_at, db_path=bridge_db)
+        return {**base, "action": "blocked_sensitive", "label": labels}
+
+    # 4. taxonomy 4.2 結構性排除訊號
+    exclusion = classify_exclusion(export, policy)
+    if exclusion:
+        label, detail = exclusion
+        if not dry_run:
+            bridge_state.upsert_session_state(
+                session_id=sid,
+                source_profile=rec["source_profile"],
+                session_source=rec["session_source"],
+                import_status="skipped",
+                memory_type="none",
+                useful_chat=False,
+                decision_reason=f"taxonomy 4.2 排除訊號 exclusion:{label}——{detail}",
+                error_reason=rec["error_reason"],
+                event_id=event_id, event_id_range=rec["event_id_range"],
+                seen_at=seen_at, db_path=bridge_db)
+        return {**base, "action": "skipped_exclusion", "label": f"exclusion:{label}"}
+
+    # 5. 落地（先有檔案、再記狀態；episode-aware 查重精確到 boundary）
+    if dry_run:
+        existing = adapter._find_existing_import(
+            inbox_dir, sid, first_message_id=first_id, last_message_id=last_id)
+        if existing is not None:
+            return {**base, "action": "already_imported_defer_reconcile",
+                    "label": _rel_to_root(existing)}
+        return {**base, "action": "to_inbox",
+                "label": "（dry-run：將落地並記 to_inbox）"}
+    try:
+        path = adapter.write_episode_inbox_file(
+            export, inbox_dir, episode_seq=rec["episode_seq"],
+            capture_trigger=rec["capture_trigger"],
+            first_message_id=first_id, last_message_id=last_id)
+    except InboxAlreadyImportedError as exc:
+        return {**base, "action": "already_imported_defer_reconcile",
+                "label": _rel_to_root(exc.existing_path)}
+    except Exception as exc:
+        reason = f"匯入失敗（階段：inbox 落地；例外類別：{type(exc).__name__}）"
+        bridge_state.mark_failed(event_id, reason, db_path=bridge_db)
+        return {**base, "action": "failed",
+                "label": f"write_error:{type(exc).__name__}"}
+    try:
+        bridge_state.upsert_session_state(
+            session_id=sid,
+            source_profile=rec["source_profile"],
+            session_source=rec["session_source"],
+            import_status="to_inbox",
+            memory_type="episodic",
+            useful_chat=True,
+            decision_reason=(
+                "bridge importer（episode）：hash 驗證通過、無敏感命中、無 4.2 "
+                "結構性排除訊號，已落地 inbox 等待 consolidation"),
+            imported_inbox_path=_rel_to_root(path),
+            event_id=event_id, event_id_range=rec["event_id_range"],
+            seen_at=seen_at, db_path=bridge_db)
+    except Exception as exc:
+        return {**base, "action": "db_update_failed_recoverable",
+                "label": (f"檔案已落地（{_rel_to_root(path)}）但狀態更新失敗"
+                          f"（{type(exc).__name__}）——下次 reconcile 依目錄位置回填")}
+    return {**base, "action": "to_inbox", "label": _rel_to_root(path)}
+
+
 def import_discovered(
     *,
     dry_run: bool = False,
@@ -406,7 +633,13 @@ def import_discovered(
     max_retries: int = DEFAULT_MAX_IMPORT_RETRIES,
     seen_at: str | None = None,
 ) -> dict:
-    """把 discovered（與重試中的 failed）session 依政策判定送進 memory/inbox/。
+    """把 discovered（與重試中的 failed）匯入單位依政策判定送進 memory/inbox/。
+
+    Stage 2.4d-3 起，匯入單位從整個 session 縮小為單一 episode：佇列同時
+    包含 legacy 列（`episode_seq IS NULL`，整個 session 為單位，2.4c 原班
+    邏輯）與 episode 列（`episode_seq` 非 NULL，boundary 內訊息為單位，
+    2.4d-3 新行為）——`_process_one()` 依每筆記錄的 `episode_seq` 分派到
+    對應的處理函式，佇列本身的組成／排序／--limit 語義不變。
 
     - 政策檔先載（fail loud 整批不跑），才碰任何資料。
     - bridge db 不存在＝沒有 scanner 產出可處理：直接回報，**不建立 db 檔**

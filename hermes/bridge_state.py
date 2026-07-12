@@ -314,6 +314,29 @@ def episode_content_hash(events: list[dict]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def adapter_events_to_hash_input(events: list) -> list[dict]:
+    """adapter normalized event（claudecodeos.event.v1，`HermesSessionAdapter`
+    的輸出）→ `episode_content_hash()` 需要的 normalized 欄位輸入（Stage
+    2.4d-3，提案 §4.5）：rowid／role／type／content／tool_calls／timestamp。
+
+    單一實作，供 bridge_scanner（切刀時算 hash）與 bridge_importer（匯入時
+    重算比對）共用——兩者必須餵同一定義的映射，避免各自維護一份造成 hash
+    定義漂移（bridge_state.py 不 import adapter，這裡只是純資料轉換，接受
+    adapter 的 event dict 形狀即可，不需要真的 import adapter 模組）。
+    """
+    return [
+        {
+            "rowid": e["metadata"]["raw_message_id"],
+            "role": e["role"],
+            "type": e["type"],
+            "content": e["content"],
+            "tool_calls": e["metadata"].get("tool_calls"),
+            "timestamp": e["timestamp"],
+        }
+        for e in events
+    ]
+
+
 def _load_schema_doc() -> dict:
     global _schema_doc_cache
     if _schema_doc_cache is None:
@@ -799,6 +822,7 @@ def create_episode(
     event_id_range: str | None = None,
     seen_at: str | None = None,
     db_path: Path | str = DEFAULT_DB_PATH,
+    allow_null_hash: bool = False,
 ) -> dict:
     """建立一個 episode 列並把 per-session cursor 推進到 boundary 的 last——
     **兩者在同一個 SQLite transaction 內完成**（核心不變量，提案 §1.2／風險 3：
@@ -828,9 +852,12 @@ def create_episode(
     何時該切——scanner 端的判斷是 level-triggered（每次檢查只看 archived
     當下的值＋eligible 是否非空，不追蹤 0→1 轉換、不記上次的值，2.4d-2
     實作），與 inactivity 的差異只在「誰觸發」與「是否等門檻」，不影響
-    本函式的 boundary／immutability 保證。source_content_hash 必填（scanner 切刀路徑，
-    §4.5）；reconcile 回填（hash 無法自檔案還原，§3.2）屬 2.4d-3，屆時另議
-    放寬方式，本 API 不留後門。
+    本函式的 boundary／immutability 保證。source_content_hash 必填（scanner
+    切刀路徑，§4.5）——**除非** `allow_null_hash=True`（Stage 2.4d-3 新增，
+    提案 §3.2 明文放寬的位置：reconcile 從目錄真相回填 episode 列時，hash
+    無法自檔案還原，只能記 NULL，不影響去重）。一般 scanner／checkpoint
+    路徑**不得**傳這個參數（維持預設 False，強制必須帶真的 hash）；只有
+    `bridge_scanner.reconcile()` 的 recovery 路徑會顯式傳 True。
 
     回傳 {"created": bool, "row": dict, "cursor": dict}。
     """
@@ -848,10 +875,16 @@ def create_episode(
             "列——episode 列必須是 ended/archived/inactivity/manual（提案 §1.2）")
     if isinstance(episode_seq, bool) or not isinstance(episode_seq, int) or episode_seq < 1:
         raise ValueError(f"episode_seq 必須是 >= 1 的 int（1 起算），得到 {episode_seq!r}")
-    if not source_content_hash or not isinstance(source_content_hash, str):
-        raise ValueError(
-            "source_content_hash 必填（episode 列條件必填，提案 §1.2／§4.5——"
-            "由 scanner 切刀時的同一 snapshot 以 episode_content_hash() 計算）")
+    if not source_content_hash:
+        if not allow_null_hash:
+            raise ValueError(
+                "source_content_hash 必填（episode 列條件必填，提案 §1.2／§4.5——"
+                "由 scanner 切刀時的同一 snapshot 以 episode_content_hash() 計算）；"
+                "reconcile 回填時（hash 無法自檔案還原，§3.2）需明確傳入 "
+                "allow_null_hash=True")
+        source_content_hash = None
+    elif not isinstance(source_content_hash, str):
+        raise ValueError(f"source_content_hash 必須是字串，得到 {source_content_hash!r}")
     if import_status == "failed" and not error_reason:
         raise ValueError("import_status=failed 時 error_reason 必填（schema 約束）")
     if import_status in ("to_inbox", "imported") and not imported_inbox_path:

@@ -99,7 +99,6 @@ CLI（exit code：0 成功；1 執行期錯誤——含 bridge.yaml 缺失、非
         [--dry-run] [--state-db PATH] [--config PATH] [--inbox DIR]
 """
 import argparse
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,16 +110,23 @@ for _p in (_HERMES_DIR, _HERMES_DIR / "session_adapter"):
         sys.path.insert(0, str(_p))
 
 import bridge_state  # noqa: E402
-from adapter import HermesSessionAdapter, HermesSessionReadError  # noqa: E402
+from adapter import (  # noqa: E402
+    HermesSessionAdapter,
+    HermesSessionReadError,
+    has_landed_episode_file,
+)
 
 DEFAULT_INBOX_DIR = ROOT / "memory" / "inbox"
 
 # 政策層設定檔（版控、部署同步下發）：cutover 底線的唯一來源（Stage 2.4a）
 DEFAULT_BRIDGE_CONFIG = _HERMES_DIR / "config" / "bridge.yaml"
 
-# 檔名退回比對：涵蓋新格式 hermes_session_<id>.md 與
-# 舊時間戳格式 <stamp>_hermes_session_<id>.md（與 adapter 的去重掃描同一慣例）
-_FILENAME_RE = re.compile(r"(?:^|_)hermes_session_(?P<sid>.+)\.md$")
+# 檔名解析（legacy／episode 共用單一實作，Stage 2.4d-3）：
+# adapter.HermesSessionAdapter.parse_inbox_filename() ——涵蓋新格式
+# hermes_session_<id>.md、舊時間戳格式 <stamp>_hermes_session_<id>.md、與
+# episode 格式 hermes_session_<id>_ep<first>-<last>.md。2.4d-2 曾在本模組
+# 自建一份 `_FILENAME_RE`（不含 ep 捕獲組），2.4d-3 收斂為呼叫 adapter 的
+# 單一實作，不再維護第二份 regex（提案 §2／§3.2）。
 
 # inbox frontmatter（claudecodeos.inbox.v1）中 hermes session 的 source 標記；
 # frontmatter 有 session_id 但 source 是別的來源時，不當成 hermes session 對帳
@@ -169,8 +175,10 @@ def _rel_to_root(path: Path | str) -> str:
 
 
 def _read_frontmatter(path: Path) -> dict:
-    """讀檔案開頭 YAML frontmatter 的 session_id / source / event_id_range。
-    只掃前 60 行；讀不到、沒有 frontmatter、格式不對都回空 dict（容錯）。"""
+    """讀檔案開頭 YAML frontmatter 的 session_id / source / event_id_range /
+    episode / capture_trigger（後兩者是 Stage 2.4d-3 的 episode 檔新欄，
+    additive，legacy 檔案不會有——見提案 §2）。只掃前 60 行；讀不到、沒有
+    frontmatter、格式不對都回空 dict（容錯）。"""
     fields: dict = {}
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -180,7 +188,8 @@ def _read_frontmatter(path: Path) -> dict:
                 line = fh.readline()
                 if not line or line.strip() == "---":
                     break
-                for key in ("session_id", "source", "event_id_range"):
+                for key in ("session_id", "source", "event_id_range",
+                            "episode", "capture_trigger"):
                     if line.startswith(key + ":"):
                         fields[key] = line.split(":", 1)[1].strip().strip("\"'")
     except OSError:
@@ -239,12 +248,6 @@ def load_cutover(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> str:
 # 缺欄位時直接退回這個值即可，不需要為此再 fail loud 一次。
 DEFAULT_INACTIVITY_HOURS = 72
 
-# episode 落地檔存在性探測 needle 的固定後綴（矩陣 #8）：精確到 "_ep" 段，
-# 目的只是「這個 session 有沒有 episode 落地過」，不是回填——回填規則仍只
-# 留給 reconcile 一份實作（2.4d-3，提案 §3.2）。
-_EPISODE_FILE_NEEDLE_SUFFIX = "_ep"
-
-
 def load_episodes_config(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> dict:
     """讀取 hermes/config/bridge.yaml 的 episodes 區塊（提案 §1.3／§5.1）。
 
@@ -281,39 +284,12 @@ def load_episodes_config(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> dic
             "episode_cutover": cutover if isinstance(cutover, str) else None}
 
 
-def _has_landed_episode_files(inbox_dir: Path | str, session_id: str) -> bool:
-    """存在性探測（矩陣 #8）：inbox 本層＋.processed/＋.failed/ 是否已有該
-    session 的 episode 落地檔（檔名含 `hermes_session_<sid>_ep`）。只判斷
-    存在與否，**不回填任何欄位**——回填規則仍只留給 reconcile 一份實作
-    （2.4d-3，提案 §3.2）；本階段 bridge_importer.py 尚未有episode-aware
-    的專用 needle helper（那是 2.4d-3 範圍），這裡先實作一個最小的獨立探測，
-    2.4d-3 補上 importer 側的 helper 後應收斂成單一實作。"""
-    inbox_dir = Path(inbox_dir)
-    needle = f"hermes_session_{session_id}{_EPISODE_FILE_NEEDLE_SUFFIX}"
-    for sub, _status in _DIR_STATUS:
-        directory = inbox_dir / sub if sub else inbox_dir
-        if not directory.is_dir():
-            continue
-        for candidate in directory.glob("*.md"):
-            if needle in candidate.name:
-                return True
-    return False
-
-
-def _episode_hash_events(events: list[dict]) -> list[dict]:
-    """adapter normalized event → bridge_state.episode_content_hash() 需要的
-    normalized 欄位（rowid/role/type/content/tool_calls/timestamp）。"""
-    return [
-        {
-            "rowid": e["metadata"]["raw_message_id"],
-            "role": e["role"],
-            "type": e["type"],
-            "content": e["content"],
-            "tool_calls": e["metadata"].get("tool_calls"),
-            "timestamp": e["timestamp"],
-        }
-        for e in events
-    ]
+# 存在性探測（矩陣 #8）與 hash 輸入映射（提案 §4.5）2.4d-3 起收斂為單一
+# 實作，不在本模組維護第二份：
+# - has_landed_episode_file(inbox_dir, session_id)——adapter.py（提案 §3.2：
+#   「偵測用的『存在性探測』復用 importer 的同一 needle helper（單處實作），
+#   不複製 reconcile 的回填邏輯」）；
+# - bridge_state.adapter_events_to_hash_input(events)——bridge_state.py。
 
 
 def _decide_trigger(sess: dict, cutover_dt: datetime, inactivity_hours: float,
@@ -381,7 +357,7 @@ def _detect_episodes(
 
         cursor = bridge_state.get_cursor(
             sid, source_profile=source_profile, db_path=bridge_db)
-        if cursor is None and _has_landed_episode_files(inbox_dir, sid):
+        if cursor is None and has_landed_episode_file(inbox_dir, sid):
             actions.append({
                 "action": "cursor_missing_needs_reconcile",
                 "session_id": sid, "trigger": trigger,
@@ -403,7 +379,7 @@ def _detect_episodes(
         rowids = [e["metadata"]["raw_message_id"] for e in eligible]
         first_id, last_id = min(rowids), max(rowids)
         content_hash = bridge_state.episode_content_hash(
-            _episode_hash_events(eligible))
+            bridge_state.adapter_events_to_hash_input(eligible))
         episode_seq = (cursor["last_episode_seq"] + 1) if cursor else 1
         reason = (f"bridge scan episode 偵測：trigger={trigger}，"
                  f"boundary=[{first_id}..{last_id}]")
@@ -619,7 +595,7 @@ def checkpoint(
     cursor = bridge_state.get_cursor(
         session_id, source_profile=source_profile, db_path=bridge_db)
 
-    if cursor is None and _has_landed_episode_files(inbox_dir, session_id):
+    if cursor is None and has_landed_episode_file(inbox_dir, session_id):
         return {"mode": "checkpoint", "dry_run": dry_run,
                 "session_id": session_id,
                 "action": "cursor_missing_needs_reconcile", "created": False}
@@ -656,7 +632,8 @@ def checkpoint(
 
     rowids = [e["metadata"]["raw_message_id"] for e in eligible]
     first_id, last_id = min(rowids), max(rowids)
-    content_hash = bridge_state.episode_content_hash(_episode_hash_events(eligible))
+    content_hash = bridge_state.episode_content_hash(
+        bridge_state.adapter_events_to_hash_input(eligible))
     episode_seq = (cursor["last_episode_seq"] + 1) if cursor else 1
     session_source = export["session"]["session_source"] or "unknown"
     reason = f"bridge checkpoint（manual）：boundary=[{first_id}..{last_id}]"
@@ -688,6 +665,74 @@ def checkpoint(
 
 # ---------- reconcile ----------
 
+def _resolve_file_identity(fm: dict, filename: str) -> dict | None:
+    """對帳身份判定（提案 §2）：legacy 或 episode，回傳
+    {"event_id", "kind", "session_id", "first_message_id", "last_message_id",
+    "basis"}，認不出時回 None。
+
+    **kind 判定的結構性訊號（重要，2.4d-3 判斷細節）**：episode 檔的判別
+    不能只看 frontmatter `event_id_range` 是否為 "hermes:<sid>:<first>..<last>"
+    格式——2.4c 起 legacy（整個 session）匯入的 inbox 檔案本來就會帶這個格式
+    的 event_id_range（`bridge_importer._event_id_range()`：對整個 session
+    的 min/max raw_message_id 算一個「內容範圍」註記，跟 event_id 本身
+    仍是 legacy 的 "hermes:<sid>" 無關）。若把「event_id_range 含 '..'」
+    當成「這是 episode 檔」的判準，會把**所有既有 legacy 檔案**誤判成
+    episode，寫壞 cursor 與 DB（本階段發現的規格釐清，非本文件字面陷阱—
+    -但根源相同：查重/對帳範圍的誤判）。
+
+    真正能區分 legacy／episode 的結構性訊號只有兩個，兩者都是 2.4d-3 才
+    出現、legacy 檔案絕不會有：(a) 檔名 `_ep<first>-<last>` 捕獲組；
+    (b) frontmatter 的 `episode:` 欄位。只要其中之一存在即判定為 episode，
+    然後才輪到「用哪個欄位還原精確 boundary」的優先序：frontmatter
+    event_id_range（可直接還原完整 event_id）→ 檔名 ep 捕獲組（提案 §2）。
+    """
+    fm_sid = fm.get("session_id")
+    fm_source_ok = fm.get("source") in (None, _INBOX_FRONTMATTER_SOURCE)
+    parsed_name = HermesSessionAdapter.parse_inbox_filename(filename)
+    name_sid = parsed_name["session_id"] if parsed_name else None
+    name_is_episode = bool(parsed_name and parsed_name["first_message_id"] is not None)
+    fm_is_episode = bool(fm.get("episode"))
+
+    sid = fm_sid if (fm_sid and fm_source_ok) else name_sid
+    if sid is None:
+        return None
+
+    if not (name_is_episode or fm_is_episode):
+        basis = ("frontmatter session_id" if (fm_sid and fm_source_ok)
+                 else "檔名比對（檔案無 frontmatter session_id）")
+        return {"event_id": bridge_state.session_event_id(sid), "kind": "legacy",
+                "session_id": sid, "first_message_id": None,
+                "last_message_id": None, "basis": basis}
+
+    # episode：優先 frontmatter event_id_range 還原 boundary（可直接還原
+    # 完整 event_id）；其次檔名 ep 捕獲組。
+    range_raw = fm.get("event_id_range")
+    if range_raw:
+        try:
+            parsed_range = bridge_state.parse_event_id(range_raw)
+        except ValueError:
+            parsed_range = None
+        if (parsed_range and parsed_range["kind"] == "episode"
+                and parsed_range["session_id"] == sid):
+            first, last = (parsed_range["first_message_id"],
+                           parsed_range["last_message_id"])
+            return {"event_id": bridge_state.episode_event_id(sid, first, last),
+                    "kind": "episode", "session_id": sid,
+                    "first_message_id": first, "last_message_id": last,
+                    "basis": "frontmatter event_id_range"}
+    if name_is_episode and parsed_name["session_id"] == sid:
+        first, last = (parsed_name["first_message_id"],
+                       parsed_name["last_message_id"])
+        return {"event_id": bridge_state.episode_event_id(sid, first, last),
+                "kind": "episode", "session_id": sid,
+                "first_message_id": first, "last_message_id": last,
+                "basis": "檔名 ep 捕獲組"}
+    # 判定為 episode（frontmatter 有 episode 欄位）卻拿不到可信 boundary數值
+    # ——理論上不該發生（episode 檔必有 _ep 檔名或一致的 event_id_range）；
+    # fail-closed：不猜 boundary，交給 skip_unrecognized。
+    return None
+
+
 def reconcile(
     *,
     inbox_dir: Path | str = DEFAULT_INBOX_DIR,
@@ -707,6 +752,26 @@ def reconcile(
       first_seen_at / retry_count 由 repository 層保證不被洗掉）。
     - 回填的新記錄不推斷 memory_type（保持 none）；useful_chat 只在 imported
       （已被 consolidation 接受，事實上有用）時記 true。
+
+    Stage 2.4d-3（episode-aware 回填＋cursor recovery，提案 §2／§3.2）：
+    - 對帳單位以 event_id 為 key（legacy＝`hermes:<sid>`；episode＝
+      `hermes:<sid>:<first>..<last>`），同一 session 的多個 episode 檔各自
+      獨立回填（`session_id_range` 是合法的，提案 §2）。
+    - episode 列若既有 DB 記錄不存在（db 全空或部分重建）→ 用
+      `bridge_state.create_episode(allow_null_hash=True)` 建立（hash 無法自
+      檔案還原，記 NULL，decision_reason 註明，不影響去重）；已存在則跟
+      legacy 一樣用 `upsert_session_state` 校正狀態／路徑。
+    - 每個 session 的所有已落地 episode 檔（跨 to_inbox／.processed／
+      .failed，即「有實體檔案」的意思——需求檔／skipped 從不落地，本來就
+      不在這裡的掃描範圍內）處理完後，**重建 cursor**：取
+      `max(last_message_id)` upsert 進 `bridge_cursors`（只前進不後退，
+      對健康 db 重跑天然 no-op，提案 §3.2）；`last_episode_seq` 優先取
+      frontmatter `episode` 欄位的最大值，缺 frontmatter 時退回「依
+      first_message_id 排序的序位」保守估計（只影響序號可讀性，不影響
+      boundary 正確性）。
+    - profile fail-closed（§6.1）：`source_profile` 參數非 default 時，
+      episode 相關的建立／更新／cursor 重建一律記錄並跳過（不寫入、不動
+      cursor）；legacy 回填不受此限（維持既有行為）。
     """
     inbox_dir = Path(inbox_dir)
     if not inbox_dir.is_dir():
@@ -722,27 +787,49 @@ def reconcile(
         for candidate in sorted(directory.glob("*.md")):
             files_seen += 1
             fm = _read_frontmatter(candidate)
-            sid = basis = None
-            if fm.get("session_id") and fm.get("source") in (
-                None, _INBOX_FRONTMATTER_SOURCE
-            ):
-                sid = fm["session_id"]
-                basis = "frontmatter session_id"
-            else:
-                match = _FILENAME_RE.search(candidate.name)
-                if match:
-                    sid = match.group("sid")
-                    basis = "檔名比對（檔案無 frontmatter session_id）"
-            if sid is None:
+            identity = _resolve_file_identity(fm, candidate.name)
+            if identity is None:
                 skipped.append(str(candidate))
                 continue
-            entry = entries.setdefault(
-                sid, {"by_status": {}, "event_id_range": None, "session_source": None})
-            entry["by_status"].setdefault(status, (candidate, basis))
+            event_id = identity["event_id"]
+            entry = entries.setdefault(event_id, {
+                "kind": identity["kind"],
+                "session_id": identity["session_id"],
+                "first_message_id": identity["first_message_id"],
+                "last_message_id": identity["last_message_id"],
+                "by_status": {},
+                "event_id_range": None,
+                "session_source": None,
+                "episode_seq": None,
+                "capture_trigger": None,
+            })
+            entry["by_status"].setdefault(status, (candidate, identity["basis"]))
             if entry["event_id_range"] is None and fm.get("event_id_range"):
                 entry["event_id_range"] = fm["event_id_range"]
             if entry["session_source"] is None:
                 entry["session_source"] = _body_session_source(candidate)
+            if entry["episode_seq"] is None and fm.get("episode"):
+                try:
+                    entry["episode_seq"] = int(fm["episode"])
+                except ValueError:
+                    pass
+            if entry["capture_trigger"] is None and fm.get("capture_trigger"):
+                entry["capture_trigger"] = fm["capture_trigger"]
+
+    # episode_seq 保守估計（缺 frontmatter 時）：同 session 依 first_message_id
+    # 排序給序位，只影響可讀性，不影響 boundary 正確性（提案 §3.2）。
+    episode_session_groups: dict[str, list[dict]] = {}
+    for entry in entries.values():
+        if entry["kind"] == "episode":
+            episode_session_groups.setdefault(
+                entry["session_id"], []).append(entry)
+    for group in episode_session_groups.values():
+        ordered = sorted(group, key=lambda e: e["first_message_id"])
+        for idx, e in enumerate(ordered, start=1):
+            if not e["episode_seq"]:
+                e["episode_seq"] = idx
+
+    episode_profile_ok = source_profile == bridge_state.DEFAULT_SOURCE_PROFILE
 
     bridge_db = Path(bridge_db)
     if not dry_run:
@@ -751,7 +838,7 @@ def reconcile(
 
     actions: list[dict] = [
         {"action": "skip_unrecognized", "path": p} for p in skipped]
-    for sid, entry in sorted(entries.items()):
+    for event_id, entry in sorted(entries.items()):
         status = next(s for s in _STATUS_PRECEDENCE if s in entry["by_status"])
         path, basis = entry["by_status"][status]
         processed_hit = entry["by_status"].get("imported")
@@ -763,7 +850,8 @@ def reconcile(
             inbox_path = _rel_to_root(inbox_dir / path.name)
         else:
             inbox_path = None
-        event_id = bridge_state.session_event_id(sid)
+        sid = entry["session_id"]
+        is_episode = entry["kind"] == "episode"
         existing = (
             bridge_state.get_session_state(event_id, db_path=bridge_db)
             if db_readable else None
@@ -771,25 +859,58 @@ def reconcile(
         reason = (f"bridge reconcile：檔案位於 {_LOCATION_LABEL[status]}，"
                   f"session_id 依據：{basis}")
 
-        if existing is None:
-            action_name = f"insert_{status}"
-            if not dry_run:
-                bridge_state.upsert_session_state(
-                    session_id=sid,
-                    source_profile=source_profile,
-                    session_source=entry["session_source"] or "unknown",
-                    import_status=status,
-                    memory_type="none",
-                    useful_chat=(status == "imported"),
-                    decision_reason=reason,
-                    imported_inbox_path=inbox_path,
-                    processed_path=processed_path,
-                    error_reason=(_FAILED_BACKFILL_REASON
-                                  if status == "failed" else None),
-                    event_id_range=entry["event_id_range"],
-                    seen_at=seen_at,
-                    db_path=bridge_db,
-                )
+        if is_episode and not episode_profile_ok:
+            action_name = "unsupported_profile_fail_closed"
+        elif existing is None:
+            if is_episode:
+                action_name = f"insert_episode_{status}"
+                if not dry_run:
+                    bridge_state.create_episode(
+                        session_id=sid,
+                        source_profile=source_profile,
+                        session_source=entry["session_source"] or "unknown",
+                        episode_seq=entry["episode_seq"],
+                        capture_trigger=(entry["capture_trigger"] or "manual"),
+                        first_message_id=entry["first_message_id"],
+                        last_message_id=entry["last_message_id"],
+                        source_content_hash=None,
+                        allow_null_hash=True,
+                        decision_reason=(
+                            reason + "；episode 列由 reconcile 從檔案系統回填"
+                            "（source_content_hash 無法自檔案還原，記 NULL，"
+                            "不影響去重，提案 §3.2）"
+                            + ("" if entry["capture_trigger"] else
+                               "；capture_trigger 無法自檔案還原，"
+                               "以 'manual' 佔位")),
+                        import_status=status,
+                        memory_type="none",
+                        useful_chat=(status == "imported"),
+                        imported_inbox_path=inbox_path,
+                        processed_path=processed_path,
+                        error_reason=(_FAILED_BACKFILL_REASON
+                                      if status == "failed" else None),
+                        seen_at=seen_at,
+                        db_path=bridge_db,
+                    )
+            else:
+                action_name = f"insert_{status}"
+                if not dry_run:
+                    bridge_state.upsert_session_state(
+                        session_id=sid,
+                        source_profile=source_profile,
+                        session_source=entry["session_source"] or "unknown",
+                        import_status=status,
+                        memory_type="none",
+                        useful_chat=(status == "imported"),
+                        decision_reason=reason,
+                        imported_inbox_path=inbox_path,
+                        processed_path=processed_path,
+                        error_reason=(_FAILED_BACKFILL_REASON
+                                      if status == "failed" else None),
+                        event_id_range=entry["event_id_range"],
+                        seen_at=seen_at,
+                        db_path=bridge_db,
+                    )
         else:
             same_status = existing["import_status"] == status
             needs_path_fix = bool(processed_path) and (
@@ -821,6 +942,7 @@ def reconcile(
                             existing["error_reason"] if same_status
                             else (_FAILED_BACKFILL_REASON
                                   if status == "failed" else None)),
+                        event_id=event_id,
                         event_id_range=(entry["event_id_range"]
                                         or existing["event_id_range"]),
                         seen_at=seen_at,
@@ -828,6 +950,28 @@ def reconcile(
                     )
         actions.append({"action": action_name, "event_id": event_id,
                         "session_id": sid, "path": str(path), "basis": basis})
+
+    # cursor 重建（提案 §3.2，核心 recovery 邏輯）：對每個有落地 episode 檔的
+    # session，取所有落地檔 max(last_message_id) upsert 進 bridge_cursors
+    # （只前進不後退，對健康 db 重跑無害、天然冪等）。
+    for sid, group in sorted(episode_session_groups.items()):
+        max_last = max(e["last_message_id"] for e in group)
+        seq_candidates = [e["episode_seq"] for e in group if e["episode_seq"]]
+        max_seq = max(seq_candidates) if seq_candidates else len(group)
+        if not episode_profile_ok:
+            actions.append({"action": "unsupported_profile_fail_closed",
+                            "session_id": sid, "last_captured_message_id": max_last,
+                            "last_episode_seq": max_seq})
+            continue
+        advanced = None
+        if not dry_run:
+            result = bridge_state.advance_cursor(
+                sid, max_last, last_episode_seq=max_seq,
+                source_profile=source_profile, seen_at=seen_at, db_path=bridge_db)
+            advanced = result["advanced"]
+        actions.append({"action": "cursor_recovery", "session_id": sid,
+                        "last_captured_message_id": max_last,
+                        "last_episode_seq": max_seq, "advanced": advanced})
 
     return {"mode": "reconcile", "dry_run": dry_run, "files_seen": files_seen,
             "bridge_db_exists": db_readable, "actions": actions}

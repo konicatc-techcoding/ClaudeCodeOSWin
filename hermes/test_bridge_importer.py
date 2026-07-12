@@ -590,6 +590,326 @@ class TestDryRunAndLimit(ImporterTestBase):
             self.run_import(limit=0)
 
 
+class EpisodeImporterTestBase(ImporterTestBase):
+    """Stage 2.4d-3：episode 匯入路徑的共用 fixture（提案 §2／§4.5／§6.1）。"""
+
+    _next_ts_by_session: dict
+
+    def add_episode_session(self, sid, messages, *, source="cli", title=None,
+                            ended=None):
+        """建一個新 session＋訊息，回傳實際被指派的 message rowid 清單
+        （AUTOINCREMENT，不能像 legacy fixture 那樣寫死 id）。同一 sid 只能
+        呼叫一次（sessions.id 是 PK）；同 session 追加訊息用
+        `add_messages_to_session()`。"""
+        if not hasattr(self, "_next_ts_by_session"):
+            self._next_ts_by_session = {}
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute(
+                "INSERT INTO sessions (id, source, model, started_at, ended_at, "
+                "end_reason, message_count, title) VALUES (?,?,?,?,?,?,?,?)",
+                (sid, source, "test-model", 1783600000.0, ended,
+                 "stop" if ended else None, len(messages), title))
+            conn.commit()
+        self._next_ts_by_session[sid] = 1783600000.0
+        return self.add_messages_to_session(sid, messages)
+
+    def add_messages_to_session(self, sid, messages):
+        """對既有 session 追加訊息（時間戳從上次呼叫接續，避免撞號），回傳
+        本次新增的 message rowid 清單——同一 session 的多個 episode boundary
+        用這個方法建立不重疊的訊息批次（模擬 session 復活／敏感與乾淨內容
+        分屬不同 episode）。"""
+        ts = self._next_ts_by_session.get(sid, 1783600000.0)
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            ids = []
+            for role, content in messages:
+                cur = conn.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp, "
+                    "active, compacted) VALUES (?,?,?,?,1,0)",
+                    (sid, role, content, ts))
+                ids.append(cur.lastrowid)
+                ts += 1
+            conn.commit()
+        self._next_ts_by_session[sid] = ts
+        return ids
+
+    def seed_episode(self, sid, first, last, *, episode_seq=1,
+                     capture_trigger="inactivity", content_hash=None,
+                     session_source="cli", seen_at=T1):
+        """模擬 scanner 已切好一刀：走真的 create_episode()（cursor 同步
+        前進），hash 預設用真的 adapter 讀 boundary 內容現算（跟 scanner
+        實際流程一致，不是隨便湊一個字串）。"""
+        bridge_state.init_db(self.bridge_db)
+        if content_hash is None:
+            with adapter_module.HermesSessionAdapter(db_path=self.hermes_db) as ad:
+                export = ad.export_session_range(sid, first, last)
+            content_hash = bridge_state.episode_content_hash(
+                bridge_state.adapter_events_to_hash_input(export["events"]))
+        return bridge_state.create_episode(
+            session_id=sid, source_profile="default",
+            session_source=session_source, episode_seq=episode_seq,
+            capture_trigger=capture_trigger, first_message_id=first,
+            last_message_id=last, source_content_hash=content_hash,
+            decision_reason="測試種子：模擬 scanner 切刀",
+            seen_at=seen_at, db_path=self.bridge_db)
+
+    def episode_rec(self, sid, first, last) -> dict | None:
+        return bridge_state.get_session_state(
+            bridge_state.episode_event_id(sid, first, last),
+            db_path=self.bridge_db)
+
+
+class TestEpisodeImportFlow(EpisodeImporterTestBase):
+    """矩陣 #25（hash 正常路徑）／#26（hash mismatch）／#9（inbox 檔名
+    deterministic）／#11（重跑冪等，episode needle 精確到 boundary）。"""
+
+    def test_hash_match_lands_with_deterministic_episode_filename(self):
+        ids = self.add_episode_session("sess_ep_ok", OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_episode("sess_ep_ok", first, last, episode_seq=1,
+                          capture_trigger="inactivity")
+        result = self.run_import()
+
+        files = self.inbox_files()
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].name,
+                         f"hermes_session_sess_ep_ok_ep{first}-{last}.md")
+        body = files[0].read_text(encoding="utf-8")
+        self.assertIn(f"episode: 1", body)
+        self.assertIn("capture_trigger: inactivity", body)
+
+        rec = self.episode_rec("sess_ep_ok", first, last)
+        self.assertEqual(rec["import_status"], "to_inbox")
+        self.assertEqual(rec["memory_type"], "episodic")
+        self.assertIs(rec["useful_chat"], True)
+        action = self.action_for(result, "sess_ep_ok")
+        self.assertEqual(action["action"], "to_inbox")
+
+    def test_hash_mismatch_needs_review_zero_leak_no_retry(self):
+        """矩陣 #26：hash 竄改後不落地、decision_reason 只含標籤（無內容）、
+        cursor 不回退、不進自動重試。"""
+        ids = self.add_episode_session("sess_ep_bad_hash", OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_episode("sess_ep_bad_hash", first, last,
+                          content_hash="0" * 64)  # 刻意錯的 hash（竄改模擬）
+        cursor_before = bridge_state.get_cursor("sess_ep_bad_hash",
+                                                db_path=self.bridge_db)
+        result = self.run_import()
+
+        rec = self.episode_rec("sess_ep_bad_hash", first, last)
+        self.assertEqual(rec["import_status"], "needs_review")
+        self.assertEqual(rec["decision_reason"], "integrity:content_hash_mismatch",
+                         "只記標籤，不含內容")
+        self.assertIs(rec["useful_chat"], False)
+        self.assertEqual(self.inbox_files(), [], "不落地")
+        action = self.action_for(result, "sess_ep_bad_hash")
+        self.assertEqual(action["action"], "needs_review_hash_mismatch")
+        self.assertEqual(action["label"], "integrity:content_hash_mismatch")
+
+        cursor_after = bridge_state.get_cursor("sess_ep_bad_hash",
+                                               db_path=self.bridge_db)
+        self.assertEqual(cursor_before, cursor_after, "cursor 不回退")
+
+        # 不進自動重試：needs_review 不在下次佇列裡，重跑零動作
+        result2 = self.run_import()
+        self.assertEqual(result2["queued"], 0)
+        self.assertEqual(self.episode_rec("sess_ep_bad_hash", first, last)
+                         ["import_status"], "needs_review")
+
+    def test_rerun_idempotent_episode_needle_exact_to_boundary(self):
+        """矩陣 #11：episode 重跑冪等——已 to_inbox 不重進佇列；模擬「檔案已
+        落地但 DB 更新失敗」情境，查重 needle 精確到 boundary 命中既有檔。"""
+        ids = self.add_episode_session("sess_ep_rerun", OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_episode("sess_ep_rerun", first, last)
+        # 模擬前次已落地成功但 DB 更新失敗：inbox 已有正確檔名的檔案，
+        # DB 仍是 discovered。
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            "sess_ep_rerun", first, last)
+        (self.inbox / name).write_text(
+            "---\nschema: claudecodeos.inbox.v1\nsource: hermes-session\n"
+            "session_id: sess_ep_rerun\n---\n\n先前已落地的內容\n",
+            encoding="utf-8")
+        result = self.run_import()
+        action = self.action_for(result, "sess_ep_rerun")
+        self.assertEqual(action["action"], "already_imported_defer_reconcile")
+        self.assertEqual(len(self.inbox_files()), 1, "不得重複落地")
+        self.assertEqual(
+            self.episode_rec("sess_ep_rerun", first, last)["import_status"],
+            "discovered", "importer 不當場對帳，交給 reconcile")
+
+        bridge_scanner.reconcile(inbox_dir=self.inbox, bridge_db=self.bridge_db,
+                                 seen_at=T3)
+        self.assertEqual(
+            self.episode_rec("sess_ep_rerun", first, last)["import_status"],
+            "to_inbox")
+        result2 = self.run_import(seen_at=T3)
+        self.assertEqual(result2["queued"], 0)
+        self.assertEqual(len(self.inbox_files()), 1)
+
+
+class TestEpisodeSensitiveMixAndCursor(EpisodeImporterTestBase):
+    """矩陣 #4-6：復活 session／敏感與乾淨 episode 混合／敏感 episode 的
+    cursor 不回收。"""
+
+    def test_sensitive_episode_blocked_clean_episode_still_lands_cursor_kept(self):
+        sensitive_ids = self.add_episode_session(
+            "sess_mix", [("user", f"金鑰 {FAKE_API_KEY} 記一下，之後要用")])
+        clean_ids = self.add_messages_to_session("sess_mix", OK_MESSAGES)
+        ep1_first, ep1_last = sensitive_ids[0], sensitive_ids[-1]
+        ep2_first, ep2_last = clean_ids[0], clean_ids[-1]
+
+        self.seed_episode("sess_mix", ep1_first, ep1_last, episode_seq=1,
+                          capture_trigger="archived")
+        self.seed_episode("sess_mix", ep2_first, ep2_last, episode_seq=2,
+                          capture_trigger="inactivity")
+        # create_episode 已把 cursor 推到 ep2.last／seq=2（模擬 scanner 已切好
+        # 兩刀，importer 尚未跑）
+        cursor_before_import = bridge_state.get_cursor("sess_mix",
+                                                        db_path=self.bridge_db)
+        self.assertEqual(cursor_before_import["last_captured_message_id"], ep2_last)
+        self.assertEqual(cursor_before_import["last_episode_seq"], 2)
+
+        result = self.run_import()
+
+        ep1 = self.episode_rec("sess_mix", ep1_first, ep1_last)
+        self.assertEqual(ep1["import_status"], "needs_review")
+        self.assertIn("sensitive:api_tokens", ep1["decision_reason"])
+        ep2 = self.episode_rec("sess_mix", ep2_first, ep2_last)
+        self.assertEqual(ep2["import_status"], "to_inbox")
+
+        files = self.inbox_files()
+        self.assertEqual(len(files), 1, "只有乾淨的 ep2 落地")
+        self.assertEqual(files[0].name,
+                         f"hermes_session_sess_mix_ep{ep2_first}-{ep2_last}.md")
+
+        # 敏感 episode 的 cursor 不回收（矩陣 #6）：importer 完全不碰 cursor，
+        # 前後應完全一致。
+        cursor_after_import = bridge_state.get_cursor("sess_mix",
+                                                       db_path=self.bridge_db)
+        self.assertEqual(cursor_before_import, cursor_after_import)
+
+        # 零外洩：db dump／stdout/stderr／inbox 都不得出現金鑰原文
+        dump = self.db_dump()
+        printed = self.last_stdout + self.last_stderr
+        tree = self.inbox_text()
+        self.assertNotIn(FAKE_API_KEY, dump)
+        self.assertNotIn(FAKE_API_KEY, printed)
+        self.assertNotIn(FAKE_API_KEY, tree)
+
+        # action_for 對同 session_id 兩筆 episode 都符合（同一 session 兩個
+        # episode），這裡改用逐筆比對，不用 action_for（它只取第一筆）。
+        actions = [a for a in result["actions"] if a["session_id"] == "sess_mix"]
+        self.assertEqual({a["action"] for a in actions},
+                         {"blocked_sensitive", "to_inbox"})
+
+    def test_revived_session_ep1_import_unaffected_by_later_ep2(self):
+        """矩陣 #4：復活 session——ep1（inactivity 切刀後匯入）與 ep2
+        （session 復活、新訊息切出的下一刀）各自獨立匯入；ep1 的列與落地
+        內容在 ep2 產生／匯入後完全不變（immutability，提案 §4.4）。
+        直接用 `create_episode()` 模擬 scanner 已切好的兩刀（等同 scanner
+        兩輪 scan 的結果），聚焦 importer 對 boundary 的處理，不依賴共用
+        fixture 裡其他 session 的雜訊。"""
+        sid = "sess_revive"
+        ids1 = self.add_episode_session(sid, OK_MESSAGES, source="desktop")
+        ep1_first, ep1_last = ids1[0], ids1[-1]
+        self.seed_episode(sid, ep1_first, ep1_last, episode_seq=1,
+                          capture_trigger="inactivity", seen_at=T1)
+
+        import1 = self.run_import(seen_at=T2)
+        self.assertEqual(self.action_for(import1, sid)["action"], "to_inbox")
+        ep1_before = self.episode_rec(sid, ep1_first, ep1_last)
+        self.assertEqual(ep1_before["import_status"], "to_inbox")
+        ep1_path = self.inbox_files()[0]
+        ep1_body_before = ep1_path.read_text(encoding="utf-8")
+
+        # session 復活：新增訊息，模擬 scanner 下一輪切出 ep2
+        new_ids = self.add_messages_to_session(sid, OK_MESSAGES)
+        ep2_first, ep2_last = new_ids[0], new_ids[-1]
+        self.seed_episode(sid, ep2_first, ep2_last, episode_seq=2,
+                          capture_trigger="inactivity", seen_at=T3)
+
+        import2 = self.run_import(seen_at=T3)
+        ep2_actions = [a for a in import2["actions"] if a["session_id"] == sid]
+        self.assertEqual({a["action"] for a in ep2_actions}, {"to_inbox"})
+
+        # ep1 完全不變（immutability）
+        ep1_after = self.episode_rec(sid, ep1_first, ep1_last)
+        self.assertEqual(ep1_after, ep1_before)
+        self.assertEqual(ep1_path.read_text(encoding="utf-8"), ep1_body_before)
+
+        # ep2 boundary 只含新訊息，不含 ep1 的訊息
+        ep2 = self.episode_rec(sid, ep2_first, ep2_last)
+        self.assertEqual(ep2["import_status"], "to_inbox")
+        self.assertEqual(len(self.inbox_files()), 2)
+
+
+class TestEpisodeProfileFailClosed(EpisodeImporterTestBase):
+    """矩陣 #27：importer 側非 default profile fail-closed（§6.1，防禦性—
+    —理論上不該出現在佇列裡，因為 create_episode 早已拒絕非 default）。"""
+
+    def _seed_non_default_episode_row(self, sid, first, last):
+        """繞過 create_episode 的 fail-closed 檢查，直接寫一筆非 default
+        profile 的 episode discovered 列——模擬「理論上不該存在」的防禦性
+        情境（唯一能構造這種列的方式）。"""
+        bridge_state.init_db(self.bridge_db)
+        event_id = bridge_state.episode_event_id(sid, first, last)
+        now = T1
+        with contextlib.closing(sqlite3.connect(self.bridge_db)) as conn:
+            conn.execute(
+                """
+                INSERT INTO bridge_sessions (
+                    session_id, source_profile, session_source, import_status,
+                    memory_type, useful_chat, decision_reason,
+                    first_seen_at, last_seen_at, updated_at, retry_count,
+                    event_id, event_id_range, episode_seq, capture_trigger,
+                    first_message_id, last_message_id, source_content_hash
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)
+                """,
+                (sid, "nemocoding", "cli", "discovered", "none", 0,
+                 "測試種子：非 default profile（防禦性情境）", now, now, now,
+                 event_id, event_id, 1, "manual", first, last, "a" * 64),
+            )
+            conn.commit()
+
+    def test_non_default_profile_episode_row_skipped_untouched(self):
+        ids = self.add_episode_session("sess_ep_nondefault", OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self._seed_non_default_episode_row("sess_ep_nondefault", first, last)
+        rows_before = self.all_rows()
+        result = self.run_import()
+
+        action = self.action_for(result, "sess_ep_nondefault")
+        self.assertEqual(action["action"], "unsupported_profile_fail_closed")
+        self.assertEqual(self.all_rows(), rows_before, "不改狀態、不落地")
+        self.assertEqual(self.inbox_files(), [])
+        self.assertIsNone(bridge_state.get_cursor("sess_ep_nondefault",
+                                                   db_path=self.bridge_db),
+                          "不動 cursor")
+
+
+class TestLegacyAndEpisodeCoexistInQueue(EpisodeImporterTestBase):
+    """矩陣 #12（importer 整批處理層級的驗證）：legacy 與 episode 記錄同一
+    批次處理，互不干擾（查重 needle 各自精確）。"""
+
+    def test_legacy_and_episode_process_independently_in_same_batch(self):
+        self.seed_discovered("sess_ok")  # legacy（既有 helper，session_id="sess_ok"）
+        ids = self.add_episode_session("sess_ep_batch", OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_episode("sess_ep_batch", first, last)
+
+        result = self.run_import()
+        self.assertEqual(result["counts"].get("to_inbox"), 2)
+        files = sorted(p.name for p in self.inbox_files())
+        self.assertEqual(files, sorted([
+            "hermes_session_sess_ok.md",
+            f"hermes_session_sess_ep_batch_ep{first}-{last}.md",
+        ]))
+        self.assertEqual(self.rec("sess_ok")["import_status"], "to_inbox")
+        self.assertEqual(
+            self.episode_rec("sess_ep_batch", first, last)["import_status"],
+            "to_inbox")
+
+
 class TestStaticAndCli(ImporterTestBase):
     """完成定義 7：尚未 enqueue、尚未 headless CoS、尚未 importer timer；
     另守住 scanner 同款的讀取邊界。"""
