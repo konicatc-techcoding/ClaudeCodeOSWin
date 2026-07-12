@@ -1,8 +1,9 @@
-# Stage 2.5 — Episode Triage & Queue Foundation（設計提案 v5）
+# Stage 2.5 — Episode Triage & Queue Foundation（設計提案 v6）
 
-日期：2026-07-12　狀態：**規劃提案 v5（待使用者核准，尚未開工；本版依使用者
-對 v4 的 3 點精確度回饋修正——並行 requeue 的 SQLite 語意、dispatch 措辭
-範圍、`actor` 驗證。仍只有 1 項真正的硬 start blocker，見第 18 節）**
+日期：2026-07-12　狀態：**規劃提案 v6（待使用者核准，尚未開工；本版修正
+`RequeueRetryableDBError` 測試設計中依賴真實 SQLite 鎖爭用時機的環境依賴
+措辭，改為決定性 fault-injection 測試設計。仍只有 1 項真正的硬 start
+blocker，見第 18 節）**
 負責規劃：`planning` domain
 負責領域（實作階段）：`engineering`（2.5a／2.5b／2.5c 全部程式碼與 schema、2.5d 驗收）；
 `automation` 在本階段角色接近零（本階段不安裝任何 timer）——分工理由見第 15 節。
@@ -10,11 +11,10 @@
 依賴文件（每次修訂前重新交叉核對，不猜測既有機制的行為）：
 [hermes-integration-roadmap.md](hermes-integration-roadmap.md) Stage 2 全節、
 [memory-bridge-state.md](memory-bridge-state.md)、[memory-taxonomy.md](memory-taxonomy.md)、
-`hermes/db.py`（本版新增查讀 `get_connection()`／`_db()` 實際 transaction
-語意，見第 4.1b 節）、`hermes/worker.py`、`hermes/bridge_importer.py`、
-`hermes/bridge_state.py`、`hermes/bridge_scanner.py`（`reconcile()`）、
-`.claude/skills/consolidate-memory/SKILL.md`、`hermes/adapter/invoke_cos.sh`、
-`registry/delegation_policy.yaml`。
+`hermes/db.py`（`get_connection()`／`_db()` 實際 transaction 語意，見第 4.1b 節）、
+`hermes/worker.py`、`hermes/bridge_importer.py`、`hermes/bridge_state.py`、
+`hermes/bridge_scanner.py`（`reconcile()`）、`.claude/skills/consolidate-memory/SKILL.md`、
+`hermes/adapter/invoke_cos.sh`、`registry/delegation_policy.yaml`。
 
 ## 版本標記（統一使用，不再混用）
 
@@ -32,27 +32,23 @@
   `requeue_dead_letter()` 改寫為 conditional UPDATE＋rowcount 檢查；把
   `hermes/worker.py` 的 source-specific dispatch 納入 2.5c 範圍；精確化
   「不能寫檔案」邊界；統一 blocker 敘事為只剩一項硬阻塞。
-- **v5** ＝本文件（本次修訂），依使用者 3 點精確度回饋修正：
-  1. **並行 requeue 的 SQLite 語意精確化**：v4 假設「輸家永遠乾淨拿到
-     `rowcount=0`」不完全正確——查讀 `hermes/db.py` 實際的 `_db()`／
-     `get_connection()` 後確認：連線用的是預設（deferred）transaction、
-     `timeout=30` 只處理一般鎖爭用，WAL 模式下仍可能發生
-     `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外，而不是乾淨的 0-row
-     UPDATE。v5 把 `requeue_dead_letter()` 的並行行為改寫為精確的四分支
-     狀態機（第 4.1c 節），新增 `RequeueRetryableDBError` 例外類別，明確
-     **不**修改共用 `_db()` 的全域鎖定策略（那會影響既有
-     `rss`／`telegram`／`cron` 路徑，超出本次範圍）。
-  2. **Dispatch 措辭範圍精確化**：把「Stage 2.5 不做 dispatch」這個容易
-     被誤讀成禁止第 7.5 節 worker 路由的籠統說法，改寫成明確區分
-     「Stage 2.6 的 domain／action dispatch（禁止）」與「2.5c 執行
-     triage job 本身所需的 worker source-specific execution routing
-     （允許，且是 2.5c 必要範圍）」。
-  3. **`actor` 驗證明確化**：`requeue_dead_letter()` 在任何 DB 操作之前
-     顯式拒絕空字串／純空白的 `actor`；CLI 用 argparse `required=True`，
-     不提供任何掩蓋身份的假預設值；實際寫入稽核表的值是 `strip()` 正規化
-     後的字串。
+- **v5** ＝第三次修訂：查讀 `hermes/db.py` 實際 transaction 語意後，把
+  `requeue_dead_letter()` 的並行行為改寫為四分支狀態機（新增
+  `RequeueRetryableDBError`）；把「不做 dispatch」拆成 Stage 2.6 domain
+  dispatch（禁止）與 2.5c worker execution routing（允許）兩層；`actor`
+  加上顯式驗證（空／純空白一律拒絕）。
+- **v6** ＝本文件（本次修訂），修正 v5 測試設計裡的一個精確度問題：
+  `RequeueRetryableDBError`（分支 4d）與其對照的分支 4c，原本的測試矩陣
+  第 21 項用「若測試環境中能穩定重現……」這種依賴真實 SQLite 鎖爭用時機
+  的措辭來描述，這與 2.5a DoD 宣稱「四個分支都有穩定測試覆蓋」互相矛盾
+  ——`SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 是否真的觸發，取決於 WAL 快照
+  時機、transaction 排序、OS 排程，不能是測試套件能不能穩定覆蓋的前提。
+  v6 把分支 4c／4d 的測試改寫為**決定性的 fault injection**（第 4.1d
+  節），並把真實並行的兩個 process／thread 整合測試**收斂為只驗證聚合
+  不變量**、不再假設哪一方會贏、也不要求重現特定的 SQLite 例外路徑。
+  測試矩陣與 2.5a DoD 同步更新（第 14、16 節）。
 
-以下所有章節內容即 v5 定案；凡與 v4 不同之處，第 19 節列出完整差異對照。
+以下所有章節內容即 v6 定案；凡與 v5 不同之處，第 19 節列出完整差異對照。
 
 ---
 
@@ -81,25 +77,24 @@
    不 enqueue 後續 job；真正的使用者核准與 domain 分派是 **Stage 2.6**，本提案
    只點名、不設計（約束 3、11）。
 
-   **v5 精確澄清（避免與第 7.5 節混淆，這是本次修正的重點之一）**：這條
-   鐵律禁止的是 **Stage 2.6 的 domain／action dispatch**——使用者核准
-   `action_candidate` 之後，呼叫對應 domain subagent 執行後續任務。
-   **第 7.5 節的 worker source-specific execution routing**（worker 依
-   `source` 決定呼叫 `invoke_cos_triage.sh` 還是既有的 `invoke_cos.sh`，
-   只是為了正確執行 triage job 本身）**不在此禁令範圍內**。兩者是不同
-   層級的「dispatch」：前者是**使用者核准後對 domain 的任務分派**（Stage
-   2.6 範圍，本提案不做也不設計）；後者只是 **job queue 內部決定「用哪個
-   呼叫入口執行同一個 triage job」**，不涉及呼叫任何 domain subagent、
-   不涉及使用者核准流程、也不會產生任何後續 job——它是 2.5c 執行 triage
-   本身的必要機制，正式列在本階段範圍內（第 7.5、13、16 節）。
+   **精確澄清（避免與第 7.5 節混淆）**：這條鐵律禁止的是 **Stage 2.6 的
+   domain／action dispatch**——使用者核准 `action_candidate` 之後，呼叫
+   對應 domain subagent 執行後續任務。**第 7.5 節的 worker
+   source-specific execution routing**（worker 依 `source` 決定呼叫
+   `invoke_cos_triage.sh` 還是既有的 `invoke_cos.sh`，只是為了正確執行
+   triage job 本身）**不在此禁令範圍內**。兩者是不同層級的「dispatch」：
+   前者是**使用者核准後對 domain 的任務分派**（Stage 2.6 範圍，本提案
+   不做也不設計）；後者只是 **job queue 內部決定「用哪個呼叫入口執行同一
+   個 triage job」**，不涉及呼叫任何 domain subagent、不涉及使用者核准
+   流程、也不會產生任何後續 job——它是 2.5c 執行 triage 本身的必要機制，
+   正式列在本階段範圍內（第 7.5、13、16 節）。
 
 一句話定位：**Stage 2.5 是「幫 to_inbox 內容打標籤」，不是「幫 to_inbox 內容做事」。**
 
-**本階段明確排除的範圍**（v5 精確化最後一項的措辭，避免與第 7.5 節混淆）：
-不排程 importer；不安裝任何新 timer；不擴充 `bridge_state.db` schema；
-不做「判斷要不要寫入 inbox」；**不做 Stage 2.6 的 domain／action
-dispatch**（不呼叫 domain subagent、不對 `action_candidate` 採取行動）。
-**這不包括**第 7.5 節 2.5c 執行 triage job 本身所需的 worker
+**本階段明確排除的範圍**：不排程 importer；不安裝任何新 timer；不擴充
+`bridge_state.db` schema；不做「判斷要不要寫入 inbox」；**不做 Stage 2.6 的
+domain／action dispatch**（不呼叫 domain subagent、不對 `action_candidate`
+採取行動）。**這不包括**第 7.5 節 2.5c 執行 triage job 本身所需的 worker
 source-specific execution routing——那是本階段範圍內、且必須實作的部分，
 理由見上方鐵律 3 的澄清段落。
 
@@ -252,9 +247,9 @@ constraint 擋下重複 insert）三種情境。
 
 ---
 
-## 4. Dead-letter recovery 機制（v5：並行安全狀態機改寫為四分支，新增 `actor` 顯式驗證）
+## 4. Dead-letter recovery 機制（v6：新增第 4.1d 節「決定性 fault injection 測試策略」，取代 v5 對分支 4c／4d 的環境依賴測試描述）
 
-### 4.1 決定：`requeue_dead_letter(job_id, actor, reason=None)` API（`hermes/db.py`，通用機制；v5 對 `actor` 加上顯式驗證）
+### 4.1 決定：`requeue_dead_letter(job_id, actor, reason=None)` API（`hermes/db.py`，通用機制）
 
 ```python
 def requeue_dead_letter(job_id: str, actor: str, reason: str | None = None) -> dict:
@@ -266,12 +261,11 @@ def requeue_dead_letter(job_id: str, actor: str, reason: str | None = None) -> d
     """
 ```
 
-**v5 新增的第一道檢查（在任何 DB 操作之前執行，回應使用者「明確拒絕空
-actor」的要求）**：函式一進入就驗證 `actor.strip()`——若結果是空字串
-（呼叫端傳入 `""`、或傳入純空白如 `"   "`），**立即拋出明確的驗證錯誤**
-（`ValueError`，訊息講清楚「actor 不得為空或純空白」），**在對 `jobs.db`
-做任何讀寫之前就擋下**——不開 transaction、不碰任何列、不寫任何稽核
-事件。實際寫入 `job_requeue_events.actor` 的值是**正規化後**
+**函式一進入就驗證 `actor.strip()`（在任何 DB 操作之前執行）**：若結果是
+空字串（呼叫端傳入 `""`、或傳入純空白如 `"   "`），**立即拋出明確的驗證
+錯誤**（`ValueError`，訊息講清楚「actor 不得為空或純空白」），**在對
+`jobs.db` 做任何讀寫之前就擋下**——不開 transaction、不碰任何列、不寫任何
+稽核事件。實際寫入 `job_requeue_events.actor` 的值是**正規化後**
 （`actor.strip()`）的字串，不是呼叫端傳入的原始（可能前後帶空白）字串。
 
 ### 4.1a `job_requeue_events`：新增的 append-only 稽核表（不變）
@@ -300,10 +294,10 @@ CREATE TABLE IF NOT EXISTS job_requeue_events (
   先 SELECT 取得，確保捕捉的是「這次 requeue 之前」的狀態，不是 requeue
   之後被重置的新值。
 
-### 4.1b `hermes/db.py` 實際的 transaction 語意（v5 新增查證，糾正 v4 對並行行為的過度簡化假設）
+### 4.1b `hermes/db.py` 實際的 transaction 語意（查證，糾正過度簡化的並行行為假設）
 
-v4 的並行安全描述隱含假設「並行呼叫的輸家一定乾淨地拿到 `rowcount=0`」。
-這個假設**不完全正確**——查讀 `hermes/db.py` 實際的
+早期版本隱含假設「並行呼叫的輸家一定乾淨地拿到 `rowcount=0`」。這個假設
+**不完全正確**——查讀 `hermes/db.py` 實際的
 `get_connection()`／`_db()` 程式碼（第 45–59 行）後確認：
 
 - `get_connection()`：`sqlite3.connect(DB_PATH, timeout=30)` ＋
@@ -331,17 +325,16 @@ v4 的並行安全描述隱含假設「並行呼叫的輸家一定乾淨地拿�
      固定了一個讀取快照，而另一個 transaction 在這之後、這個 transaction
      嘗試寫入之前搶先 commit 了對同一列的寫入，這個 transaction 的快照
      就變舊了，SQLite 會直接回報衝突（**不是**單純排隊等鎖，重試同一個
-     陳述式無法解決，必須整個 transaction 重開才能拿到新快照）。v4 的
-     設計完全沒有處理這種情況，會讓例外直接往外拋、行為未定義。
+     陳述式無法解決，必須整個 transaction 重開才能拿到新快照）。
 
-**明確決定（回應「不要改全域 `_db()`」的要求）**：**不把共用的 `_db()`
-改成全域 `BEGIN IMMEDIATE`**——那會改變 `rss`／`telegram`／`cron` 既有
-路徑（`enqueue`／`claim_next_job`／`mark_completed`／`mark_failed` 等）的
-鎖定行為，這些路徑目前運作穩定，不在本次修訂範圍內，貿然改變鎖定策略
-風險大於收益。`requeue_dead_letter()` 改為**自己在函式內部處理** busy／
+**明確決定（不要改全域 `_db()`）**：**不把共用的 `_db()` 改成全域
+`BEGIN IMMEDIATE`**——那會改變 `rss`／`telegram`／`cron` 既有路徑
+（`enqueue`／`claim_next_job`／`mark_completed`／`mark_failed` 等）的鎖定
+行為，這些路徑目前運作穩定，不在本次修訂範圍內，貿然改變鎖定策略風險
+大於收益。`requeue_dead_letter()` 改為**自己在函式內部處理** busy／
 snapshot 衝突，使用跟今天完全一樣、未經修改的 `_db()`／連線設定。
 
-### 4.1c 並行安全狀態機（v5 改寫為四分支，取代 v4 過度簡化的二分支版本）
+### 4.1c 並行安全狀態機（四分支）
 
 `requeue_dead_letter()` 的並行安全行為，精確定義為以下狀態機：
 
@@ -361,10 +354,9 @@ snapshot 衝突，使用跟今天完全一樣、未經修改的 `_db()`／連線
 3. **`rowcount == 0`，且沒有拋出例外**（乾淨的讀取——SQLite 成功評估了
    `WHERE` 條件、只是沒有列符合）：這個 job 在 `UPDATE` 當下就已經不是
    `dead_letter`（可能查無此 job、可能本來就不是 `dead_letter`）。**不
-   寫入任何 `job_requeue_events` 稽核列**，raise `RequeueRejected`
-   （不變）。
+   寫入任何 `job_requeue_events` 稽核列**，raise `RequeueRejected`。
 4. **`UPDATE` 執行期間拋出 `sqlite3.OperationalError`**（busy／snapshot
-   衝突——v4 沒有正確處理的情況）：
+   衝突）：
    a. 目前這個 transaction 直接 rollback（例外往外拋，`with conn:` 自動
       rollback；沒有任何東西被 commit 過，不需要額外復原動作）。
    b. 開一個**全新、獨立的唯讀查詢**（不是延續失敗的那個 transaction，
@@ -402,8 +394,46 @@ snapshot 衝突，使用跟今天完全一樣、未經修改的 `_db()`／連線
 - （驗證錯誤，見 4.1）`ValueError`：`actor` 為空或純空白，函式最前面就
   擋下，連 DB 都還沒碰。
 
-測試矩陣第 14 節第 21 項（v5 改寫）明確覆蓋分支 2、3、4c、4d 的聚合結果，
-不假設哪一方「贏」。
+### 4.1d 測試策略：決定性 fault injection（v6 新增——取代 v5 對分支 4c／4d 依賴真實 SQLite 鎖爭用時機的測試描述）
+
+**問題**：分支 4c／4d 都是「`UPDATE` 執行期間拋出
+`sqlite3.OperationalError`」之後才分岔的情境。`SQLITE_BUSY`／
+`SQLITE_BUSY_SNAPSHOT` 是否真的會在測試裡觸發，取決於 WAL 快照時機、
+transaction 排序、作業系統對兩個 process／thread 的排程——這些都是測試
+不應該依賴「環境配合才會發生」的不確定條件。一個寫著「如果測試環境剛好
+能穩定重現……」的測試案例，不是真正可靠的測試，也跟 2.5a DoD 宣稱「四個
+分支都有穩定測試覆蓋」互相矛盾。
+
+**要求（決定性 fault injection）**：`requeue_dead_letter()` 的實作必須在
+「執行 conditional `UPDATE` 陳述式」這一步留一個**可控制的注入點**——例如
+把實際執行該 `UPDATE` 的呼叫包成一個可替換的內部方法／函式，測試時用
+mock／monkeypatch 讓它在指定時機拋出指定的例外（模擬 `SQLITE_BUSY` 或
+`SQLITE_BUSY_SNAPSHOT`，測試不需要區分訊息內容，兩者在這個函式的處理邏輯
+裡走同一條路徑）。這個注入點：
+
+- **只服務測試，不改變正常執行路徑的任何行為**——正常路徑下這個方法就是
+  單純呼叫底層的 `conn.execute(...)`，測試才會替換它。
+- **不需要、也不允許改動共用的 `_db()`／連線設定**（呼應 4.1b 的既有
+  決定，兩者是分開的機制：4.1b 是「不改全域鎖定策略」，這裡是「在
+  `requeue_dead_letter()` 自己的程式碼裡開一個測試用的替換點」，範圍
+  嚴格限定在這一個函式內部）。
+- 讓分支 4c／4d 可以**各自獨立、每次執行都得到相同結果地**被觸發，不必
+  真的引發 SQLite 鎖爭用、不需要 `sleep()`、不需要仰賴哪個 process 先
+  執行到哪一行：
+  1. **分支 4c（busy 之後發現狀態已變）**：測試先安排 conditional
+     `UPDATE` 的呼叫拋出 fault-injected 的 `sqlite3.OperationalError`；
+     在 `requeue_dead_letter()` 內部觸發「重新查詢」之前，測試用另一個
+     獨立的直接 DB 操作，把該 job 的 `status` 改成非 `dead_letter`（例如
+     直接改成 `queued`），**決定性地**模擬「衝突當下、事實上已經被另一
+     個呼叫贏走」的情境，不需要真的跑第二個 process。
+  2. **分支 4d（busy 之後發現狀態未變）**：同樣讓 conditional `UPDATE`
+     拋出 fault-injected 例外，但**不**竄改該 job 的狀態——重新查詢時
+     `status` 仍然是 `dead_letter`，代表這次的例外純粹是暫時性 DB 爭用、
+     跟真正的狀態衝突無關。
+
+第 14 節第 21、22 項（分別對應分支 4c、4d）依此設計；第 23 項則是**真實
+的並行整合測試**，範圍收斂為只驗證聚合不變量，不依賴、也不要求重現任何
+特定的 SQLite 例外路徑（詳見第 14 節）。
 
 ### 4.2 `requeue_count`／`last_requeued_at` 與 `job_requeue_events` 的關係：**決定兩者並存，明確給出理由（不留模糊）**
 
@@ -436,7 +466,7 @@ snapshot 衝突，使用跟今天完全一樣、未經修改的 `_db()`／連線
   人工直接竄改（不經過這個函式）的異常情況下才可能分歧，那種情況下以
   `job_requeue_events` 的聚合結果為準。
 
-### 4.3 CLI 曝露方式（v5：明確 argparse 必填與拒絕空白的行為）
+### 4.3 CLI 曝露方式
 
 沿用 `hermes/db.py` 既有 CLI 的慣例，新增一個子指令：
 
@@ -471,11 +501,11 @@ python3 hermes/db.py requeue <job_id> --actor <identifier> [--reason "..."]
 
 ---
 
-## 6. 2.5b 候選 episode 資格判定（不變，沿用 v4 修正）
+## 6. 2.5b 候選 episode 資格判定（不變，沿用既有修正）
 
-### 6.1–6.4（判定依據，不變，沿用 v3 查證結果）
+### 6.1–6.4（判定依據，不變，沿用既有查證結果）
 
-- v3 已查證：`import_status` 的合法 enum 值含 `imported`，唯一寫入路徑是
+- 已查證：`import_status` 的合法 enum 值含 `imported`，唯一寫入路徑是
   人工執行的 `bridge_scanner.py reconcile()`；`consolidate-memory` 這個
   skill 完全不寫 `bridge_state.db`；`reconcile` 本身未排程。
 - 結論不變：**`import_status ∈ {'to_inbox', 'imported'}` 這個現在的狀態值
@@ -485,7 +515,7 @@ python3 hermes/db.py requeue <job_id> --actor <identifier> [--reason "..."]
   reconcile 回填）——Stage 2.5 的目的是幫「已被系統認可、值得留下」的
   內容做進一步分類，不是重新審視系統已經丟棄的內容。
 
-### 6.5 精確的候選資格條件（v4 修正：拿掉候選前置過濾條件，不變）
+### 6.5 精確的候選資格條件（不變）
 
 ```
 候選 episode = bridge_state.db 中同時滿足以下條件的列：
@@ -503,11 +533,11 @@ python3 hermes/db.py requeue <job_id> --actor <identifier> [--reason "..."]
       兩層防護不互相取代）
 ```
 
-**明確拿掉的條件（曾經有、v4 起移除）**：「jobs.db 尚未存在相同 identity
-的既有 job」**不是候選資格的過濾條件**——每一個滿足上述條件 1、2 的候選
-episode，2.5b 都必須無條件呼叫 `enqueue_once()`（或在 dry-run 模式下模擬
-呼叫，見第 6.6 節），由它做唯一權威判斷（created／exists／conflict），
-避免 `payload_hash` 內容漂移被候選層靜默略過。
+**明確拿掉的條件**：「jobs.db 尚未存在相同 identity 的既有 job」**不是
+候選資格的過濾條件**——每一個滿足上述條件 1、2 的候選 episode，2.5b 都
+必須無條件呼叫 `enqueue_once()`（或在 dry-run 模式下模擬呼叫，見第 6.6
+節），由它做唯一權威判斷（created／exists／conflict），避免
+`payload_hash` 內容漂移被候選層靜默略過。
 
 ### 6.6 `--dry-run` 必須模擬呼叫 `enqueue_once`，不能只列候選再另外推理（不變）
 
@@ -535,7 +565,7 @@ artifact 定位邏輯搜尋全部三個目錄，不依賴 `bridge_state.db` 認�
 
 ---
 
-## 7. Triage handler 設計（不變，沿用 v4 修正；第 7.5 節的 dispatch 範圍措辭見第 0 節澄清）
+## 7. Triage handler 設計（不變；第 7.5 節的 dispatch 範圍措辭見第 0 節澄清）
 
 ### 7.1 固定輸出 JSON schema（不變）
 
@@ -552,7 +582,7 @@ artifact 定位邏輯搜尋全部三個目錄，不依賴 `bridge_state.db` 認�
 Invalid JSON、缺欄位、多餘欄位、`decision` 不在 enum 內 → 一律 fail closed，
 由 2.5c 的程式碼把關（不是靠 prompt 文字要求模型自律）。
 
-### 7.2 決定：獨立入口點 `hermes/adapter/invoke_cos_triage.sh`；硬性要求（不變，沿用 v4 精確化「不能寫檔案」邊界）
+### 7.2 決定：獨立入口點 `hermes/adapter/invoke_cos_triage.sh`；硬性要求（不變）
 
 Stage 2.5c 使用一個**獨立、封閉的新入口點** `hermes/adapter/invoke_cos_triage.sh`，
 **不是**在既有 `hermes/adapter/invoke_cos.sh` 上加一個可以被忽略或忘記帶的
@@ -646,7 +676,7 @@ frontmatter `event_id_range`。找不到、找到超過一個、或 SHA-256 與
 `payload_hash` 不符 → 皆 fail closed。`jobs.db` 不存 episode 全文，只存
 `event_id`、artifact 位置提示、SHA-256、`prompt_version`。
 
-### 7.5 Worker 端 source-specific execution routing（不變，沿用 v4；措辭範圍見第 0 節澄清）
+### 7.5 Worker 端 source-specific execution routing（不變；措辭範圍見第 0 節澄清）
 
 `hermes/worker.py` 目前的 `process_job()` 對所有 job source 一視同仁：
 無論 `job['source']` 是什麼，一律組出 `cmd = [str(INVOKE_COS), prompt]`，
@@ -695,7 +725,7 @@ Stage 2.6 domain dispatch（不呼叫 domain subagent、不涉及使用者核准
 
 ---
 
-## 8. 模型／決定性契約（不變，沿用 v4）
+## 8. 模型／決定性契約（不變）
 
 | 參數 | 決定 | 說明 |
 |---|---|---|
@@ -707,16 +737,16 @@ Stage 2.6 domain dispatch（不呼叫 domain subagent、不涉及使用者核准
 | invalid 輸出如何處理 | fail closed（呼應第 7.1 節），視為執行失敗，走第 3.2 節 Option A 的死信流程 | 不變 |
 | 重跑時哪些欄位必須穩定 | 僅 `decision`、`suggested_owner`、輸出 schema 合法性、零副作用 | **明確不要求** `summary`／`reason` 逐字穩定 |
 
-**澄清（呼應「統一 blocker 敘事」的既有要求，v4 已定案，v5 沿用）**：上表
-「是否支援嚴格 JSON schema／structured output 強制」這一項**不是** start
-blocker——它是 2.5c 實作期間需要查驗、可能影響「加強冪等性保證」的一個
-技術決策，本設計從一開始就不依賴它（第 7.1 節的「程式碼事後驗證＋fail
-closed」才是唯一防線），即使查驗後發現不支援，2.5c 依然可以照本文件的
-設計開工。第 18 節只保留一項真正的硬阻塞。
+**澄清（統一 blocker 敘事）**：上表「是否支援嚴格 JSON schema／
+structured output 強制」這一項**不是** start blocker——它是 2.5c 實作
+期間需要查驗、可能影響「加強冪等性保證」的一個技術決策，本設計從一開始
+就不依賴它（第 7.1 節的「程式碼事後驗證＋fail closed」才是唯一防線），
+即使查驗後發現不支援，2.5c 依然可以照本文件的設計開工。第 18 節只保留
+一項真正的硬阻塞。
 
 ---
 
-## 9. 失敗與其他 recovery 情境（v5：措辭同步更新以反映四分支並行狀態機與 actor 驗證）
+## 9. 失敗與其他 recovery 情境（不變）
 
 - **enqueue 衝突**（相同 identity tuple 但 `payload_hash` 不同）：2.5b
   對每個候選都會呼叫 `enqueue_once`（第 6.6 節，不再靠候選前置過濾避開），
@@ -732,7 +762,8 @@ closed」才是唯一防線），即使查驗後發現不支援，2.5c 依然可
   `job_id` 呼叫 `requeue_dead_letter`，恰好一個成功；輸家依第 4.1c 節的
   四分支狀態機得到 `RequeueRejected`（不論是乾淨判定還是經過 busy 衝突
   重新查詢後判定）或（罕見情況）`RequeueRetryableDBError`（暫時性 DB
-  爭用，job 仍是 `dead_letter`，可自行決定要不要重試）。
+  爭用，job 仍是 `dead_letter`，可自行決定要不要重試）——第 4.1d 節與
+  第 14 節第 21–23 項定義了這些分支各自的決定性測試方式。
 - **crash-then-recover 不會造成重複**：`reap_stale_jobs` 回收卡在
   `running` 超過 10 分鐘的 job，因為 `attempts` 已在 `claim_next_job` 時
   遞增為 1、等於 `max_attempts`，回收時直接轉 `dead_letter`，不會重新排入
@@ -793,7 +824,7 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
 
 ---
 
-## 13. 分階段實作（v5：2.5a 補上 actor 驗證與四分支並行狀態機的測試要求）
+## 13. 分階段實作（v6：2.5a 回歸測試描述更新為決定性 fault-injection＋聚合整合測試）
 
 ### 2.5a — `jobs.db` migration ＋ `enqueue_once`／`requeue_dead_letter` API ＋回歸測試
 
@@ -808,15 +839,19 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
   - 依第 4.1c 節的**四分支並行安全狀態機**實作（含捕捉
     `sqlite3.OperationalError`、rollback、重新查詢、正規化為
     `RequeueRejected` 或 `RequeueRetryableDBError` 兩種結果）。
+  - 在「執行 conditional `UPDATE`」這一步留下第 4.1d 節要求的**可控制
+    測試注入點**，讓分支 4c／4d 可以用決定性 fault injection 測試。
   - **明確不修改共用 `_db()` 的全域 transaction／鎖定策略**（第 4.1b
     節的決定）。
 - 回歸測試：`rss`／`telegram`／`cron` 既有行為零回歸；exactly-once 三分支；
   並行呼叫 `enqueue_once` 只產生一筆 job；`requeue_dead_letter` 對非
   `dead_letter` 狀態一律拒絕且不寫稽核列；requeue 後 identity／
   `payload_hash`／`prompt_version` 不變、`attempts` 歸零、`requeue_count`
-  遞增、`job_requeue_events` 正確寫入；**並行呼叫 `requeue_dead_letter`
-  的聚合結果測試**（第 14 節第 21 項，涵蓋 busy／snapshot 情境）；
-  **`actor` 驗證測試**（第 14 節第 28–30 項）。
+  遞增、`job_requeue_events` 正確寫入；**三種決定性 fault-injection 測試
+  類別**（第 14 節第 8、21、22 項：conditional-update 乾淨落空／busy 後
+  發現已被搶先／busy 後發現狀態未變）**＋一個只驗證聚合結果的真實並行
+  整合測試**（第 14 節第 23 項）；**`actor` 驗證測試**（第 14 節第
+  30–32 項）。
 
 ### 2.5b — 手動 enqueuer CLI
 
@@ -868,7 +903,7 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
 
 ---
 
-## 14. 測試矩陣（v5：改寫第 21 項為四分支並行狀態機測試；新增第 28–30 項 actor 驗證）
+## 14. 測試矩陣（v6：拿掉依賴環境時機的措辭，改寫為決定性 fault-injection 分類；新增第 21–23 項，第 8 項加註分類標籤，第 24 項起順延）
 
 1. 既有 `rss`／`telegram`／`cron` job 的建立、claim、完成、失敗、reap 全部
    行為不受影響（回歸測試）。
@@ -886,8 +921,11 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
    更新，identity／`payload_hash`／`prompt_version`／`payload` 不變；
    `job_requeue_events` 新增一列，`previous_error`／`previous_attempts`
    正確捕捉 requeue **之前**的值，`actor`／`reason` 正確寫入。
-8. `requeue_dead_letter` 對 `queued`／`running`／`completed` 狀態的 job
-   一律拒絕（`rowcount=0` 判定），不修改任何欄位、**不寫入任何
+8. **（決定性測試分類 1：conditional-update 乾淨落空，無例外）**
+   `requeue_dead_letter` 對 `queued`／`running`／`completed` 狀態（或查無
+   此 job_id）的 job 一律拒絕（`rowcount=0`，沒有拋出任何例外——這本身就
+   是決定性情境，不需要 fault injection，直接用非 `dead_letter` 狀態的
+   job 呼叫即可每次重現），不修改任何欄位、**不寫入任何
    `job_requeue_events` 稽核列**。
 9. 這個 job source 從未使用 `thread_id`／`--resume`。
 10. Episode 檔案被 N-gate 移到 `.processed/` 之後，2.5c 仍能依序搜尋三個
@@ -912,50 +950,73 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
 20. **（僅在第 18 節唯一 blocker 解除、確認技術機制後才可執行）** 故意在
     episode 內容中誘導呼叫某個工具，斷言呼叫在技術層面被拒絕／不可能
     發生，而不是只斷言「模型選擇不呼叫」。
-21. **（v5 改寫，涵蓋 busy／snapshot 衝突的正確分類，不假設固定的執行
-    順序）** 兩個並行呼叫對同一 `job_id` 呼叫 `requeue_dead_letter`——
-    測試斷言**聚合結果**，不假設哪一個呼叫端「贏」：
-    - 恰好一個呼叫成功（走到第 4.1c 節分支 2，job 變成 `queued`）。
-    - 總共**恰好新增一列** `job_requeue_events`（不是兩列、不是零列）。
+21. **（決定性測試分類 2：busy 之後發現狀態已變，取代舊版依賴真實排程
+    競爭的描述）** 依第 4.1d 節的注入點，強制讓 conditional `UPDATE` 拋出
+    fault-injected 的 `sqlite3.OperationalError`（代表 `SQLITE_BUSY` 或
+    `SQLITE_BUSY_SNAPSHOT`，測試不需要區分是哪一種）；測試在
+    `requeue_dead_letter()` 觸發重新查詢之前，用另一個獨立的直接 DB
+    操作把該 job 的 `status` 改成非 `dead_letter`（決定性地模擬「已被
+    搶先」，不使用 `sleep()` 或依賴真實排程）。斷言：
+    - 結果是 `RequeueRejected`（不是 `RequeueRetryableDBError`）。
+    - 這次呼叫**不**新增任何 `job_requeue_events` 稽核列。
+    - 這次呼叫本身**不**改動 `jobs.requeue_count`／`last_requeued_at`
+      （這兩者若有變化，只可能是測試自己模擬的「搶先者」那次操作造成的，
+      不是這次被拒絕的呼叫造成的）。
+    - 不會建立第二筆 job。
+22. **（決定性測試分類 3：busy 之後發現狀態未變，取代 v5 帶有「若測試
+    環境中能穩定重現」這種環境依賴措辭的舊版第 21 項）** 依第 4.1d 節的
+    注入點，強制讓 conditional `UPDATE` 拋出同一種 fault-injected
+    `sqlite3.OperationalError`，但**不**竄改該 job 的狀態——重新查詢時
+    `status` 仍是 `dead_letter`。斷言（逐項對應完整清單，這個測試必須
+    每次執行都得到相同結果，不依賴 SQLite 鎖爭用是否真的發生）：
+    - job 的 `status` 仍是 `dead_letter`（未被轉換成 `queued`）。
+    - `requeue_count` 不變。
+    - `last_requeued_at` 不變。
+    - **零筆**新增的 `job_requeue_events` 列。
+    - 原本的失敗資訊（`error_message`／`result`／`cost_usd` 等）沒有被
+      清空。
+    - 沒有在同一 identity 下建立第二筆 job。
+    - conditional `UPDATE` 沒有被自動重試（可斷言底層呼叫次數恰好一次）。
+    - 回傳／拋出的是 `RequeueRetryableDBError`，**不得**被誤報成
+      `RequeueRejected`（也就是不得被誤判為「已被別的並行 requeue 搶
+      走」）。
+23. **（真實並行整合測試——範圍收斂為只驗證聚合不變量，不假設哪一條
+    SQLite 例外路徑會實際發生，也不假設哪一方贏）** 兩個真正的
+    process／thread 同時對同一 `job_id` 呼叫 `requeue_dead_letter`
+    （真實競爭，**不**做 fault injection、**不**用 `sleep()` 或固定
+    執行順序去人為製造勝負）。測試**只**斷言以下聚合結果——分支 4c／4d
+    各自的細節分流已經由第 21、22 項的決定性 fault-injection 測試覆蓋，
+    這個整合測試不重複驗證那些細節、也不要求重現特定的 SQLite 例外：
+    - 至多一個呼叫成功完成 requeue。
+    - 最終**恰好新增一列** `job_requeue_events`。
     - `requeue_count` 恰好遞增一次。
-    - 輸家的結果**必須**是 `RequeueRejected`——不論輸家是直接撞到乾淨的
-      `rowcount=0`（分支 3），還是先撞到 `sqlite3.OperationalError`、
-      經過分支 4 的重新查詢確認 `status` 已不是 `dead_letter`（分支
-      4c）才歸類成 `RequeueRejected`，測試都必須驗證最終結果正確——
-      **busy／snapshot 錯誤不得被誤報成「已被別人 requeue」而略過重新
-      查詢這一步就直接下結論**。
-    - 若測試環境中能穩定重現分支 4d（job 仍是 `dead_letter`、但撞到
-      暫時性 DB 爭用），需驗證這種情況拋出的是 `RequeueRetryableDBError`
-      而不是 `RequeueRejected`，且同樣不寫入任何 `job_requeue_events`
-      列（因為 job 並未真的被轉換狀態）。
-22. 2.5b 候選查詢：一筆 artifact 內容已與 `jobs.db` 既有 `payload_hash`
+    - 沒有建立重複的 job。
+24. 2.5b 候選查詢：一筆 artifact 內容已與 `jobs.db` 既有 `payload_hash`
     不同的候選（模擬內容漂移），**必須**仍然出現在候選集合裡並被呼叫
     `enqueue_once`，結果分類為 `conflict`——驗證候選層不會把它靜默濾掉。
-23. `--dry-run` 對每個候選都執行「模擬 `enqueue_once`」的三分支分類
+25. `--dry-run` 對每個候選都執行「模擬 `enqueue_once`」的三分支分類
     （created／exists／conflict），且分類結果與真實模式跑出來的結果一致。
-24. Worker `process_job()` 對 `source='bridge_episode_triage'` 的 job
+26. Worker `process_job()` 對 `source='bridge_episode_triage'` 的 job
     正確路由到 `invoke_cos_triage.sh`、套用 triage 專屬 timeout、絕不帶
     `--resume`；對其餘既有 source 的行為零回歸。
-25. `invoke_cos_triage.sh` 不存在，或呼叫前的安全前置檢查失敗 → worker
+27. `invoke_cos_triage.sh` 不存在，或呼叫前的安全前置檢查失敗 → worker
     直接 `mark_failed`，**絕不 fallback** 呼叫 `invoke_cos.sh`。
-26. Triage 專屬 timeout（第 8 節建議值）實際生效——構造一個會超過 triage
+28. Triage 專屬 timeout（第 8 節建議值）實際生效——構造一個會超過 triage
     timeout 但仍在通用 `JOB_TIMEOUT_SECONDS` 之內的情境，驗證 job 依
     triage timeout 判定逾時，而不是套用通用 timeout。
-27. 兩面性邊界測試：同一次執行裡，同時驗證 (a) queue infrastructure 層的
+29. 兩面性邊界測試：同一次執行裡，同時驗證 (a) queue infrastructure 層的
     寫入確實發生（`jobs.db` 的 `result`／`status` 被正確更新、per-job
     log 檔有附加內容），**與** (b) handler-controlled 的路徑
     （`memory/inbox/`、`memory/*.md`、`bridge_state.db`、workspace
     artifact 本身）寫入次數為零——不是只斷言「handler 零寫入」，而是同一
     測試裡兩邊都要驗證到，確認兩者沒有被混淆或誤傷。
-28. **（v5 新增）** `actor` 為空字串（`""`）呼叫 `requeue_dead_letter` →
+30. `actor` 為空字串（`""`）呼叫 `requeue_dead_letter` →
     拒絕（`ValueError`），不碰 `jobs.db`（不開 transaction）、不寫入任何
     `job_requeue_events` 列。
-29. **（v5 新增）** `actor` 為純空白（例如 `"   "`）→ 同上，拒絕，行為與
-    空字串一致。
-30. **（v5 新增）** `actor` 為正常非空字串、前後可能帶空白（例如
-    `" cli:alice "`）→ 接受，requeue 成功；`job_requeue_events.actor`
-    儲存的值是 `strip()` 後的正規化字串（`"cli:alice"`），不是帶空白的
-    原始輸入。
+31. `actor` 為純空白（例如 `"   "`）→ 同上，拒絕，行為與空字串一致。
+32. `actor` 為正常非空字串、前後可能帶空白（例如 `" cli:alice "`）→
+    接受，requeue 成功；`job_requeue_events.actor` 儲存的值是 `strip()`
+    後的正規化字串（`"cli:alice"`），不是帶空白的原始輸入。
 
 ---
 
@@ -970,7 +1031,7 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 
 ---
 
-## 16. 完成定義（Definition of Done，逐子階段，v5 更新）
+## 16. 完成定義（Definition of Done，逐子階段，v6：拿掉環境依賴措辭，改為決定性 fault-injection 分類與聚合整合測試並列）
 
 ### 2.5a DoD
 
@@ -978,16 +1039,22 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
   `job_requeue_events`）。
 - `enqueue_once` 三分支皆有測試覆蓋，含「同 episode 不同 `prompt_version`
   建立新 job」的測試（第 14 節第 5 項）。
-- `requeue_dead_letter` 的 `actor` 驗證（第 14 節第 28–30 項）、四分支
-  並行安全狀態機（rowcount 檢查＋`sqlite3.OperationalError` 捕捉與正規化，
-  第 14 節第 21 項）、拒絕邏輯、稽核列正確寫入（`previous_error`／
+- `requeue_dead_letter` 的 `actor` 驗證（第 14 節第 30–32 項）、四分支
+  並行安全狀態機皆有測試覆蓋，且**分支 4c／4d 的測試是決定性的
+  fault-injection（第 14 節第 21、22 項），完全不依賴真實 SQLite 鎖爭用
+  是否在測試環境中發生、不使用 `sleep()`、不依賴特定的 process 排程
+  順序**；拒絕邏輯、稽核列正確寫入（`previous_error`／
   `previous_attempts`／`actor`／`reason`）皆有測試覆蓋（第 14 節第 7、
   8 項）。
-- **並行呼叫 `requeue_dead_letter` 的聚合結果測試**（第 14 節第 21 項：
-  恰好一個成功、恰好一列稽核、`requeue_count` 恰好遞增一次、busy／
-  snapshot 衝突不被誤報）通過。
+- **三種決定性 fault-injection 測試類別全數通過**（第 14 節第 8、21、
+  22 項：conditional-update 乾淨落空／busy 後發現已被搶先／busy 後發現
+  狀態未變），**且真實並行整合測試也通過**（第 14 節第 23 項：至多一個
+  成功、恰好一列稽核、`requeue_count` 恰好遞增一次、不假設哪一方贏、不
+  要求重現特定 SQLite 例外——這個整合測試的職責範圍明確收斂為聚合結果，
+  細節分流的正確性由前述三個決定性測試負責）。
 - **`RequeueRejected`／`RequeueRetryableDBError` 兩種例外類別行為正確
-  區分**（不得混淆）。
+  區分**（不得混淆——第 22 項明確驗證暫時性爭用不會被誤報成
+  `RequeueRejected`）。
 - 明確驗證共用 `_db()` 的全域 transaction／鎖定策略**沒有被改動**——既有
   `rss`／`telegram`／`cron` 全部既有測試套件零回歸，含三元組 NULL 語義
   驗證（第 14 節第 14 項）。
@@ -997,10 +1064,10 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 ### 2.5b DoD
 
 - `--dry-run` 對 `jobs.db` 零寫入，且對每個候選都執行「模擬
-  `enqueue_once`」三分支分類，分類結果與真實模式一致（第 14 節第 23 項）。
+  `enqueue_once`」三分支分類，分類結果與真實模式一致（第 14 節第 25 項）。
 - 候選資格判定依第 6.5 節（**僅** `import_status ∈ {to_inbox, imported}`
   ＋ artifact 可唯一定位，**不再**預先過濾 jobs.db 既有 identity），並
-  通過第 14 節第 12、13、22 項測試（`imported` 狀態不漏、
+  通過第 14 節第 12、13、24 項測試（`imported` 狀態不漏、
   `failed`/`needs_review`/`skipped` 不誤入、內容漂移不被候選層靜默濾掉）。
 - 只讀 `bridge_state.db`，不寫入。
 - 不呼叫任何模型。
@@ -1017,12 +1084,12 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 - 套用第 8 節鎖定的模型／決定性契約參數（capability、timeout、最大輸入
   長度）。
 - **`hermes/worker.py` 的 source-specific execution routing 已實作並
-  測試**（第 14 節第 24、25、26 項：triage source 正確路由＋專屬
+  測試**（第 14 節第 26、27、28 項：triage source 正確路由＋專屬
   timeout 生效＋missing entry point／安全檢查失敗時 fail closed 不
   fallback；其餘 source 零回歸）——這條邏輯明確不是 Stage 2.6 的 domain
   dispatch（第 0 節澄清）。
 - Prompt injection 測試通過。
-- **精確的寫入邊界測試通過（第 14 節第 27 項）**：queue infrastructure
+- **精確的寫入邊界測試通過（第 14 節第 29 項）**：queue infrastructure
   層寫入正確發生，同時 handler-controlled 路徑零寫入——兩者在同一測試
   裡都要驗證到。
 - 冪等性測試（僅鎖定 `decision`／`suggested_owner`）通過。
@@ -1075,12 +1142,11 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 
 ---
 
-## 19. 與前版（v4）差異對照（完整 v1–v4 血緣見文件開頭「版本標記」一節）
+## 19. 與前版（v5）差異對照（完整 v1–v5 血緣見文件開頭「版本標記」一節）
 
-| 面向 | v4 | v5（本文件） |
+| 面向 | v5 | v6（本文件） |
 |---|---|---|
-| 並行 requeue 的 SQLite 語意 | 假設輸家永遠乾淨拿到 `rowcount=0`（二分支：成功／拒絕） | **查讀 `hermes/db.py` 實際 `_db()`／`get_connection()` 後改寫為四分支狀態機**：成功／乾淨拒絕／busy 衝突後重新查詢確認已被搶先（正規化為拒絕）／busy 衝突但仍是 dead_letter（新例外 `RequeueRetryableDBError`，呼叫端自行決定是否重試）；明確不改動共用 `_db()` 的全域鎖定策略 |
-| Dispatch 措辭範圍 | 「不做 dispatch」籠統敘述，容易被誤讀成禁止 §7.5 的 worker 路由 | **明確拆成兩層**：Stage 2.6 的 domain／action dispatch（禁止，本階段範圍外）vs 2.5c 執行 triage job 本身所需的 worker source-specific execution routing（允許，且是 2.5c 必要範圍）；§0、§7.5、§13、Stage 2.6 小節措辭同步修正 |
-| `actor` 驗證 | 口頭要求「不留空、不猜測」，未定義具體驗證邏輯與例外行為 | **明確定義**：函式進入時立即驗證 `actor.strip()` 非空，空／純空白一律 `ValueError`（先於任何 DB 操作）；CLI 用 `argparse required=True`、不提供假預設值；稽核表儲存的是 `strip()` 正規化後的值 |
-| 測試矩陣 | 21 項覆蓋並行 requeue（假設二分支） | **第 21 項改寫**為聚合結果導向、涵蓋四分支的測試描述；**新增第 28–30 項**覆蓋 actor 空值／純空白／正常值三種情況 |
-| 新例外類別 | 僅 `RequeueRejected` | **新增 `RequeueRetryableDBError`**（暫時性 DB 爭用、job 仍是 dead_letter 時使用，呼叫端自行決定是否重試，函式本身不自動重試） |
+| 分支 4c／4d 的測試方式 | 測試矩陣第 21 項用「若測試環境中能穩定重現分支 4d……」這種依賴真實 SQLite 鎖爭用時機的措辭 | **改為決定性 fault injection**（新增第 4.1d 節）：在 conditional `UPDATE` 這一步留可控制的注入點，用 mock／monkeypatch 決定性地觸發 `sqlite3.OperationalError`，並各自決定性地安排「狀態已變」或「狀態未變」兩種情境，不依賴真實排程競爭、不使用 `sleep()` |
+| 測試矩陣分類 | 單一第 21 項混合描述聚合結果＋busy 情境，且對 4d 帶有環境依賴的hedge | **拆成三個決定性分類＋一個聚合整合測試**：第 8 項（分類 1：乾淨 rowcount=0）、第 21 項（分類 2：busy 後狀態已變 → `RequeueRejected`）、第 22 項（分類 3：busy 後狀態未變 → `RequeueRetryableDBError`，附完整斷言清單）、第 23 項（真實並行整合測試，範圍收斂為只驗證聚合不變量，不假設哪一方贏、不要求重現特定 SQLite 例外） |
+| 2.5a DoD 與測試矩陣的一致性 | DoD 宣稱「四分支都有穩定測試覆蓋」，但測試矩陣對其中一支帶有環境依賴的 hedge，兩者互相矛盾 | **DoD 明確要求分支 4c／4d 的測試必須是決定性 fault-injection，完全不依賴環境**，與測試矩陣的三個決定性分類＋一個聚合整合測試一一對應，不再矛盾 |
+| 後續項目編號 | 第 22–30 項 | 因新增兩項決定性測試（原第 21 項拆成三項），**全部順延為第 24–32 項**，內容不變，只有編號與交叉引用同步更新 |
