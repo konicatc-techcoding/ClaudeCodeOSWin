@@ -3,7 +3,7 @@
 日期：2026-07-09　狀態：**格式 v2（2026-07-11 升版，22 欄＋`bridge_cursors`）／
 ✅ 全鏈路已完成並上線（2026-07-12，schema／scanner／importer／migration／
 部署，見 roadmap Stage 2.4d 與第一筆正常 episode 端到端驗收）／
-第 9 節（2026-07-12，2026-07-12 第三次修訂為對齊 Stage 2.5 提案 v4）：與
+第 9 節（2026-07-12，2026-07-12 第四次修訂為對齊 Stage 2.5 提案 v5）：與
 Stage 2.5（`jobs.db` triage）的邊界說明，不涉及本檔案 schema 變更**
 負責領域：`engineering`
 
@@ -15,7 +15,7 @@ legacy session-level 記錄），要記下「處理到哪、判定成什麼、�
 （`claudecodeos.bridge_state.v2`）。Episode capture 完整設計見
 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
 （已核准，規格正本）；本文件第 8 節只記與 v1 的差異摘要與交叉引用，細節不重複維護。
-Stage 2.5（Episode Triage & Queue Foundation，目前為 **v4** 規劃提案）的完整設計見
+Stage 2.5（Episode Triage & Queue Foundation，目前為 **v5** 規劃提案）的完整設計見
 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)——
 **本檔案不因 Stage 2.5 新增任何欄位**，第 9 節只記交叉邊界說明。
 
@@ -49,7 +49,7 @@ Stage 2.5（Episode Triage & Queue Foundation，目前為 **v4** 規劃提案）
    生命週期（enqueue／執行／重試／dead-letter／人工 requeue／requeue 稽核）
    是 `hermes/jobs.db` 的職責，與本檔案是兩份正交、互不寫入的簿記
    （2026-07-12 因 Stage 2.5 規劃明文補上這條聲明；完整說明見第 9 節，
-   Stage 2.5 提案 v4 收斂後 `jobs.db` 這側新增了 identity 三元組、
+   Stage 2.5 提案 v5 收斂後 `jobs.db` 這側新增了 identity 三元組、
    dead-letter recovery 兩欄，以及一張獨立的 append-only 稽核表
    `job_requeue_events`，本檔案依然不受影響、不新增任何欄位）。
 
@@ -356,9 +356,9 @@ inbox 已存在該 sid 的 `_ep` 落地檔」時，**拒切**並回報「請先�
 [stage2.4d-episode-capture-proposal.md](stage2.4d-episode-capture-proposal.md)
 第 8.1 節，本文件不重複維護第二份順序。
 
-## 9. 與 `jobs.db` 的邊界（Stage 2.5，2026-07-12 補充，2026-07-12 第三次修訂對齊提案 v4；**不涉及本檔案 schema 變更**）
+## 9. 與 `jobs.db` 的邊界（Stage 2.5，2026-07-12 補充，2026-07-12 第四次修訂對齊提案 v5；**不涉及本檔案 schema 變更**）
 
-Stage 2.5（Episode Triage & Queue Foundation，規劃提案目前為 **v4**，見
+Stage 2.5（Episode Triage & Queue Foundation，規劃提案目前為 **v5**，見
 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)）
 引入了一條新的、對 `to_inbox`／`imported` episode 做唯讀結構化分診的側支線，
 它的 job 生命週期（enqueue、claim、attempts、backoff、dead_letter、人工
@@ -371,15 +371,17 @@ requeue、requeue 稽核）記在 `hermes/jobs.db`，**不是**本檔案。這�
   requeue 是誰做的、為什麼」。這些資訊完全可以從 `jobs.db` 用
   `(source='bridge_episode_triage', external_key=<event_id>,
   prompt_version=<版本>)` 查到，不需要在兩份 DB 之間維護平行狀態。
-  **v4 更新**：`jobs.db` 這側因為新設計了 dead-letter 人工復原機制，除了
-  v3 已新增的 `requeue_count`／`last_requeued_at` 兩欄（連同識別用的
+  **v5 更新**：`jobs.db` 這側因為新設計了 dead-letter 人工復原機制，除了
+  已新增的 `requeue_count`／`last_requeued_at` 兩欄（連同識別用的
   `external_key`／`payload_hash`／`prompt_version` 三欄，共五欄，一次
-  migration 加入）之外，v4 **再新增一張獨立的 append-only 稽核表
-  `job_requeue_events`**（`job_id`／`requeue_seq`／`requeued_at`／
+  migration 加入）之外，還新增了一張獨立的 append-only 稽核表
+  `job_requeue_events`（`job_id`／`requeue_seq`／`requeued_at`／
   `actor`／`reason`／`previous_error`／`previous_attempts`），作為
   requeue 操作的稽核正本（`jobs` 表上的兩個聚合欄位只是可推導的快取）。
-  這些全部是 `jobs.db` 自己的欄位／表，**與本檔案完全無關**，在此列出
-  只是讓交叉引用保持最新，不代表本檔案有任何變動。
+  `requeue_dead_letter()` 本身的並行安全行為與 `actor` 驗證規則，已改寫為
+  精確的四分支狀態機（含新例外類別 `RequeueRetryableDBError`），見提案
+  第 4 節。這些全部是 `jobs.db` 自己的欄位／表／函式行為，**與本檔案完全
+  無關**，在此列出只是讓交叉引用保持最新，不代表本檔案有任何變動。
 - 第 3 節既有的「`retry_count` 與 `hermes/db.py` 的 `jobs.attempts` 不同層、
   不互通」立場，在 Stage 2.5 引入 `jobs.db` 新的
   `(source, external_key, prompt_version)` 三元組去重機制、以及新的
@@ -393,15 +395,15 @@ requeue、requeue 稽核）記在 `hermes/jobs.db`，**不是**本檔案。這�
   查證確認 `imported` 這個狀態值只能由人工執行的 `bridge_scanner.py
   reconcile` 依 `.processed/` 目錄真相回填，而 `consolidate-memory` 本身
   完全不寫本檔案，見第 3 節新增的說明），**不需要**本檔案新增任何時間戳
-  或狀態轉換歷史欄位就能正確回答。**提案 v4 額外澄清**：這個候選查詢只讀
-  本檔案的狀態與掃描 `memory/inbox/` 目錄，**不**對 `jobs.db` 做任何前置
-  過濾——「這個 episode 是否已經 enqueue 過」完全交給 `jobs.db` 自己的
-  `enqueue_once()` 判斷，不會影響本檔案的候選定義，本檔案這條交叉引用
-  維持不變。
+  或狀態轉換歷史欄位就能正確回答。這個候選查詢只讀本檔案的狀態與掃描
+  `memory/inbox/` 目錄，**不**對 `jobs.db` 做任何前置過濾——「這個
+  episode 是否已經 enqueue 過」完全交給 `jobs.db` 自己的 `enqueue_once()`
+  判斷，不會影響本檔案的候選定義，本檔案這條交叉引用維持不變。
 - 完整設計（`jobs.db` 的 schema migration、`enqueue_once`／
-  `requeue_dead_letter` API 與其 atomic conditional 語意、
+  `requeue_dead_letter` API 與其四分支並行安全狀態機、
   `job_requeue_events` 稽核表、exactly-once／at-most-one-automatic-attempt
   語意、triage handler 的最小權限設計、`hermes/worker.py` 的
-  source-specific dispatch 等）一律以
+  source-specific execution routing、Stage 2.6 domain dispatch 與 2.5c
+  worker routing 的範圍區分等）一律以
   [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)
-  （目前 v4）為規格正本，本文件不重複維護第二份。
+  （目前 v5）為規格正本，本文件不重複維護第二份。

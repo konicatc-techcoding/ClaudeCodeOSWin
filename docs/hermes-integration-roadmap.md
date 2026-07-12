@@ -25,6 +25,17 @@ state transition；把 `hermes/worker.py` 的 source-specific dispatch 正式
 infrastructure 層）；**統一 blocker 敘事——v4 現在只剩一項真正的硬 start
 blocker**（no-tools 技術強制力，見提案第 18 節），另一項移為 2.5c 實作期間
 的技術決策（提案第 8 節）。
+**更新（2026-07-12，第四次）**：Stage 2.5 提案依使用者 3 點精確度回饋收斂為
+**v5**——(1) 並行 requeue 的 SQLite 語意精確化：查讀 `hermes/db.py` 實際的
+`_db()`／`get_connection()` 後確認並行呼叫的輸家不一定乾淨拿到
+`rowcount=0`，WAL 模式下可能撞到 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT`，
+`requeue_dead_letter()` 改寫為四分支並行安全狀態機（新增
+`RequeueRetryableDBError` 例外類別），明確不改動共用 `_db()` 的全域鎖定
+策略；(2) 把「不做 dispatch」的籠統措辭拆成兩層——Stage 2.6 的 domain／
+action dispatch（禁止）vs 2.5c 執行 triage job 本身所需的 worker
+source-specific execution routing（允許、屬本階段必要範圍），避免誤讀；
+(3) `requeue_dead_letter()` 的 `actor` 參數新增顯式驗證（空字串／純空白
+一律拒絕，先於任何 DB 操作），CLI 不提供任何掩蓋身份的假預設值。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -315,43 +326,35 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
 
 ---
 
-## Stage 2.5 — Episode Triage & Queue Foundation（規劃中，2026-07-12 提案，目前 v4）
+## Stage 2.5 — Episode Triage & Queue Foundation（規劃中，2026-07-12 提案，目前 v5）
 
-**狀態**：規劃提案 **v4**，**待使用者核准，尚未開工**。完整設計正本：
+**狀態**：規劃提案 **v5**，**待使用者核准，尚未開工**。完整設計正本：
 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)（`planning`
 domain 起草，交叉核對本文件、[memory-bridge-state.md](memory-bridge-state.md)、
 [memory-taxonomy.md](memory-taxonomy.md)、`hermes/db.py`、`hermes/worker.py`、
 `hermes/bridge_importer.py`、`hermes/bridge_state.py`、`hermes/bridge_scanner.py`、
 `.claude/skills/consolidate-memory/SKILL.md`、`registry/delegation_policy.yaml` 後定稿）。
 
-**v4 是依使用者 8 點精確度回饋對 v3 的修正版本**，重點決定：
+**v5 是依使用者 3 點精確度回饋對 v4 的修正版本**，重點決定：
 
-- **2.5b 候選資格**：episode 曾合法到達 `to_inbox`，目前 bridge 狀態可為
-  `to_inbox` 或 `imported`，且 artifact 可在 `memory/inbox/`／
-  `.processed/`／`.failed/` 三目錄中被唯一定位到——**不再**額外要求
-  「jobs.db 尚無既有 identity」這個前置過濾條件；每個滿足前述條件的候選，
-  一律呼叫（或 dry-run 模擬呼叫）`enqueue_once()`，由它做唯一權威判斷
-  （created／exists／conflict），避免 `payload_hash` 內容漂移被候選層
-  靜默略過。
-- **Dead-letter recovery**：新增 append-only 稽核表 `job_requeue_events`
-  （`job_id`／`requeue_seq`／`requeued_at`／`actor`／`reason`／
-  `previous_error`／`previous_attempts`），`requeue_dead_letter()` 改寫為
-  atomic conditional state transition
-  （`UPDATE ... WHERE status='dead_letter'`＋`rowcount` 檢查），確保並行
-  requeue 呼叫恰好一個成功；`jobs.requeue_count`／`last_requeued_at` 明確
-  定位為可從稽核表推導的 denormalized 快取，正本是稽核表。
-- **Worker dispatch**：正式把 `hermes/worker.py` 的 source-specific
-  dispatch 邏輯納入 2.5c 範圍——triage source 走獨立入口點
-  `invoke_cos_triage.sh`、專屬 timeout、絕不 resume、呼叫前安全前置檢查
-  失敗即 fail closed、絕不 silently fallback 回一般用途的
-  `invoke_cos.sh`；其餘既有 source 完全不受影響。
-- **寫入邊界精確化**：拆解「不能寫入任何檔案」為 handler／模型層（禁止：
-  episode 檔案本身、`memory/inbox/`、`memory/*.md`、`bridge_state.db`）與
-  queue infrastructure 層（允許：`jobs.db` 記帳、per-job log、
-  `job_requeue_events`）兩種不同的寫入責任。
-- **Blocker 敘事統一**：v4 現在只保留**一項**真正的硬 start blocker
-  ——no-tools 技術強制力尚未確認；v3 曾經並列的第二項（structured output
-  支援）改為 2.5c 實作期間的技術決策，不是開工前必解的阻塞。
+- **並行 requeue 的 SQLite 語意**：查讀 `hermes/db.py` 實際的
+  `get_connection()`／`_db()` 後確認，v4「輸家永遠乾淨拿到 `rowcount=0`」
+  的假設不完全正確——連線用預設（deferred）transaction，WAL 模式下並行
+  呼叫可能撞到 `sqlite3.OperationalError`（一般鎖爭用或
+  `SQLITE_BUSY_SNAPSHOT`），不只是乾淨的 0-row UPDATE。`requeue_dead_letter()`
+  改寫為四分支並行安全狀態機（成功／乾淨拒絕／busy 衝突後重新查詢確認已被
+  搶先＝正規化為拒絕／busy 衝突但仍是 dead_letter＝新例外
+  `RequeueRetryableDBError`，由呼叫端決定是否重試），**明確不修改共用
+  `_db()` 的全域鎖定策略**（不影響既有 `rss`／`telegram`／`cron` 路徑）。
+- **Dispatch 措辭範圍精確化**：把先前「Stage 2.5 不做 dispatch」的籠統
+  說法拆成兩層——**Stage 2.6 的 domain／action dispatch**（禁止，本階段
+  範圍外）vs **2.5c 執行 triage job 本身所需的 worker source-specific
+  execution routing**（第 7.5 節，允許、且是 2.5c 必要範圍），避免誤讀
+  成連 worker 內部的呼叫入口選擇都被禁止。
+- **`actor` 顯式驗證**：`requeue_dead_letter()` 在任何 DB 操作之前顯式
+  拒絕空字串／純空白的 `actor`（`ValueError`）；CLI 用 argparse
+  `required=True`，不提供任何掩蓋身份的假預設值；稽核表儲存的是
+  `strip()` 正規化後的字串。
 
 **定位（與 Stage 2.4c/2.4d、daily N-gate 的邊界，刻意寫清楚避免職責重疊）**：
 Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox）、落地
@@ -359,29 +362,34 @@ Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox�
 `memory/*.md` 正本的整併判斷與寫入（**查證確認：這個 pass 完全是檔案目錄
 操作，不寫 `bridge_state.db`**——`bridge_state.db` 事後補登整併結果，唯一
 途徑是人工執行既有的 `bridge_scanner.py reconcile`，本身也未排程）。
-**Stage 2.5 不重新做這兩件事**——它只對已經合法到達過 `to_inbox` 的 episode
-做唯讀、結構化的「分診」（`decision`: `memory_only`／`action_candidate`／
-`needs_review`），不修改任何 memory 檔案、不呼叫任何 domain subagent、不 dispatch。
+**Stage 2.5 不重新做這兩件事，也不做 Stage 2.6 的 domain／action
+dispatch**——它只對已經合法到達過 `to_inbox` 的 episode 做唯讀、結構化的
+「分診」（`decision`: `memory_only`／`action_candidate`／`needs_review`），
+不修改任何 memory 檔案、不呼叫任何 domain subagent。**這不包括**第 7.5
+節 2.5c 執行 triage job 本身所需的 worker source-specific execution
+routing——那是 job queue 內部決定用哪個呼叫入口執行同一個 triage job，
+不涉及 domain subagent 或使用者核准流程，正式列在本階段範圍內。
 
 **四個子階段**（皆人工觸發，本階段不安裝任何新 timer；importer 維持人工 CLI 不變）：
 
 - **2.5a**：`jobs.db` migration（新增 `external_key`／`payload_hash`／
   `prompt_version`／`requeue_count`／`last_requeued_at` 五欄＋
   `UNIQUE(source, external_key, prompt_version)`＋新表
-  `job_requeue_events`）、`enqueue_once`／`requeue_dead_letter` API、
-  回歸測試。
+  `job_requeue_events`）、`enqueue_once`／`requeue_dead_letter` API
+  （含 `actor` 顯式驗證與四分支並行安全狀態機）、回歸測試。
 - **2.5b**：手動 enqueuer CLI（`--dry-run`，不呼叫模型；候選資格＝
   「episode 曾合法到達 to_inbox，目前 bridge 狀態可為 to_inbox 或
   imported，artifact 可唯一定位」，對每個候選都無條件呼叫／模擬呼叫
   `enqueue_once`）。
 - **2.5c**：no-tools 結構化 triage handler ＋ `hermes/worker.py` 的
-  source-specific dispatch（固定 JSON schema 輸出，最小權限——**開工前須
-  先解除唯一的 start blocker「no-tools 技術可行性未確認」**，見提案第 18
-  節）。
+  source-specific execution routing（固定 JSON schema 輸出，最小
+  權限——**開工前須先解除唯一的 start blocker「no-tools 技術可行性未
+  確認」**，見提案第 18 節）。
 - **2.5d**：3–5 次人工實跑驗收（初始上限每日 1 次）。
 
 **明確排除於本階段之外**：`action_candidate` 的實際使用者核准與 domain 分派
-→ **Stage 2.6**（另案設計，本文件與提案僅先點名，不設計）。
+→ **Stage 2.6**（另案設計，本文件與提案僅先點名，不設計）——與 2.5c 的
+worker execution routing 是不同層級的概念，見上方定位段落。
 
 **負責領域**：`engineering`（2.5a/2.5b/2.5c 全部程式碼與 schema、2.5d 驗收本身）；
 `automation` 在本階段角色接近零（本階段刻意不安裝任何 timer），未來若要把
@@ -413,7 +421,7 @@ Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox�
 1. ~~Stage 1~~ ✅ 完成（Pre-Bridge Foundation，見 [stage1-checkpoint.md](stage1-checkpoint.md)）。
 2. ~~Stage 2 必要前置~~ ✅ gate 已解（2026-07-10）：DoD 1/2 實走完成、三項前置決策拍板並記錄。
 3. ~~Stage 2（2.1–2.4d）~~ ✅ 全鏈路完成並上線（2026-07-12，見上方 Stage 2.4d 節）。
-4. **Stage 2.5**（現在的第一優先）：規劃提案已收斂為 v4
+4. **Stage 2.5**（現在的第一優先）：規劃提案已收斂為 v5
    （[stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)），
    待使用者核准；2.5a/2.5b 可在核准後即開工，**2.5c 需先解除提案第 18 節列出的
    唯一 start blocker（no-tools 技術可行性查驗）才能開工**——若查驗結果只能
@@ -446,3 +454,4 @@ Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox�
 | state.db 訊息數相對 Stage 0 基準下降（2026-07-09 觀察） | 若是讀錯 profile db，bridge 會處理錯的資料集 | Stage 2 DoD 5 基準複查；讀取一律 `--profile default` ＋ snapshot |
 | **bridge_state schema v1 與拍板欄位清單有出入**（2026-07-10 新增） | 不先對齊就實作，會產生兩套欄位語意並存 | 對齊明文列為 Stage 2 實作第一步（memory-bridge-state.md 第 6 節）；schema／測試／文件三者同動 |
 | **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容 |
+| **並行 `requeue_dead_letter` 呼叫的 SQLite 例外處理**（2026-07-12 第四次修訂新增） | 若實作沿用 v4 的二分支假設，WAL 模式下的 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外可能未被正確分類，誤報「已被別人 requeue」或讓例外未經處理往外拋 | 提案第 4.1b／4.1c 節已改寫為四分支狀態機並定義 `RequeueRetryableDBError`；2.5a 實作與測試（提案第 14 節第 21 項）需嚴格遵循，不得簡化回二分支假設 |
