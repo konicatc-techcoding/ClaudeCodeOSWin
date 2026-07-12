@@ -7,6 +7,15 @@ Stage 2 前置條件依 checkpoint 未完項更新。
 **更新（2026-07-10）**：Stage 2 三項前置決策已由使用者拍板並記錄（側別＝WSL 部署側、
 載體＝`hermes/state/bridge_state.db`、不接自動路由）；原 Stage 1 DoD 1/2 實走完成
 （idempotency 修正已下發部署側）——**Stage 2 gate 已解**，詳見 Stage 2 節。
+**更新（2026-07-12）**：Stage 2.5（Episode Triage & Queue Foundation）規劃提案已產出
+（[stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)），
+待使用者核准；本次更新同時修正 Stage 2 原始設計敘述中已被 2.4c/2.4d 取代的部分
+（見下方 Stage 2 節與新增的 Stage 2.5 節）。
+**更新（2026-07-12，第二次）**：Stage 2.5 提案依使用者 7 點回饋收斂為 **v3**——
+job identity 改為三元組、正式設計 dead-letter recovery 機制、修正執行語意措辭、
+解決 2.5b 候選查詢的 N-gate 遺漏、鎖定 no-tools 入口點設計（但技術可行性列為
+明確的 start blocker）、鎖定模型／決定性契約參數。**v3 仍有 2 項 start blocker
+尚未解除**（見提案文件第 18 節），Stage 2.5c 在解除之前不建議開工。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -90,7 +99,8 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 
 ---
 
-## Stage 2 — Session Bridge 自動化（cron 偵測 → export → enqueue → headless CoS）
+## Stage 2 — Session Bridge 自動化（原始藍圖：cron 偵測 → export → enqueue → headless CoS；
+現況已由 2.4c／2.4d／2.5 取代，見下方各小節與「目標」段落的說明）
 
 > **進度更新（2026-07-10）**：**gate 已解，可開工。**三項前置決策已由使用者拍板
 > （見下方「前置決策拍板記錄」）；原 Stage 1 DoD 1/2 實走已完成——idempotency 修正
@@ -127,7 +137,9 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > 無參數 scan、無 Restart——失敗不推進 watermark 由下次觸發補掃；`Persistent=true`
 > 與既有 timer 一致）。install/uninstall 用法已涵蓋；靜態測試
 > `hermes/test_systemd_units.py` 守住「排程一律無參數 scan」。**只排程 scan**，
-> reconcile 不進排程（回填/對帳工具，人工或 2.4c 串接再定）。
+> reconcile 不進排程（回填/對帳工具，人工或 2.4c 串接再定——**這條決定至今
+> （2026-07-12）仍然成立，Stage 2.5 提案在設計 2.5b 候選查詢時重新查證過，
+> reconcile 依然是人工／CLI 觸發，未排程**）。
 > **Stage 2.4b ✅ 部署完成（2026-07-10）**：五項完成標準全過——sync 下發（bridge_state.db
 > 未被覆蓋）→ dry-run 逐筆候選檢視（0 筆，watermark 後無新完結 session）→ 真實 scan
 > → 冪等重跑 → 故意失敗（exit 1、watermark 不推進）→ Hermes/inbox fingerprint 零寫入
@@ -167,7 +179,10 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > Stage 2 的匯入單位改為 **episode／capture checkpoint**（同一 session 可切出多個
 > immutable episode），**不再是整個 session**。schema 隨之升級為
 > `claudecodeos.bridge_state.v2`（`bridge_sessions` 22 欄＋新表 `bridge_cursors`，
-> 見 [memory-bridge-state.md](memory-bridge-state.md)）。
+> 見 [memory-bridge-state.md](memory-bridge-state.md)）。**自本次修訂起明確強調**：
+> episode 的切刀 trigger 現在是四選一（`ended`／`archived`／`inactivity`／
+> `manual`），`ended_at` 只是其中一種、且不是主要或預設的判準——下方風險表相應
+> 更新，避免有人誤讀成「主要仍看 ended_at」。
 > **✅ Stage 2.4d 全鏈路完成並上線（2026-07-12）**：2.4d-1（schema v2＋
 > repository：`create_episode`／`migrate` CLI／content hash 純函式）→ 2.4d-2
 > （scanner episode 偵測：`ended`／`archived`／`inactivity` 三型 trigger、
@@ -184,7 +199,9 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 > （落在 08:00 memory-check 與 08:10 skill-sync 之間）；WSL 睡眠期間錯過的
 > 觸發由 systemd `Persistent=true` 於下次喚醒時補跑（既有行為，2.4b 起即如此）。
 > importer **仍未排程化**（人工 CLI 執行）、**未 enqueue、未接 headless CoS**——
-> 這些維持既有邊界，屬後續階段。
+> 這些維持既有邊界，屬後續階段（**現況更新：這個 gap 現由 Stage 2.5 的規劃提案
+> 開始銜接，見下方獨立小節與 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)；
+> importer 本身仍維持人工 CLI，Stage 2.5 明確不改變這一點**）。
 >
 > **✅ 第一筆真實正常 episode 端到端驗收通過（2026-07-12）**：
 > `session_id=20260712_164627_419d23`、
@@ -203,15 +220,33 @@ bridge 開工前的**全部地基**，故完成定名 Pre-Bridge Foundation：
 >
 > **已知非阻塞缺口**：Unarchive（`archived` 1→0）對真實 Hermes Desktop UI
 > 的 live round-trip 驗證尚未執行（僅 fixture 邏輯驗證），不影響已上線的
-> archived trigger 判斷（level-triggered，不依賴追蹤這個轉換本身）。
+> archived trigger 判斷（level-triggered，不依賴追蹤這個轉換本身）。此缺口
+> 與 Stage 2.5 的 exactly-once enqueue 設計有交互關係，已在
+> [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)
+> 中一併討論（episode 的 `event_id` 去重是否在 unarchive/re-archive round-trip
+> 後仍然穩定），但不是 Stage 2.5 需要解決的問題，維持列為非阻塞。
 
-**目標（原始設計，2026-07-07 定稿；匯入單位已由上方 2.4d 更新為 episode／capture
-checkpoint，`ended_at` 不再是唯一判準——本段保留作歷史脈絡）**：新增一個 cron 觸發
-的 bridge（模式同 `hermes/adapters/hermes_bridge.py` 的 skills 同步）：定期偵測
-Hermes **新完結**的 session（`ended_at` 已設），`export_session()` 後 `enqueue()`
+**目標（原始設計，2026-07-07 定稿——已被 Stage 2.4c／2.4d 與 Stage 2.5 取代，
+本段自 2026-07-12 起明確標記為歷史紀錄，不代表現況，僅保留作歷史對照）**：
+匯入單位已由上方 2.4d 更新為 episode／capture checkpoint，`ended_at` 不再是
+唯一判準——這點原段落已有註記。**本次修訂額外明確指出**：下方描述的
+「export → enqueue → headless CoS，由 CoS 依匯入政策決定要不要寫 inbox」
+這個機制本身，**也已經被 Stage 2.4c／2.4d 取代**——「該不該寫入 memory」這個
+判斷，現在是 importer（`hermes/bridge_importer.py`）在匯入當下就完成的政策
+判定（敏感 fail-closed、4.2 結構性排除、落地 to_inbox），**不是**由 enqueue
+之後的 headless CoS 事後判斷。enqueue／headless CoS 在管線中的角色，經使用者
+2026-07-12 拍板重新定位，改由 **Stage 2.5 — Episode Triage & Queue
+Foundation**（見下方獨立小節、規格正本
+[stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)）
+承接，而且範圍限縮為**對已經到達 `to_inbox` 的內容做唯讀結構化分診**，
+不再是「判斷要不要寫 inbox」。**以下原始設計敘述純屬歷史藍圖，不是現行架構、
+不是現行行為**：新增一個 cron 觸發的 bridge（模式同
+`hermes/adapters/hermes_bridge.py` 的 skills 同步）：定期偵測 Hermes
+**新完結**的 session（`ended_at` 已設），`export_session()` 後 `enqueue()`
 給 headless CoS，由 CoS 依匯入政策（memory-taxonomy 4.2／4.3）決定要不要寫
-inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由既有的 `daily-memory-check`
-整併路徑收尾。
+inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由既有的
+`daily-memory-check` 整併路徑收尾。**（歷史藍圖敘述結束——現行架構請見上方
+各 2.x 小節與下方 Stage 2.5 小節）**
 
 ### 前置決策拍板記錄（2026-07-10，使用者拍板；本節為決策正本）
 
@@ -271,6 +306,58 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
 
 ---
 
+## Stage 2.5 — Episode Triage & Queue Foundation（規劃中，2026-07-12 提案，v3）
+
+**狀態**：規劃提案 **v3**，**待使用者核准，尚未開工**。完整設計正本：
+[stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)（`planning`
+domain 起草，交叉核對本文件、[memory-bridge-state.md](memory-bridge-state.md)、
+[memory-taxonomy.md](memory-taxonomy.md)、`hermes/db.py`、`hermes/worker.py`、
+`hermes/bridge_importer.py`、`hermes/bridge_state.py`、`hermes/bridge_scanner.py`、
+`.claude/skills/consolidate-memory/SKILL.md`、`registry/delegation_policy.yaml` 後定稿）。
+**v3 是依使用者 7 點回饋對 v2 的收斂版本**，重點決定：job identity 改為
+`(source, external_key, prompt_version)` 三元組；新增正式的
+`requeue_dead_letter()` dead-letter recovery 機制（`jobs.db` 因此需新增
+`requeue_count`／`last_requeued_at` 兩欄，連同 identity 三欄共五欄，皆在 2.5a
+一次 migration 內完成，`bridge_state.db` 依然不擴充）；執行語意更正為
+「at-most-one automatic attempt」（Option A）而非先前錯誤的「at-least-once」；
+2.5b 候選查詢修正為 `import_status ∈ {to_inbox, imported}`（不只查
+`to_inbox`，否則會漏掉已被人工 `reconcile` 回填的合法內容）；no-tools 呼叫
+入口點決定為獨立腳本 `invoke_cos_triage.sh`，但其技術可行性**未確認、明確
+列為 start blocker**；模型／決定性契約參數（capability、timeout、最大輸入
+長度等）已鎖定為具體建議值。
+
+**定位（與 Stage 2.4c/2.4d、daily N-gate 的邊界，刻意寫清楚避免職責重疊）**：
+Stage 2.4c/2.4d 已經擁有 episode 偵測、政策判定（是否寫入 inbox）、落地
+`memory/inbox/`；daily N-gate／`consolidate-memory` pass 已經擁有 inbox →
+`memory/*.md` 正本的整併判斷與寫入（**查證確認：這個 pass 完全是檔案目錄
+操作，不寫 `bridge_state.db`**——`bridge_state.db` 事後補登整併結果，唯一
+途徑是人工執行既有的 `bridge_scanner.py reconcile`，本身也未排程）。
+**Stage 2.5 不重新做這兩件事**——它只對已經合法到達過 `to_inbox` 的 episode
+做唯讀、結構化的「分診」（`decision`: `memory_only`／`action_candidate`／
+`needs_review`），不修改任何 memory 檔案、不呼叫任何 domain subagent、不 dispatch。
+
+**四個子階段**（皆人工觸發，本階段不安裝任何新 timer；importer 維持人工 CLI 不變）：
+
+- **2.5a**：`jobs.db` migration（新增 `external_key`／`payload_hash`／
+  `prompt_version`／`requeue_count`／`last_requeued_at` 五欄＋
+  `UNIQUE(source, external_key, prompt_version)`）、`enqueue_once`／
+  `requeue_dead_letter` API、回歸測試。
+- **2.5b**：手動 enqueuer CLI（`--dry-run`，不呼叫模型，候選查詢已修正為
+  涵蓋 `to_inbox`／`imported` 兩種狀態）。
+- **2.5c**：no-tools 結構化 triage handler（固定 JSON schema 輸出，最小
+  權限——**開工前須先解除「no-tools 技術可行性未確認」這項 start
+  blocker**，見提案第 18 節）。
+- **2.5d**：3–5 次人工實跑驗收（初始上限每日 1 次）。
+
+**明確排除於本階段之外**：`action_candidate` 的實際使用者核准與 domain 分派
+→ **Stage 2.6**（另案設計，本文件與提案僅先點名，不設計）。
+
+**負責領域**：`engineering`（2.5a/2.5b/2.5c 全部程式碼與 schema、2.5d 驗收本身）；
+`automation` 在本階段角色接近零（本階段刻意不安裝任何 timer），未來若要把
+2.5b 排程化才會進入 automation 的範圍（分工原則見提案第 15 節）。
+
+---
+
 ## Stage 3 — Dashboard Hermes Session 檢視頁
 
 **目標**：在既有 Streamlit dashboard 加一頁 Hermes session 檢視（用 adapter 的
@@ -290,14 +377,16 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
 
 ---
 
-## 建議優先順序（總結，2026-07-10 更新）
+## 建議優先順序（總結，2026-07-12 更新）
 
 1. ~~Stage 1~~ ✅ 完成（Pre-Bridge Foundation，見 [stage1-checkpoint.md](stage1-checkpoint.md)）。
 2. ~~Stage 2 必要前置~~ ✅ gate 已解（2026-07-10）：DoD 1/2 實走完成、三項前置決策拍板並記錄。
-3. **Stage 2**（現在的第一優先）：可開工；**第一步工作＝bridge_state schema 對齊**
-   （memory-bridge-state.md 第 6 節）。Windows 側 `git init` 已完成（baseline `03c7a0e`）；
-   Stage 0.5 四殘項非阻塞、可平行清理。
-4. **Stage 3**：觀測性收尾。
+3. ~~Stage 2（2.1–2.4d）~~ ✅ 全鏈路完成並上線（2026-07-12，見上方 Stage 2.4d 節）。
+4. **Stage 2.5**（現在的第一優先）：規劃提案已收斂為 v3
+   （[stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)），
+   待使用者核准；2.5a/2.5b 可在核准後即開工，**2.5c 需先解除提案第 18 節列出的
+   2 項 start blocker（尤以 no-tools 技術可行性查驗為要）才能開工**。
+5. **Stage 3**：觀測性收尾。
 
 ## 持續事項（不設 stage，跨階段有效）
 
@@ -317,10 +406,11 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
 |---|---|---|
 | Hermes schema 變動（第三方，無承諾） | adapter／bridge 直接失效（fail loud） | 去重與匯出邏輯全部集中在 adapter 一層；schema_version 變動時只需跟進一處 |
 | WSL 互斥限制 vs 自動化 | WSL 側排程任務在 Windows Hermes 運行時無法一般讀取 state.db | 側別已拍板 WSL 側（決策 1）：bridge 一律走 snapshot／immutable 讀取路徑；DoD 1 直接驗證 |
-| `immutable=1` 讀 live db 的快照一致性 | 讀到不一致快照 | 只處理 `ended_at` 已設的完結 session，降低撞上寫入中資料的機率 |
+| `immutable=1` 讀 live db 的快照一致性（2026-07-12 更新：緩解措施已隨 2.4d 改變，見右欄） | 讀到不一致快照 | **已更新**：不再只靠「`ended_at` 已設」這個單一判準降低風險——2.4d 起 episode 的切刀 trigger 是 `ended`／`archived`／`inactivity`／`manual` 四選一，快照一致性改由「同一次 scan snapshot 內固定 boundary」＋ importer 匯入時以 `source_content_hash` 重算比對（提案 stage2.4d §4.5）共同保證，不一致直接 `needs_review`（fail-closed），不落地 |
 | `messages.content` 含敏感資料 | 敏感內容進入長期記憶正本 | 匯入政策已定稿（memory-taxonomy 4.3 guardrails，fail-closed）；adapter 明確不過濾，責任在落地前判斷層 |
 | sticky profile 被 UI 切換 | 不帶 `--profile` 的 CLI 自動化讀錯 db | 所有自動化一律明確 `--profile default`（Stage 0 報告既有結論）；緩解機制列 Stage 0.5 殘項 |
 | gateway 自啟不齊（Stage 0.5 殘項未清） | session 資料累積不完整，Stage 2 價值打折 | 殘項非阻塞，建議與 Stage 2 平行清完 |
 | ~~Windows 開發正本無版控~~ **已解**（2026-07-09 `git init`，baseline `03c7a0e`） | （解除前）程式層 rollback 只能靠 WSL pre-sync tarball；bridge 這種長期演化元件無變更歷史 | 已完成 `git init` 與 baseline commit，後續變更均入版控；git-based sync 仍列 sync plan v0.2 升級路徑；rollback 現況索引見 checkpoint 第 6 節 |
 | state.db 訊息數相對 Stage 0 基準下降（2026-07-09 觀察） | 若是讀錯 profile db，bridge 會處理錯的資料集 | Stage 2 DoD 5 基準複查；讀取一律 `--profile default` ＋ snapshot |
 | **bridge_state schema v1 與拍板欄位清單有出入**（2026-07-10 新增） | 不先對齊就實作，會產生兩套欄位語意並存 | 對齊明文列為 Stage 2 實作第一步（memory-bridge-state.md 第 6 節）；schema／測試／文件三者同動 |
+| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節「no-tools 技術可行性」這個未解除的 start blocker**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容 |
