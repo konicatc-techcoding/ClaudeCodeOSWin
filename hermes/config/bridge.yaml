@@ -34,21 +34,19 @@ max_import_retries: 3
 # 概念，互不綁架——episode_cutover 是「episode 擷取」的底線，不是「掃描層
 # 歷史底線」的別名。
 #
-# - enabled：本階段（2.4d-2）交付後仍是 false——scanner 對 episodes.enabled
+# - enabled：**2026-07-12 部署啟用（Stage 2.4d-4）**——scanner 對 episodes.enabled
 #   為 false 或整個區塊缺失時，行為與 2.4c 位元級一致（零成本 gate，矩陣
-#   #19 前半）。翻 true 是 2.4d-4 部署驗證通過之後的事，本次交付不得改動。
-# - episode_cutover：**刻意留空**（不是留一個假時間戳、也不是隨手填今天）。
-#   已拍板（§0.1）：真正的值＝2.4d-4 部署翻 enabled: true 之前，取當下實際
-#   UTC 時刻寫入——是時刻不是日期概念值。刻意留空是為了讓
-#   「enabled: true 但忘記填 episode_cutover」這個誤用在啟用當下就 fail
-#   loud（exit 1，矩陣 #19 後半），而不是被某個預設值悄悄接住、讓自動管線
-#   在沒人決定過起點的情況下擷取到不可預期的範圍。
+#   #19 前半）；enabled: true 時走 episode 偵測邏輯。
+# - episode_cutover：**2026-07-12T06:36:18Z**——2.4d-4 部署翻 enabled: true
+#   前取當下實際 UTC 時刻寫入（已拍板 §0.1：是時刻不是日期概念值）。此值之前
+#   的訊息永遠不會被 episode 擷取，即使 bridge_state.db 整個刪掉重建也不越過
+#   （§5.1 的 pre-cutover 絕對底線）。
 #   （manual checkpoint 子指令對「無 cursor 的 session」同樣需要這個值才能
 #   決定擷取起點，缺失時同樣 fail loud——見 bridge_scanner.py checkpoint。）
 # - inactivity_hours：已拍板 72（§0.1）——「暫時告一段落」的 checkpoint 門檻，
 #   比「過幾天拿出來繼續用」的復用節奏保守；切早了無資料損失，只是同一主題
 #   分成兩個 episode，consolidation 會再整併。
 episodes:
-  enabled: false
-  episode_cutover:
+  enabled: true
+  episode_cutover: "2026-07-12T06:36:18Z"
   inactivity_hours: 72
