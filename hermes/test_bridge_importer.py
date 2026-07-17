@@ -918,6 +918,137 @@ class TestLegacyAndEpisodeCoexistInQueue(EpisodeImporterTestBase):
             "to_inbox")
 
 
+class TestLegacyDuplicateOfEpisode(EpisodeImporterTestBase):
+    """2026-07-17 缺口修補：同 session 同時存在 legacy 列（hermes:<sid>）與
+    涵蓋相同 event_id_range 的 episode 列（hermes:<sid>:<a>..<b>）時，legacy
+    不得再落地產生 frontmatter event_id_range 完全相同的重複檔案——legacy 判
+    skipped（decision_reason 註明 duplicate-of-episode），episode 照常落地。"""
+
+    def _seed_full_range_episode(self, sid):
+        """建 session＋涵蓋全部訊息的 episode 列（boundary＝legacy 的
+        min..max，正是事發情境的形狀），回傳 (first, last)。"""
+        ids = self.add_episode_session(sid, OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_episode(sid, first, last)
+        return first, last
+
+    def test_same_batch_legacy_skipped_episode_lands(self):
+        """同批同時有 legacy row 與對應 episode row：legacy 判 skipped
+        （duplicate-of-episode），episode 正常落地，恰好一個檔案。"""
+        sid = "sess_dup_batch"
+        first, last = self._seed_full_range_episode(sid)
+        self.seed_discovered(sid)  # legacy 列（hermes:<sid>）
+
+        # dry-run 先行：預測動作即為 skip，且零寫入
+        rows_before = self.all_rows()
+        dry = self.run_import(dry_run=True)
+        legacy_dry = next(a for a in dry["actions"]
+                          if a["event_id"] == f"hermes:{sid}")
+        self.assertEqual(legacy_dry["action"], "skipped_duplicate_of_episode")
+        self.assertEqual(self.all_rows(), rows_before, "dry-run 零寫入")
+        self.assertEqual(self.inbox_files(), [])
+
+        result = self.run_import()
+        self.assertEqual(result["counts"], {
+            "to_inbox": 1, "skipped_duplicate_of_episode": 1})
+
+        files = self.inbox_files()
+        self.assertEqual(len(files), 1, "只有 episode 落地，恰好一個檔案")
+        self.assertEqual(files[0].name,
+                         f"hermes_session_{sid}_ep{first}-{last}.md")
+
+        legacy = self.rec(sid)
+        self.assertEqual(legacy["import_status"], "skipped")
+        self.assertIn("duplicate-of-episode", legacy["decision_reason"])
+        self.assertIs(legacy["useful_chat"], False)
+        self.assertIsNone(legacy["imported_inbox_path"])
+        self.assertEqual(legacy["event_id_range"],
+                         f"hermes:{sid}:{first}..{last}")
+
+        episode = self.episode_rec(sid, first, last)
+        self.assertEqual(episode["import_status"], "to_inbox")
+
+        # skipped 不在佇列：重跑穩定、不重複落地
+        result2 = self.run_import(seen_at=T3)
+        self.assertEqual(result2["queued"], 0)
+        self.assertEqual(len(self.inbox_files()), 1)
+
+    def test_episode_landed_in_prior_batch_legacy_skipped(self):
+        """episode 已在先前批次落地（列 to_inbox＋檔案都在）、本批只有
+        legacy row：legacy 判 skipped，不產生第二個檔案。"""
+        sid = "sess_dup_prior"
+        first, last = self._seed_full_range_episode(sid)
+        batch1 = self.run_import(seen_at=T1)
+        self.assertEqual(batch1["counts"], {"to_inbox": 1})
+        self.assertEqual(len(self.inbox_files()), 1)
+
+        self.seed_discovered(sid, seen_at=T2)  # 本批只有 legacy 列
+        batch2 = self.run_import(seen_at=T2)
+        self.assertEqual(batch2["counts"], {"skipped_duplicate_of_episode": 1})
+        self.assertEqual(len(self.inbox_files()), 1, "不得產生第二個檔案")
+        legacy = self.rec(sid)
+        self.assertEqual(legacy["import_status"], "skipped")
+        self.assertIn("duplicate-of-episode", legacy["decision_reason"])
+
+    def test_episode_file_without_row_still_blocks_legacy(self):
+        """只有 episode 落地檔、無 episode 列（模擬 bridge db 重建後尚未
+        reconcile 回填）：檔案系統證據同樣把 legacy 判 skipped——判斷不依賴
+        db 列存在。"""
+        sid = "sess_dup_fileonly"
+        ids = self.add_episode_session(sid, OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            sid, first, last)
+        (self.inbox / name).write_text(
+            "---\nschema: claudecodeos.inbox.v1\nsource: hermes-session\n"
+            f"session_id: {sid}\n"
+            f'event_id_range: "hermes:{sid}:{first}..{last}"\n'
+            "episode: 1\ncapture_trigger: inactivity\n"
+            "---\n\n先前批次已落地的 episode 內容\n", encoding="utf-8")
+        self.seed_discovered(sid)  # 只有 legacy 列，無 episode 列
+
+        result = self.run_import()
+        self.assertEqual(result["counts"], {"skipped_duplicate_of_episode": 1})
+        self.assertEqual(len(self.inbox_files()), 1, "不得落地 legacy 檔")
+        legacy = self.rec(sid)
+        self.assertEqual(legacy["import_status"], "skipped")
+        self.assertIn("duplicate-of-episode", legacy["decision_reason"])
+
+    def test_legacy_without_episode_lands_as_before(self):
+        """只有 legacy row、無對應 episode（列與檔案皆無）：legacy 照舊正常
+        落地——不回歸。"""
+        sid = "sess_dup_none"
+        self.add_episode_session(sid, OK_MESSAGES)
+        self.seed_discovered(sid)
+        result = self.run_import()
+        self.assertEqual(result["counts"], {"to_inbox": 1})
+        files = self.inbox_files()
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].name, f"hermes_session_{sid}.md")
+        self.assertEqual(self.rec(sid)["import_status"], "to_inbox")
+
+    def test_partial_boundary_episode_does_not_block_legacy(self):
+        """episode 只涵蓋 session 一部分（boundary 不同於 legacy 的
+        min..max）：只認完全相同 boundary（與 UNIQUE(event_id)／檔名查重的
+        既有語義一致），legacy 照舊落地、不誤殺。"""
+        sid = "sess_dup_partial"
+        ids1 = self.add_episode_session(sid, OK_MESSAGES)
+        ids2 = self.add_messages_to_session(sid, OK_MESSAGES)  # session 後半
+        self.seed_episode(sid, ids1[0], ids1[-1])  # 只涵蓋前半（≠ legacy range）
+        self.seed_discovered(sid)
+        result = self.run_import()
+        # episode（部分 boundary）與 legacy（全 session min..max）各自落地
+        self.assertEqual(result["counts"], {"to_inbox": 2})
+        names = sorted(p.name for p in self.inbox_files())
+        self.assertEqual(names, sorted([
+            f"hermes_session_{sid}.md",
+            f"hermes_session_{sid}_ep{ids1[0]}-{ids1[-1]}.md",
+        ]))
+        self.assertNotEqual((ids1[0], ids1[-1]), (ids1[0], ids2[-1]),
+                            "前提自檢：episode boundary 必須 ≠ legacy range")
+        self.assertEqual(self.rec(sid)["import_status"], "to_inbox")
+
+
 class TestStaticAndCli(ImporterTestBase):
     """完成定義 7：尚未 enqueue、尚未 headless CoS、尚未 importer timer；
     另守住 scanner 同款的讀取邊界。"""

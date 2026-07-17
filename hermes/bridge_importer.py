@@ -79,8 +79,9 @@ from adapter import (  # noqa: E402
 # 記錄（episode_seq IS NULL）也包含 episode 記錄（episode_seq 非 NULL）。
 # 兩者用完全獨立的處理函式（_process_one_legacy／_process_one_episode），
 # _process_one 只負責依 rec["episode_seq"] 分派——legacy 路徑的程式碼與
-# 2.4c 逐字相同，保證「legacy 路徑零回歸」不是靠測試斷言湊出來、而是程式碼
-# 本身沒有變動。episode 路徑新增：hash 重算比對（§4.5，先於敏感偵測）、
+# 2.4c 逐字相同（唯一例外：2026-07-17 後補的 duplicate-of-episode 判定，
+# 見 _process_one_legacy 步驟 1.5——防止 legacy 列與同 range 的 episode 列
+# 重複落地）。episode 路徑新增：hash 重算比對（§4.5，先於敏感偵測）、
 # episode-aware 落地（`write_episode_inbox_file`／boundary 查重）、非
 # default profile fail-closed（§6.1，防禦性，理論上不該出現在佇列裡）。
 
@@ -257,14 +258,55 @@ def classify_exclusion(export: dict, policy: dict) -> tuple[str, str] | None:
     return None
 
 
-def _event_id_range(export: dict) -> str | None:
-    sid = export["session"]["session_id"]
+def _message_id_bounds(export: dict) -> tuple[int, int] | None:
+    """export 內全部 message rowid 的 (min, max)；沒有任何 rowid 回 None。"""
     ids = [e["metadata"]["raw_message_id"] for e in export["events"]
            if isinstance(e.get("metadata"), dict)
            and isinstance(e["metadata"].get("raw_message_id"), int)]
     if not ids:
         return None
-    return f"hermes:{sid}:{min(ids)}..{max(ids)}"
+    return (min(ids), max(ids))
+
+
+def _event_id_range(export: dict) -> str | None:
+    bounds = _message_id_bounds(export)
+    if bounds is None:
+        return None
+    sid = export["session"]["session_id"]
+    return f"hermes:{sid}:{bounds[0]}..{bounds[1]}"
+
+
+def _find_covering_episode(sid: str, first: int, last: int, *,
+                           adapter: HermesSessionAdapter, inbox_dir: Path,
+                           bridge_db: Path) -> str | None:
+    """找涵蓋 [first..last] 的既有 episode 證據（duplicate-of-episode 判定用）。
+
+    回傳證據標籤字串（episode event_id 或落地檔路徑——皆為 metadata，
+    不含 session 內容），沒有則 None。兩個判斷來源都只用既有欄位／檔案系統
+    狀態，bridge_state.db schema 零變更（docs/memory-bridge-state.md §9）：
+
+    1. **episode 列**：`UNIQUE(event_id)` 既有骨幹——episode 列在
+       `create_episode()` 當下即存在，所以「同批將有」（episode 尚未被本批
+       處理到）也會命中，不依賴批次內處理順序。
+    2. **episode 落地檔**：`_find_existing_import()` boundary 精確查重
+       （含 .processed/／.failed/）——涵蓋 bridge db 重建後 episode 列
+       尚未回填、但檔案仍在的情境。
+
+    只認**完全相同** boundary（`hermes:<sid>:<first>..<last>` 全等）——與
+    `UNIQUE(event_id)`／episode 檔名查重的既有語義一致（§8.2／§8.4：去重
+    只擋完全相同的 boundary）。episode 只涵蓋 session 一部分（不同 boundary）
+    時 legacy 照舊落地，不誤殺。
+    """
+    episode_event_id = bridge_state.episode_event_id(sid, first, last)
+    row = bridge_state.get_session_state(episode_event_id, db_path=bridge_db)
+    if row is not None:
+        return (f"episode 列 {episode_event_id}"
+                f"（import_status={row['import_status']}）")
+    existing = adapter._find_existing_import(
+        inbox_dir, sid, first_message_id=first, last_message_id=last)
+    if existing is not None:
+        return f"episode 落地檔 {_rel_to_root(existing)}"
+    return None
 
 
 # ---------- 匯入主流程 ----------
@@ -288,8 +330,9 @@ def _process_one(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
 def _process_one_legacy(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
                         inbox_dir: Path, bridge_db: Path, dry_run: bool,
                         max_retries: int, seen_at: str | None) -> dict:
-    """legacy（整個 session）匯入路徑——Stage 2.4c 原班程式碼，逐字未動
-    （2.4d-3「legacy 路徑零回歸」保證：程式碼本身沒有變動，不是靠測試湊出來）。
+    """legacy（整個 session）匯入路徑——Stage 2.4c 原班程式碼，加上唯一一處
+    後補修正：duplicate-of-episode 判定（2026-07-17 缺口，見步驟 1.5 註解；
+    其餘步驟仍與 2.4c 逐字相同）。
     """
     event_id = rec["event_id"]
     sid = rec["session_id"]
@@ -334,6 +377,39 @@ def _process_one_legacy(rec: dict, adapter: HermesSessionAdapter, *, policy: dic
             bridge_state.mark_failed(event_id, reason, db_path=bridge_db)
         return {**base, "action": "failed",
                 "label": f"export_error:{type(exc).__name__}"}
+
+    # 1.5 duplicate-of-episode 判定（2026-07-17 缺口修補）：同一 session 可能
+    # 同時存在 legacy 列（hermes:<sid>）與涵蓋相同 event_id_range 的 episode 列
+    # （hermes:<sid>:<a>..<b>）——兩者都落地會產生 frontmatter event_id_range
+    # 完全相同的重複檔案（inbox 重複、consolidation 處理兩次；且
+    # bridge_triage_enqueuer 的 artifact 唯一性檢查〔提案 §6.5〕會把 episode
+    # 判 ineligible）。已有（或同批將有）對應 episode 列／episode 落地檔 →
+    # legacy 判 skipped，不落地；內容由 episode 列落地，原文仍在 Hermes
+    # state.db。判斷只用既有欄位與檔案系統狀態（schema 零變更，§9）。
+    bounds = _message_id_bounds(export)
+    if bounds is not None:
+        evidence = _find_covering_episode(
+            sid, bounds[0], bounds[1], adapter=adapter,
+            inbox_dir=inbox_dir, bridge_db=bridge_db)
+        if evidence is not None:
+            if not dry_run:
+                bridge_state.upsert_session_state(
+                    session_id=sid,
+                    source_profile=rec["source_profile"],
+                    session_source=rec["session_source"],
+                    import_status="skipped",
+                    memory_type="none",
+                    useful_chat=False,
+                    decision_reason=(
+                        f"legacy 列重複 duplicate-of-episode——{evidence} 涵蓋"
+                        "相同 event_id_range，legacy 不落地（避免 inbox 重複與 "
+                        "triage artifact 唯一性誤判；內容由 episode 列落地，"
+                        "原文仍在 Hermes state.db）"),
+                    error_reason=rec["error_reason"],
+                    event_id_range=(f"hermes:{sid}:{bounds[0]}..{bounds[1]}"),
+                    seen_at=seen_at, db_path=bridge_db)
+            return {**base, "action": "skipped_duplicate_of_episode",
+                    "label": "duplicate-of-episode"}
 
     # 2. 敏感偵測（fail-closed；只記類別標籤）
     try:
