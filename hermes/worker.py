@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bridge_triage_handler  # noqa: E402
 import db  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +60,15 @@ def write_job_log(job_id: str, lines: list[str]):
 
 
 def process_job(job: dict):
+    # Stage 2.5c（提案 §7.5）：source-specific execution routing——triage
+    # source 走專屬入口點（invoke_cos_triage.sh）、triage 專屬 timeout、
+    # 絕不 resume；其餘 source 走下方既有路徑，逐字不動。這是 job queue
+    # 內部「用哪個呼叫入口執行這個 job」的執行路由，不是 Stage 2.6 的
+    # domain dispatch（提案 §0 澄清）。
+    if job["source"] == bridge_triage_handler.TRIAGE_SOURCE:
+        bridge_triage_handler.process_triage_job(job)
+        return
+
     job_id = job["id"]
     thread_id = job["thread_id"]
     prompt = job["prompt"]
