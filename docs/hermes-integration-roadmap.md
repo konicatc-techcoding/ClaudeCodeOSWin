@@ -36,6 +36,13 @@ action dispatch（禁止）vs 2.5c 執行 triage job 本身所需的 worker
 source-specific execution routing（允許、屬本階段必要範圍），避免誤讀；
 (3) `requeue_dead_letter()` 的 `actor` 參數新增顯式驗證（空字串／純空白
 一律拒絕，先於任何 DB 操作），CLI 不提供任何掩蓋身份的假預設值。
+**更新（2026-07-17）**：Stage 2.5 提案先收斂為 **v6**（分支 4c／4d 測試改為
+決定性 fault injection，見提案第 4.1d、19 節）並經使用者核准開工；**同日
+2.5a／2.5b／2.5c 實作、WSL 部署與 2.5d 驗收全部完成，Stage 2.5 全階段
+✅ 完成並關閉**——2.5c 唯一 start blocker（no-tools 技術強制力）已於開工前
+實測解除（最終旗標組合與實測發現見提案第 18 節解除紀錄），實作 commit、
+測試數、部署證據與 2.5d 驗收紀錄見提案**第 20 節**與下方 Stage 2.5 節。
+下一階段為 **Stage 2.6 — domain dispatch（尚未規劃）**。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -326,7 +333,37 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
 
 ---
 
-## Stage 2.5 — Episode Triage & Queue Foundation（規劃中，2026-07-12 提案，目前 v5）
+## Stage 2.5 — Episode Triage & Queue Foundation ✅ 完成（2026-07-17；提案收斂至 v6 後核准實作）
+
+> **✅ Stage 2.5 全階段完成並關閉（2026-07-17）**：提案在 v5 之後再收斂一版為
+> **v6**（分支 4c／4d 測試改為決定性 fault injection、真實並行整合測試收斂為
+> 只驗證聚合不變量，見提案第 4.1d、19 節），經使用者核准後開工——
+> **2.5a**（commit `4aef9d1`）／**2.5b**（commit `24cb7fb`）／**2.5c**
+> （commit `8444e7d`）實作完成，三個子階段分別新增 **19／19／27 個沙箱
+> 測試**、全部測試綠；已以 `scripts/sync_to_wsl.sh --apply` 下發 WSL 部署側
+> （備份 `~/backups/ClaudeCodeOSWin-wsl-pre-sync-20260717T142215.tar.gz`），
+> 部署側三個 2.5 測試套件在 WSL `.venv` 下全綠，worker 已載入
+> source-specific execution routing。
+>
+> **2.5c 唯一 start blocker（no-tools 技術強制力）已於開工前實測解除**——
+> 最終旗標組合（`--tools "" --disallowedTools "mcp__*" --allowedTools
+> "StructuredOutput" --permission-mode dontAsk --json-schema …`）與五項實測
+> 發現（`--disallowedTools "*"` 與 `--bare` 不可用的原因、mktemp 中性 cwd、
+> `StructuredOutput` 純輸出通道無副作用、envelope `result` 即 JSON 字串）
+> 記錄於提案**第 18 節解除紀錄**；提案第 17 節開放問題採用值已轉正（triage
+> timeout＝120s、輸入上限＝50,000 字元，實作為
+> `hermes/bridge_triage_handler.py` 模組常數並有測試鎖定）。
+>
+> **2.5d 驗收完成（2026-07-17，使用者放寬「每日 ≤1」為同日多筆）**：5 筆
+> 生產 job 全部 completed／`attempts=1`／`thread_id=None`／五欄合法 JSON，
+> 三種 `decision` 皆有真實模型輸出實例（`needs_review` 以零污染行為探測
+> 驗證，非生產 job），另有一筆測試 session 被 importer too_short 門檻正確
+> 攔截的負面案例；總驗收成本約 $0.40——逐筆明細、偏差觀察與遺留待辦
+> （prompt v2 候選、候選池殘餘、`--event-id` 旗標）見提案**第 20 節**。
+> **下一階段：Stage 2.6 — domain dispatch（尚未規劃）**。
+>
+> 以下自「**狀態**」起為 2026-07-12 的 v5 規劃期敘述，保留為歷史紀錄
+> （v5→v6 差異見提案第 19 節，實作與驗收事實以上方本段與提案第 20 節為準）。
 
 **狀態**：規劃提案 **v5**，**待使用者核准，尚未開工**。完整設計正本：
 [stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)（`planning`
@@ -377,15 +414,20 @@ routing——那是 job queue 內部決定用哪個呼叫入口執行同一個 t
   `UNIQUE(source, external_key, prompt_version)`＋新表
   `job_requeue_events`）、`enqueue_once`／`requeue_dead_letter` API
   （含 `actor` 顯式驗證與四分支並行安全狀態機）、回歸測試。
+  ——✅ 完成（commit `4aef9d1`，2026-07-17）
 - **2.5b**：手動 enqueuer CLI（`--dry-run`，不呼叫模型；候選資格＝
   「episode 曾合法到達 to_inbox，目前 bridge 狀態可為 to_inbox 或
   imported，artifact 可唯一定位」，對每個候選都無條件呼叫／模擬呼叫
   `enqueue_once`）。
+  ——✅ 完成（commit `24cb7fb`，2026-07-17）
 - **2.5c**：no-tools 結構化 triage handler ＋ `hermes/worker.py` 的
   source-specific execution routing（固定 JSON schema 輸出，最小
   權限——**開工前須先解除唯一的 start blocker「no-tools 技術可行性未
   確認」**，見提案第 18 節）。
+  ——✅ 完成（commit `8444e7d`，2026-07-17；blocker 已於開工前解除，
+  解除紀錄見提案第 18 節）
 - **2.5d**：3–5 次人工實跑驗收（初始上限每日 1 次）。
+  ——✅ 驗收完成（2026-07-17，使用者放寬為同日多筆；紀錄見提案第 20 節）
 
 **明確排除於本階段之外**：`action_candidate` 的實際使用者核准與 domain 分派
 → **Stage 2.6**（另案設計，本文件與提案僅先點名，不設計）——與 2.5c 的
@@ -416,17 +458,19 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 
 ---
 
-## 建議優先順序（總結，2026-07-12 更新）
+## 建議優先順序（總結，2026-07-17 更新）
 
 1. ~~Stage 1~~ ✅ 完成（Pre-Bridge Foundation，見 [stage1-checkpoint.md](stage1-checkpoint.md)）。
 2. ~~Stage 2 必要前置~~ ✅ gate 已解（2026-07-10）：DoD 1/2 實走完成、三項前置決策拍板並記錄。
 3. ~~Stage 2（2.1–2.4d）~~ ✅ 全鏈路完成並上線（2026-07-12，見上方 Stage 2.4d 節）。
-4. **Stage 2.5**（現在的第一優先）：規劃提案已收斂為 v5
-   （[stage2.5-episode-triage-proposal.md](stage2.5-episode-triage-proposal.md)），
-   待使用者核准；2.5a/2.5b 可在核准後即開工，**2.5c 需先解除提案第 18 節列出的
-   唯一 start blocker（no-tools 技術可行性查驗）才能開工**——若查驗結果只能
-   達到降級保證，需使用者另外一次獨立核准，不得悄悄預設接受。
-5. **Stage 3**：觀測性收尾。
+4. ~~Stage 2.5~~ ✅ 全階段完成並關閉（2026-07-17）：提案收斂至 v6 後核准實作，
+   2.5a/2.5b/2.5c/2.5d 全部完成、部署側驗證通過——驗收紀錄見提案第 20 節、
+   摘要見上方 Stage 2.5 節。
+5. **Stage 2.6 — domain dispatch**（下一個要規劃的階段，**尚未規劃**）：使用者
+   核准 `action_candidate` 後的 domain 分派，另案設計（提案第 0、13 節已點名）。
+   Stage 2.5 遺留小修（prompt v2 候選、候選池殘餘一次收掉、單筆 enqueue 的
+   `--event-id` 旗標——見提案第 20.3 節）屬 2.6 前小修或 2.6 範圍，不阻塞任何事。
+6. **Stage 3**：觀測性收尾。
 
 ## 持續事項（不設 stage，跨階段有效）
 
@@ -453,5 +497,5 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 | ~~Windows 開發正本無版控~~ **已解**（2026-07-09 `git init`，baseline `03c7a0e`） | （解除前）程式層 rollback 只能靠 WSL pre-sync tarball；bridge 這種長期演化元件無變更歷史 | 已完成 `git init` 與 baseline commit，後續變更均入版控；git-based sync 仍列 sync plan v0.2 升級路徑；rollback 現況索引見 checkpoint 第 6 節 |
 | state.db 訊息數相對 Stage 0 基準下降（2026-07-09 觀察） | 若是讀錯 profile db，bridge 會處理錯的資料集 | Stage 2 DoD 5 基準複查；讀取一律 `--profile default` ＋ snapshot |
 | **bridge_state schema v1 與拍板欄位清單有出入**（2026-07-10 新增） | 不先對齊就實作，會產生兩套欄位語意並存 | 對齊明文列為 Stage 2 實作第一步（memory-bridge-state.md 第 6 節）；schema／測試／文件三者同動 |
-| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容 |
-| **並行 `requeue_dead_letter` 呼叫的 SQLite 例外處理**（2026-07-12 第四次修訂新增） | 若實作沿用 v4 的二分支假設，WAL 模式下的 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外可能未被正確分類，誤報「已被別人 requeue」或讓例外未經處理往外拋 | 提案第 4.1b／4.1c 節已改寫為四分支狀態機並定義 `RequeueRetryableDBError`；2.5a 實作與測試（提案第 14 節第 21 項）需嚴格遵循，不得簡化回二分支假設 |
+| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容。**2026-07-17 更新**：blocker 已實測解除（zero-tools 技術強制，提案第 18 節解除紀錄），prompt injection 測試（矩陣第 15、20 項）已隨 2.5c（commit `8444e7d`）落地——攻擊面已如設計侷限在輸出內容層；輸出層本身的殘餘風險由 `needs_review` 觸發率監測（提案第 20.3 節，2.6 前小修候選）持續觀察 |
+| **並行 `requeue_dead_letter` 呼叫的 SQLite 例外處理**（2026-07-12 第四次修訂新增） | 若實作沿用 v4 的二分支假設，WAL 模式下的 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外可能未被正確分類，誤報「已被別人 requeue」或讓例外未經處理往外拋 | 提案第 4.1b／4.1c 節已改寫為四分支狀態機並定義 `RequeueRetryableDBError`；2.5a 實作與測試（提案第 14 節第 21 項）需嚴格遵循，不得簡化回二分支假設。**2026-07-17 更新**：已隨 2.5a（commit `4aef9d1`）依四分支狀態機實作，並以決定性 fault-injection 測試（提案第 14 節第 21、22 項）＋聚合並行整合測試（第 23 項）鎖定 |

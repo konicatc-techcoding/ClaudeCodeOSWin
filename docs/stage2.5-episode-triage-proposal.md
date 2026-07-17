@@ -1,9 +1,14 @@
 # Stage 2.5 — Episode Triage & Queue Foundation（設計提案 v6）
 
-日期：2026-07-12　狀態：**規劃提案 v6（待使用者核准，尚未開工；本版修正
+日期：2026-07-12　狀態：**✅ Stage 2.5 全階段（a／b／c／d）完成並關閉（2026-07-17）**
+——v6 設計經使用者核准後開工，2.5a／2.5b／2.5c 實作、WSL 部署與 2.5d 驗收
+均已完成；實作事實、第 18 節 blocker 解除紀錄（含最終旗標組合與實測發現）
+與 2.5d 驗收紀錄見**第 20 節（完工後新增）**，第 8、17、18 節就地標註最終
+採用值與解除結果，其餘規劃內容不重寫、保留為決策紀錄。
+（規劃期原狀態，保留：規劃提案 v6——待使用者核准，尚未開工；本版修正
 `RequeueRetryableDBError` 測試設計中依賴真實 SQLite 鎖爭用時機的環境依賴
 措辭，改為決定性 fault-injection 測試設計。仍只有 1 項真正的硬 start
-blocker，見第 18 節）**
+blocker，見第 18 節——**該 blocker 已於 2026-07-17 解除**。）
 負責規劃：`planning` domain
 負責領域（實作階段）：`engineering`（2.5a／2.5b／2.5c 全部程式碼與 schema、2.5d 驗收）；
 `automation` 在本階段角色接近零（本階段不安裝任何 timer）——分工理由見第 15 節。
@@ -648,6 +653,10 @@ job pipeline 正常運作所必需的寫入。精確邊界如下：
 
 ### 7.3 **唯一的 2.5c start blocker：目前無法確認「不給工具」在技術上可以被強制保證**（不變）
 
+> **✅ 2026-07-17 更新：本節 blocker 已解除**——engineering 實際查驗並
+> 實測驗證了可技術強制的 zero-tools 呼叫組合，最終旗標組合與實測發現
+> 記錄於第 18 節的解除紀錄。本節以下保留為規劃當時的查證紀錄。
+
 **查證結果（誠實回報，不用猜測填空）**：
 
 - 這個 repo 目前唯一存在的 headless 呼叫實作是
@@ -751,6 +760,15 @@ Stage 2.6 domain dispatch（不呼叫 domain subagent、不涉及使用者核准
 | invalid 輸出如何處理 | fail closed（呼應第 7.1 節），視為執行失敗，走第 3.2 節 Option A 的死信流程 | 不變 |
 | 重跑時哪些欄位必須穩定 | 僅 `decision`、`suggested_owner`、輸出 schema 合法性、零副作用 | **明確不要求** `summary`／`reason` 逐字穩定 |
 
+**✅ 已採用（2026-07-17）**：上表兩項「需使用者拍板」的建議值均已照建議
+採用轉正——triage timeout＝**120 秒**、最大輸入長度＝**50,000 字元**
+（超限在呼叫模型之前直接判定失敗、不截斷硬跑），實作為
+`hermes/bridge_triage_handler.py` 的模組常數並有測試鎖定（另見第 17、20
+節）。另外，structured output 一項在 2.5c 實作期間查驗結果為**支援**
+（`--json-schema`，交付經由 `StructuredOutput` 內部工具，見第 18 節解除
+紀錄）——但一如本節既定設計，程式碼事後驗證＋fail closed 仍是唯一防線，
+模型端的結構化輸出只是額外的強化，不是被依賴的保證。
+
 **澄清（統一 blocker 敘事）**：上表「是否支援嚴格 JSON schema／
 structured output 強制」這一項**不是** start blocker——它是 2.5c 實作
 期間需要查驗、可能影響「加強冪等性保證」的一個技術決策，本設計從一開始
@@ -796,7 +814,8 @@ structured output 強制」這一項**不是** start blocker——它是 2.5c �
 因為 handler 本身**理論上**零工具、零 Agent 能力（技術可行性見第 7.3 節
 blocker），「注入指令讓它做出破壞性動作」這條攻擊面在權限層被擋掉的程度
 取決於第 7.3 節 blocker 是否解除——**在 blocker 解除之前，這一節的防護
-效力有一個未經證實的前提**。
+效力有一個未經證實的前提**。（**2026-07-17 更新**：第 7.3／18 節 blocker
+已解除，zero-tools 已被技術驗證，本節防護的前提已成立。）
 
 剩餘（無論 blocker 是否解除都存在）的風險是「輸出層面的混淆代理」：
 episode 內容裡混入的指令，試圖操縱 handler 產出錯誤的
@@ -840,7 +859,7 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
 
 ## 13. 分階段實作（v6：2.5a 回歸測試描述更新為決定性 fault-injection＋聚合整合測試）
 
-### 2.5a — `jobs.db` migration ＋ `enqueue_once`／`requeue_dead_letter` API ＋回歸測試
+### 2.5a — `jobs.db` migration ＋ `enqueue_once`／`requeue_dead_letter` API ＋回歸測試（✅ 完成，commit `4aef9d1`，2026-07-17）
 
 - 新增五欄（`external_key`／`payload_hash`／`prompt_version`／
   `requeue_count`／`last_requeued_at`）＋三欄 `UNIQUE(source, external_key,
@@ -868,7 +887,7 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
   未變）**＋一個只驗證聚合結果的真實並行整合測試**（第 14 節第 23
   項）；**`actor` 驗證測試**（第 14 節第 30–32 項）。
 
-### 2.5b — 手動 enqueuer CLI
+### 2.5b — 手動 enqueuer CLI（✅ 完成，commit `24cb7fb`，2026-07-17）
 
 - `--dry-run`：依第 6.5 節的候選資格條件（僅
   `import_status ∈ {to_inbox, imported}` ＋ artifact 可唯一定位，**不再
@@ -881,7 +900,7 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
   `python3 hermes/db.py requeue <job_id> --actor ... [--reason ...]`，
   2.5b 不重複實作。
 
-### 2.5c — no-tools 結構化 triage handler **＋ worker source-specific execution routing**
+### 2.5c — no-tools 結構化 triage handler **＋ worker source-specific execution routing**（✅ 完成，commit `8444e7d`，2026-07-17；第 18 節 blocker 已於開工前解除）
 
 - **開工前必須先解除第 18 節的唯一 start blocker**（技術上確認「零工具」
   是否可被強制保證；若只能達到降級保證，需先取得使用者一次獨立明確核准，
@@ -901,7 +920,7 @@ source，job 進入佇列的唯一入口仍是 2.5b 的人工 CLI。
 - Prompt 樣板（第 10 節結構性隔離＋權限重申）。
 - 全套測試矩陣（第 14 節）。
 
-### 2.5d — 3–5 次人工實跑驗收，初始每日上限 1 次
+### 2.5d — 3–5 次人工實跑驗收，初始每日上限 1 次（✅ 驗收完成，2026-07-17——使用者放寬每日 ≤1 為同日多筆，完整紀錄見第 20 節）
 
 - 挑選真實的候選 episode（第 6.5／6.6 節資格），執行 2.5b → 2.5c 全流程，
   人工核對 `jobs.result` 的 JSON 是否合理。
@@ -1050,6 +1069,11 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 
 ## 16. 完成定義（Definition of Done，逐子階段，v6：拿掉環境依賴措辭，拆為三類決定性 requeue 測試——僅第 21、22 項使用 fault injection——與聚合整合測試並列）
 
+> **✅ 驗收狀態（2026-07-17）**：2.5a／2.5b／2.5c／2.5d 四個子階段的 DoD
+> **全數達成**，Stage 2.5 全階段完成並關閉——實作 commit（2.5a `4aef9d1`／
+> 2.5b `24cb7fb`／2.5c `8444e7d`）、新增測試數（19／19／27）、WSL 部署與
+> 2.5d 驗收證據見第 20 節；第 18 節 blocker 解除紀錄見該節。
+
 ### 2.5a DoD
 
 - `jobs.db` migration 冪等（五欄＋三元組 unique index＋新表
@@ -1127,14 +1151,49 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 
 1. 第 8 節：timeout 建議值 120 秒、最大輸入長度建議值 50,000 字元，是否
    合適（皆為可調參數，非架構決定）。
+   **✅ 已採用（2026-07-17）**：兩值均照建議採用——triage timeout＝120
+   秒、輸入上限＝50,000 字元（超限直接失敗、不截斷），已實作為
+   `hermes/bridge_triage_handler.py` 的模組常數並有測試鎖定（第 8、20
+   節同步標註）。
 2. 第 18 節 blocker 若最終確認技術上不可行，是否接受「prompt 層面請求 +
    程式碼事後驗證 fail closed」作為降級後的可接受保證強度先行開工，或
    堅持等到有更強的技術機制才開始 2.5c（**注意：這個決定必須是使用者
    一次獨立、明確的核准，不能被 2.5c 實作過程悄悄預設**，見第 18 節）。
+   **✅ 已失效（2026-07-17）**：blocker 已以技術強制方式解除（見第 18
+   節解除紀錄），從未走到降級路徑，本題無需拍板。
 
 ---
 
 ## 18. 已知阻塞項（Start Blocker，2.5c 開工前必須先解決——只有一項真正的硬阻塞）
+
+> **✅ 唯一 blocker 已解除（2026-07-17，engineering 實際查驗＋實測驗證，
+> 符合本節既定的解除程序第 1–2 步；未走降級路徑）**。
+>
+> 最終實測驗證通過、`invoke_cos_triage.sh` 實際採用的呼叫組合（**以本紀錄
+> 為準；文件先前任何推測性的旗標假設一律以此更正**）：
+>
+> ```
+> claude -p "<prompt>" --tools "" --disallowedTools "mcp__*" \
+>   --allowedTools "StructuredOutput" --permission-mode dontAsk \
+>   --output-format json --json-schema '<schema>'
+> ```
+>
+> 實測發現（記入文件供未來參考）：
+>
+> 1. `--disallowedTools "*"` **不可用**——deny 的優先權高於 allow，會連
+>    `--json-schema` 的內部交付工具 `StructuredOutput` 一起擋掉（模型即使
+>    產出正確 JSON 也交不出來）。
+> 2. `--bare` **不可用**——會跳過憑證載入，導致 `Not logged in`。
+> 3. 執行 cwd 的 `CLAUDE.md` 會被載入 context——入口腳本因此以 `mktemp`
+>    產生的中性目錄作為 cwd，避免任何 CLAUDE.md 指令污染 triage 呼叫。
+> 4. `StructuredOutput` 是**純輸出通道、無副作用**——允許它不影響
+>    zero-tools 保證（它只是 `--json-schema` 交付結果的內部機制，不具備
+>    任何檔案／系統操作能力）。
+> 5. 成功時 envelope 的 `result` 欄位即為 JSON 字串。
+>
+> 第 14 節第 20 項的技術層拒絕測試已隨 2.5c 落地（commit `8444e7d`）；
+> 第 7.5 節要求的呼叫前 zero-tools 前置檢查亦依此旗標組合實作。
+> 本節以下保留為規劃當時的 blocker 敘述，屬決策紀錄，不再是現況。
 
 **唯一的 hard start blocker**：
 
@@ -1169,3 +1228,63 @@ schema → engineering；產出物是排程頻率／派工觸發時機的決策�
 | 2.5a DoD 與測試矩陣的一致性 | DoD 宣稱「四分支都有穩定測試覆蓋」，但測試矩陣對其中一支帶有環境依賴的 hedge，兩者互相矛盾 | **DoD 明確要求分支 4c／4d 的測試必須是決定性 fault-injection，完全不依賴環境**，與測試矩陣的三個決定性分類＋一個聚合整合測試一一對應，不再矛盾 |
 | 後續項目編號 | 第 22–30 項 | 因新增兩項決定性測試（原第 21 項拆成三項），**全部順延為第 24–32 項**，內容不變，只有編號與交叉引用同步更新 |
 | 「三種 fault-injection 測試」措辭精確度（本次修訂新增的小修正） | 第 13、14、16 節有幾處把第 8、21、22 項合稱為「三種 deterministic fault-injection 測試」，未區分第 8 項其實不使用 fault injection | **統一改寫為「三類決定性 requeue 測試，其中只有第 21、22 項使用 fault injection；第 8 項是不需要 fault injection 的決定性 `rowcount=0` 測試」**（或等義措辭），第 4.1d 節結尾新增一段明文小結；不影響任何測試設計本身的內容或斷言 |
+
+---
+
+## 20. 實作與驗收紀錄（2026-07-17——Stage 2.5 全階段完成並關閉；本節為完工後新增的事實紀錄，不改寫前面各節的規劃決策）
+
+### 20.1 實作與部署事實
+
+- **2.5a** commit `4aef9d1`、**2.5b** commit `24cb7fb`、**2.5c** commit
+  `8444e7d`——全部測試綠，三個子階段分別新增 **19／19／27 個沙箱測試**。
+- 已以 `scripts/sync_to_wsl.sh --apply` 下發 WSL 部署側（備份
+  `~/backups/ClaudeCodeOSWin-wsl-pre-sync-20260717T142215.tar.gz`）；部署
+  側三個 2.5 測試套件在 WSL `.venv` 下**全綠**，worker 已載入
+  source-specific execution routing（第 7.5 節）。
+- 第 18 節唯一 start blocker 已於 2.5c 開工前解除（最終旗標組合與五項
+  實測發現見第 18 節解除紀錄）；第 17 節開放問題的採用值已轉正
+  （timeout＝120 秒、輸入上限＝50,000 字元，實作為
+  `hermes/bridge_triage_handler.py` 模組常數並有測試鎖定）。
+
+### 20.2 2.5d 驗收紀錄（2026-07-17；使用者放寬第 13／16 節「每日至多 1 筆」為同日多筆）
+
+**5 筆生產 job 全部 `completed`、`attempts=1`、`thread_id=None`、五欄
+合法 JSON**（第 7.1 節 schema）：
+
+| # | job_id | 候選來源 | decision | 成本 (USD) | 備註 |
+|---|---|---|---|---|---|
+| 1 | `1b84a9e3` | legacy episode `hermes:20260628_004555_13dd7b`（artifact 在 `.processed/`） | `action_candidate`／`suggested_owner=engineering` | 0.104 | 驗證 legacy `event_id` 格式與 `.processed/` 定位路徑（第 14 節第 10 項的真實對應） |
+| 2 | `a1cae59f` | episode `hermes:20260712_164627_419d23:6991..7022`（artifact 在 inbox） | `memory_only` | 0.116 | **偏差**：`suggested_owner` 回 `"na"` 而非空字串、輸出為英文——列入 20.3 的 prompt v2 候選 |
+| 3 | `c20484cf` | 全新鮮鏈路：Telegram 測試 session → scanner 手動觸發 → importer 手動跑 → enqueue | `memory_only` | 0.056 | 驗證端到端全新資料路徑（非既存候選池） |
+| 4 | `fe652b58` | 誘發 `needs_review` 用例 | `memory_only` | 0.065 | 誘發未果，模型推理合格（見下） |
+| 5 | `8db81411` | 誘發 `needs_review` 用例 | `memory_only` | 0.060 | 同上 |
+
+- 第 4、5 筆原意誘發 `needs_review` 未果——**模型推理合格**：「有明確
+  結論的延後／不做」不算無法分類，判成 `memory_only` 是正確行為，不是
+  誤判。
+- **負面案例**：一筆測試 session 被 importer 的 too_short 門檻
+  （200 字元／4 則 message）正確攔截、未進候選——2.4c 結構性排除與 2.5b
+  候選資格的邊界如設計運作。
+- **`needs_review` 以零污染模型探測驗證**：直接呼叫
+  `invoke_cos_triage.sh`（不經 job queue、不落任何生產 job），餵入手工
+  構造的矛盾內容，成功觸發 `needs_review` 且理由精準——至此**三種
+  `decision` 皆有真實模型輸出實例**（此筆為行為探測、非生產 job，不列入
+  上表）。
+- 總驗收成本約 **$0.40**。
+
+### 20.3 遺留待辦（屬 2.6 前小修或 Stage 2.6 範圍；記錄於此，不阻塞 Stage 2.5 關閉）
+
+1. **prompt v2 候選**：`suggested_owner` schema 硬化（enum）、固定輸出
+   語言、`needs_review` 觸發率監測（對應 20.2 第 2 筆的兩項偏差與第 4、
+   5 筆的觀察）。
+2. **候選池殘餘**：importer 整批落地的其他 `to_inbox` episodes 尚未
+   enqueue，日後可用完整 CLI 一次收掉（已 triage 者依 `enqueue_once`
+   的 exists 分支自然 no-op）。
+3. **單筆 enqueue 無 CLI 旗標**：2.5d 以模組內部組件操作完成單筆
+   enqueue；若日常需要，可在 2.6 補 `--event-id` 旗標。
+
+### 20.4 關閉聲明
+
+Stage 2.5（a／b／c／d）於 **2026-07-17 全階段完成並關閉**。下一階段為
+**Stage 2.6 — domain dispatch**（使用者核准 `action_candidate` 後的
+domain 分派；第 0、13 節已點名、**尚未規劃**）。
