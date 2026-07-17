@@ -476,6 +476,65 @@ def reject_dispatch(triage_job_id: str, actor: str,
     return _dispatch_transition(triage_job_id, actor, reason, "rejected", None)
 
 
+def mark_dispatched(triage_job_id: str, dispatch_job_id: str, actor: str,
+                    reason: str | None = None) -> dict:
+    """Stage 2.6c（提案 stage2.6 §5.3／§8）：approved → dispatched ＋
+    `dispatch_job_id` 回填。
+
+    只有 status='approved' 且 dispatch_job_id IS NULL 的 record 允許回填
+    （conditional UPDATE + rowcount 檢查，rowcount=0 一律明確報錯不靜默，
+    比照 _dispatch_transition）。稽核列（action='dispatched'）與狀態轉換在
+    同一 transaction 內寫入。§8 拍板順序「先寫 approved 稽核、再 enqueue、
+    再回填 dispatch_job_id」的第三步就是本函式——enqueue 成功但本函式失敗
+    只會留下「approved 未派工」的可補跑中間態，不會出現「已派工無稽核」。
+    """
+    actor = _normalize_actor(actor)
+    if not isinstance(dispatch_job_id, str) or dispatch_job_id.strip() == "":
+        raise ValueError("dispatch_job_id 不得為空或純空白")
+    now = _now_iso()
+    with _lock, _db() as conn:
+        cur = conn.execute(
+            "UPDATE dispatch_records SET status='dispatched', "
+            "dispatch_job_id=?, updated_at=? "
+            "WHERE triage_job_id=? AND status='approved' "
+            "AND dispatch_job_id IS NULL",
+            (dispatch_job_id, now, triage_job_id),
+        )
+        if cur.rowcount == 1:
+            event_seq = _insert_dispatch_event(
+                conn, triage_job_id, "dispatched", actor, reason, now)
+            return {
+                "triage_job_id": triage_job_id, "status": "dispatched",
+                "dispatch_job_id": dispatch_job_id, "actor": actor,
+                "reason": reason, "occurred_at": now, "event_seq": event_seq,
+            }
+        row = conn.execute(
+            "SELECT status, dispatch_job_id FROM dispatch_records "
+            "WHERE triage_job_id=?",
+            (triage_job_id,),
+        ).fetchone()
+        if row is None:
+            raise DispatchTransitionRejected(
+                f"查無 triage_job_id={triage_job_id} 的 dispatch record——"
+                "無法回填 dispatch_job_id")
+        raise DispatchTransitionRejected(
+            f"dispatch record {triage_job_id} 目前 status={row['status']!r}、"
+            f"dispatch_job_id={row['dispatch_job_id']!r}，不允許回填為 "
+            "dispatched（只有 status='approved' 且尚未回填的 record 可以，"
+            "提案 §5.3／§8）")
+
+
+def list_approved_undispatched() -> list[sqlite3.Row]:
+    """Stage 2.6c（§8）：找出「approved 未派工」中間態的 record（approve 後
+    enqueue 失敗／process crash 留下的可補跑狀態）。"""
+    with _db() as conn:
+        return conn.execute(
+            "SELECT * FROM dispatch_records "
+            "WHERE status='approved' AND dispatch_job_id IS NULL "
+            "ORDER BY created_at ASC"
+        ).fetchall()
+
+
 def get_dispatch_record(triage_job_id: str) -> sqlite3.Row | None:
     with _db() as conn:
         return conn.execute(
