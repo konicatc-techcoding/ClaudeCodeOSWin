@@ -43,6 +43,12 @@ source-specific execution routing（允許、屬本階段必要範圍），避�
 實測解除（最終旗標組合與實測發現見提案第 18 節解除紀錄），實作 commit、
 測試數、部署證據與 2.5d 驗收紀錄見提案**第 20 節**與下方 Stage 2.5 節。
 下一階段為 **Stage 2.6 — domain dispatch（尚未規劃）**。
+**更新（2026-07-17，第二次）**：Stage 2.6 規劃提案同日產出並收斂為 **v2**
+（[stage2.6-domain-dispatch-proposal.md](stage2.6-domain-dispatch-proposal.md)，
+九項開放問題全數拍板、皆採建議值），隨後 **2.6a／2.6b／2.6c 實作、WSL 部署
+與 2.6d 驗收同日全部完成，Stage 2.6 全階段 ✅ 完成並關閉**——完工紀錄正本
+見提案 **§15**、摘要見下方新增的 Stage 2.6 節；優先順序總結同步更新
+（下一個要規劃的是 **Stage 2.7 — Slack 投遞與排程化**，或直接進 Stage 3）。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -439,6 +445,49 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 
 ---
 
+## Stage 2.6 — Domain Dispatch ✅ 完成（2026-07-17；提案 v2 九項拍板後同日核准實作）
+
+> **✅ Stage 2.6 全階段完成並關閉（2026-07-17）**：規劃提案
+> [stage2.6-domain-dispatch-proposal.md](stage2.6-domain-dispatch-proposal.md)
+> （`planning` domain 起草）同日 v1→v2 收斂——九項開放問題全數拍板、皆採
+> 建議值，核心為 **dispatch 語意選項 (a)**（核准佇列，無任何自動 dispatch；
+> 人是未信任 episode 內容與有工具執行環境之間的結構性 gate）——之後依
+> a→b→c→d 順序、每個子階段開工前經使用者核准實作：
+>
+> - **2.6a**（commit `63c2812`）：triage prompt v2（`bridge_episode_triage_v2`，
+>   owner enum 名單由 `registry/agents.yaml` 注入 prompt 與驗證器的雙端硬化、
+>   `summary`／`reason` 固定繁體中文）＋ enqueuer `--event-id` 旗標＋候選池
+>   殘餘收尾——2.5 §20.3 三項遺留待辦就此收掉；handler 41／enqueuer 29 測試綠。
+> - **2.6b**（commit `092b668`）：`jobs.db` 新增 `dispatch_records`＋
+>   `dispatch_events`（append-only 稽核）＋核准 CLI（`list`／`approve`／
+>   `reject`，`--dry-run`）；本子階段 approve 只落資料不派工（兩段式核准
+>   節奏，如拍板執行）；32 測試綠。
+> - **2.6c**（commit `c5e557c`）：執行閉環——approve→`enqueue_once`
+>   （`source='bridge_domain_dispatch'`、`prompt_version='bridge_domain_dispatch_v1'`）
+>   →worker 既有 else 路徑→`invoke_cos.sh`；`resume-approved`／`status`
+>   子指令；dispatch 套件共 51 測試綠。**`hermes/worker.py` 零改動**（以
+>   測試斷言把關）、`hermes/db.py` 零刪除。
+> - **部署**：`sync_to_wsl.sh --apply` 下發 WSL（服務停／起乾淨），部署側
+>   dispatch 測試綠。
+> - **2.6d 驗收**：2 筆真實候選**全數走完人工決策閉環**——`1b84a9e3`
+>   （engineering 建議、ResearchHelper）經使用者 **reject**（舊 episode、
+>   專案不在本 repo、subagent 缺存取脈絡；reject 路徑真實走過，稽核
+>   event_seq=2）；`e0c0dfce`（automation 建議）核准、任務描述人眼定案後
+>   dispatch job `06128712` 約 4.5 分鐘 completed（`attempts=1`、
+>   `thread_id=NULL`、成本 **$0.846**＝dispatch 單筆成本基準），headless
+>   CoS **真實以 Agent 工具分派 automation subagent**，回傳誠實的結構化
+>   狀態報告（唯讀邊界如實聲明、間接證據齊備、不越權、零檔案修改）。
+>   失敗路徑（dead_letter→requeue）經使用者拍板以沙箱覆蓋滿足（22 個
+>   fault-injection mock 測試＋2.5a requeue CLI 已實測），不刻意誘發真實
+>   失敗——原 DoD「失敗路徑實走」以此方式滿足／調整（提案 §15.4）。
+> - **遺留（不阻塞關閉）**：07-18 09:00 cron 自然執行後的 Slack 投遞最終
+>   確認（人工檢視）；automation subagent 建議的 cron／platform 唯讀橋接
+>   構想列**未排程想法**；Slack 投遞維持既拍板結論，屬 **Stage 2.7**。
+>
+> 完工紀錄正本（逐筆驗收、完成定義覆核、拍板調整、遺留事項）見提案 **§15**。
+
+---
+
 ## Stage 3 — Dashboard Hermes Session 檢視頁
 
 **目標**：在既有 Streamlit dashboard 加一頁 Hermes session 檢視（用 adapter 的
@@ -466,11 +515,16 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 4. ~~Stage 2.5~~ ✅ 全階段完成並關閉（2026-07-17）：提案收斂至 v6 後核准實作，
    2.5a/2.5b/2.5c/2.5d 全部完成、部署側驗證通過——驗收紀錄見提案第 20 節、
    摘要見上方 Stage 2.5 節。
-5. **Stage 2.6 — domain dispatch**（下一個要規劃的階段，**尚未規劃**）：使用者
-   核准 `action_candidate` 後的 domain 分派，另案設計（提案第 0、13 節已點名）。
-   Stage 2.5 遺留小修（prompt v2 候選、候選池殘餘一次收掉、單筆 enqueue 的
-   `--event-id` 旗標——見提案第 20.3 節）屬 2.6 前小修或 2.6 範圍，不阻塞任何事。
-6. **Stage 3**：觀測性收尾。
+5. ~~Stage 2.6 — domain dispatch~~ ✅ 全階段完成並關閉（2026-07-17）：提案 v2
+   九項拍板後同日 2.6a/2.6b/2.6c 實作、WSL 部署、2.6d 驗收完成——完工紀錄見
+   提案 §15、摘要見上方 Stage 2.6 節。Stage 2.5 遺留小修（prompt v2、候選池
+   殘餘、`--event-id` 旗標）已隨 2.6a 一併收掉。
+6. **Stage 2.7 — Slack 投遞與排程化**（下一個候選階段，**尚未規劃**）：2.6 拍板
+   明確列為另案（2.6 提案 §7；頻道對應屆時由使用者指定，機制起點參考
+   `delivered_at` 模式、投遞側落 hermes-agent）。是否開工、或直接進 Stage 3，
+   以 2.6d 建立的成本基準（dispatch 單筆 $0.846）與 needs_review 觸發率
+   觀察（現況 0）為決策依據，由使用者拍板。
+7. **Stage 3**：觀測性收尾。
 
 ## 持續事項（不設 stage，跨階段有效）
 
@@ -497,5 +551,5 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 | ~~Windows 開發正本無版控~~ **已解**（2026-07-09 `git init`，baseline `03c7a0e`） | （解除前）程式層 rollback 只能靠 WSL pre-sync tarball；bridge 這種長期演化元件無變更歷史 | 已完成 `git init` 與 baseline commit，後續變更均入版控；git-based sync 仍列 sync plan v0.2 升級路徑；rollback 現況索引見 checkpoint 第 6 節 |
 | state.db 訊息數相對 Stage 0 基準下降（2026-07-09 觀察） | 若是讀錯 profile db，bridge 會處理錯的資料集 | Stage 2 DoD 5 基準複查；讀取一律 `--profile default` ＋ snapshot |
 | **bridge_state schema v1 與拍板欄位清單有出入**（2026-07-10 新增） | 不先對齊就實作，會產生兩套欄位語意並存 | 對齊明文列為 Stage 2 實作第一步（memory-bridge-state.md 第 6 節）；schema／測試／文件三者同動 |
-| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容。**2026-07-17 更新**：blocker 已實測解除（zero-tools 技術強制，提案第 18 節解除紀錄），prompt injection 測試（矩陣第 15、20 項）已隨 2.5c（commit `8444e7d`）落地——攻擊面已如設計侷限在輸出內容層；輸出層本身的殘餘風險由 `needs_review` 觸發率監測（提案第 20.3 節，2.6 前小修候選）持續觀察 |
+| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容。**2026-07-17 更新**：blocker 已實測解除（zero-tools 技術強制，提案第 18 節解除紀錄），prompt injection 測試（矩陣第 15、20 項）已隨 2.5c（commit `8444e7d`）落地——攻擊面已如設計侷限在輸出內容層；輸出層本身的殘餘風險由 `needs_review` 觸發率監測（提案第 20.3 節，2.6 前小修候選）持續觀察。**2026-07-17 第二次更新**：觸發率監測已隨 2.6b 的 CLI decision 計數落地（2.6 提案 §5.4），2.6d 盤點現況：memory_only=5／action_candidate=2／needs_review=0／異常=0；下游 dispatch 的注入緩解鏈（人工核准硬 gate、episode 全文不入 prompt、殘餘風險誠實標註）見 2.6 提案 §10 |
 | **並行 `requeue_dead_letter` 呼叫的 SQLite 例外處理**（2026-07-12 第四次修訂新增） | 若實作沿用 v4 的二分支假設，WAL 模式下的 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外可能未被正確分類，誤報「已被別人 requeue」或讓例外未經處理往外拋 | 提案第 4.1b／4.1c 節已改寫為四分支狀態機並定義 `RequeueRetryableDBError`；2.5a 實作與測試（提案第 14 節第 21 項）需嚴格遵循，不得簡化回二分支假設。**2026-07-17 更新**：已隨 2.5a（commit `4aef9d1`）依四分支狀態機實作，並以決定性 fault-injection 測試（提案第 14 節第 21、22 項）＋聚合並行整合測試（第 23 項）鎖定 |

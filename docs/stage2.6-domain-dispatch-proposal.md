@@ -1,6 +1,6 @@
 # Stage 2.6 — Domain Dispatch(設計提案 v2)
 
-日期:2026-07-17　狀態:**v2——九項開放問題已全數拍板,待使用者核准 2.6a 開工**
+日期:2026-07-17　狀態:**✅ Stage 2.6 全階段完成並關閉(2026-07-17)——2.6a–2.6d 實作/部署/驗收紀錄見 §15;以下 v2 規劃內文全文保留為決策紀錄**
 負責規劃:`planning` domain
 負責領域(實作階段):`engineering`(全部程式碼與 schema、驗收執行);
 `automation` 在本階段角色接近零(本階段不安裝任何 timer,理由見第 12 節)。
@@ -27,6 +27,9 @@ routing)、`hermes/bridge_triage_handler.py`(canonical JSON 落地形狀)、
   §11 原文保留為決策紀錄;另補正 §1.2 生產 job 筆數盤點的精確事實
   (2.5 關閉後同日 2 筆清池 job 的 job_id)。完整差異見下方
   「版本差異(v1→v2)」簡表。
+- **完工(2026-07-17)** = 2.6a–2.6d 同日實作、部署、驗收完成,Stage 2.6
+  全階段關閉——完工紀錄見 **§15**;v2 規劃內文不再修訂,保留為決策紀錄
+  (與 2.5 提案 §20 的收尾慣例一致)。
 
 ## 版本差異(v1→v2)
 
@@ -473,7 +476,7 @@ v2 契約變更內容(2.6a 範圍):
 
 ## 9. 子階段拆分(比照 2.5 的 a/b/c/d 模式;皆人工觸發,不裝 timer;✅ 順序與兩段式核准節奏已拍板,§11 第 5、9 題——依 a→b→c→d 執行,每個子階段開工前經使用者核准)
 
-### 2.6a — triage prompt v2 + 候選池收尾(前置小階段)
+### 2.6a — triage prompt v2 + 候選池收尾(前置小階段)——✅ 完成(2026-07-17,commit `63c2812`)
 
 - **範圍**:`bridge_episode_triage_v2` 契約(owner enum 硬化——名單由
   registry 讀取、固定輸出繁體中文);enqueuer 補 `--event-id` 旗標;
@@ -485,7 +488,7 @@ v2 契約變更內容(2.6a 範圍):
   輸出,不打真模型;真模型呼叫只在人工收尾時發生並記錄成本)。
 - **不做**:不重跑 v1 memory_only;不動 handler 執行語意;不動 worker。
 
-### 2.6b — dispatch 資料層+核准 CLI(不呼叫任何模型)
+### 2.6b — dispatch 資料層+核准 CLI(不呼叫任何模型)——✅ 完成(2026-07-17,commit `092b668`)
 
 - **範圍**:jobs.db migration(`dispatch_records`+`dispatch_events`,
   冪等);dispatch CLI:`list`(掃描+防禦性 parse+冪等登記+
@@ -501,7 +504,7 @@ v2 契約變更內容(2.6a 範圍):
   異常呈現測試(壞 JSON/壞 enum/髒 owner);既有 jobs 路徑零回歸。
 - **不做**:不 enqueue、不呼叫模型、不碰 worker、不碰 bridge_state.db。
 
-### 2.6c — 核准後派工與執行閉環
+### 2.6c — 核准後派工與執行閉環——✅ 完成(2026-07-17,commit `c5e557c`)
 
 - **範圍**:approve 接上 `enqueue_once`(第 5.3 節雙層冪等+第 8 節
   失敗順序);dispatch prompt 組裝(第 4.2 節樣板:人審任務描述+未信任
@@ -517,7 +520,7 @@ v2 契約變更內容(2.6a 範圍):
   真實 headless CoS 呼叫留給 2.6d。
 - **不做**:不新增 worker 分支、不新增執行入口腳本、不做 Slack。
 
-### 2.6d — 真實驗收(低量、人工全程在場)
+### 2.6d — 真實驗收(低量、人工全程在場)——✅ 完成(2026-07-17,驗收紀錄見 §15.3;失敗路徑 DoD 的拍板調整見 §15.4)
 
 - **範圍**:對現有 2 筆真實 `action_candidate`(engineering:job
   `1b84a9e3`;automation:job `e0c0dfce`——以 2.6b 實際盤點為準)走
@@ -610,6 +613,11 @@ invoke_cos.sh headless CoS+Agent 分派、jobs.db migration 慣例)都是
 (telegram/manual)已有實例但未針對「domain 任務」型 prompt 專門驗證——
 2.6d 的前 2 筆真實 dispatch 本身就是這個驗證,不需要提前獨立做。
 
+**2026-07-17 更新**:2.6a–2.6d 已依既有節奏逐子階段核准、實作並完成——
+本節「待使用者核准 2.6a 開工」已成歷史;上述那項非阻塞驗證也已由 2.6d
+的真實 dispatch 完成(headless CoS 確實以 Agent 工具分派 automation
+subagent,見 §15.3)。完工紀錄見 §15。
+
 ---
 
 ## 14. 完成定義總表(全階段)
@@ -626,3 +634,112 @@ Stage 2.6 整體視為完成,當且僅當:
    bridge_state.db 邊界、headless memory 邊界全部不變。
 5. 成本、偏差與 needs_review 觸發率觀察回報使用者,作為是否規劃
    排程化/Slack 投遞(Stage 2.7)的決策依據。
+
+---
+
+## 15. 完工紀錄(2026-07-17——Stage 2.6 全階段完成並關閉)
+
+比照 2.5 提案 §20 的收尾模式:本節是 Stage 2.6 實作、部署與驗收的
+**正本紀錄**;§0–§14 規劃內文保留為決策紀錄,不回頭改寫。逐條完成定義
+覆核見 §15.5,遺留事項見 §15.6。
+
+### 15.1 實作事實(commit 對照;全部 2026-07-17 同日完成)
+
+| 子階段 | commit | 內容 | 測試 |
+|---|---|---|---|
+| 2.6a | `63c2812` | triage prompt v2(`bridge_episode_triage_v2`):owner enum 名單由 `registry/agents.yaml` 讀取後注入 prompt 與驗證器的**雙端硬化**、`summary`/`reason` 固定繁體中文;enqueuer 補 `--event-id` 單筆旗標;候選池殘餘收尾 | handler 41、enqueuer 29,全綠 |
+| 2.6b | `092b668` | `jobs.db` migration:`dispatch_records`+`dispatch_events`(append-only 稽核);核准 CLI(`list`/`approve`/`reject`,含 `--dry-run`);本子階段 approve 只落資料不派工(§9 兩段式核准節奏,如拍板執行) | 32,全綠 |
+| 2.6c | `c5e557c` | 執行閉環:approve→`enqueue_once`(`source='bridge_domain_dispatch'`、`prompt_version='bridge_domain_dispatch_v1'`)→worker 既有 else 路徑→`invoke_cos.sh`;`resume-approved`/`status` 子指令 | dispatch 套件共 51,全綠 |
+
+- 全部測試套件綠;`hermes/db.py` 零刪除;**`hermes/worker.py` 零改動**
+  ——2.6c 以測試斷言把關(dispatch job 不落入 triage 分支),兌現 §4.1
+  「零 worker 變更=零回歸面」的設計承諾。
+
+### 15.2 部署
+
+- `scripts/sync_to_wsl.sh --apply` 將 2.6a/b/c 下發 WSL 部署側;服務
+  停/起乾淨;部署側 dispatch 測試綠。
+
+### 15.3 2.6d 驗收逐筆紀錄
+
+**候選盤點(`list --actor razer`)**:
+
+- 登記 2 筆 `proposed`:`1b84a9e3`(suggested_owner=engineering)、
+  `e0c0dfce`(suggested_owner=automation)——與 §1.2 現況基準一致。
+- `needs_review` 佇列:空。
+- decision 累計計數:`memory_only`=5、`action_candidate`=2、異常
+  (壞 JSON/壞 enum)=0——§5.4 觸發率監測的第一筆基準。
+
+**候選 1 — `1b84a9e3`(ResearchHelper;engineering 建議):使用者 reject**
+
+- reject 理由(稽核留存):6/28 舊 episode、該專案不在 AgentOS repo、
+  domain subagent 缺乏存取脈絡。
+- 意義:**reject 路徑真實走過**(不只沙箱);稽核 `dispatch_events`
+  列 event_seq=2,可完整回答這筆候選的決策歷史(§14 第 3 條的實例)。
+
+**候選 2 — `e0c0dfce`(automation 建議):approve → dispatch → domain 執行 → 人工檢視,完整閉環**
+
+- 任務描述經人眼定案(§4.2 的人審 gate 實走):「檢查每日 GitHub AI
+  新聞 cron 的 Slack 投遞現況」。
+- dispatch job `06128712`:約 4.5 分鐘 completed、`attempts=1`、
+  `thread_id=NULL`(恆不 resume,符合 §4.1)、成本 **$0.846**——
+  dispatch 單筆成本基準確立(對照 triage 單筆 ~$0.06–0.12,與 §10
+  「一到兩個數量級以上」的預期一致)。
+- headless CoS **真實以 Agent 工具分派 automation subagent**(§13 的
+  非阻塞驗證就此完成),回傳結構化狀態報告,品質符合預期:
+  - 誠實回報唯讀橋接不涵蓋 cron/gateway 即時狀態;
+  - 提供間接證據:cron `daily-github-ai-models-applications`
+    (`9a65cc2347c8`)、目標頻道 `C0BHG2195BL`(#ai-news)、07-16 曾
+    觸發但 Slack 未連線;
+  - 明確不越權修改任何設定;**零檔案修改**(headless 邊界抽查通過:
+    `memory/*.md` 正本零寫入)。
+- 主 session 後續行動(互動式 session 整合 subagent 報告後執行,不屬
+  dispatch job 本身的範圍):Windows 側確認 cron 仍 active(下次觸發
+  2026-07-18 09:00);把 `C0BHG2195BL` 加入 default profile allowlist
+  (備份 `config.yaml.bak.20260717-234942`);受控 gateway restart
+  (drained cleanly)載入新清單;**最終投遞確認留待 07-18 09:00 cron
+  自然執行後人工檢視**(遺留事項,見 §15.6 第 1 項)。
+
+### 15.4 拍板調整:失敗路徑(dead_letter→requeue)DoD 的滿足方式
+
+- §9 2.6d DoD 原文含「或明確失敗且死信/requeue 路徑實走一次」;實際
+  驗收兩筆候選一成一拒,**沒有自然失敗發生**。
+- **使用者拍板(2026-07-17):接受以沙箱覆蓋滿足失敗路徑**——依據:
+  22 個含 fault-injection 的 mock 測試(completed/failed/dead_letter
+  全路徑)+ 2.5a requeue CLI 已實測;**不刻意誘發真實失敗**(誘發要
+  多付一筆真實 dispatch 成本,驗證的卻是已被決定性測試鎖定的路徑)。
+- 後續處置約定:首次自然失敗發生時,依 `status` 子指令的 runbook 提示
+  處理(先讀 per-job log 評估副作用,再人工 `requeue`——§8 既有設計,
+  不因本拍板改變)。
+
+### 15.5 完成定義覆核(逐條對照 §14)
+
+1. 各子階段 DoD 達成、每個子階段開工前經使用者核准 ✅(2.6d 失敗路徑
+   一項以 §15.4 的拍板方式滿足/調整)。
+2. 「至少 2 筆真實 `action_candidate` 完成閉環」——**誠實標註與原文的
+   差異**:候選池總量即 2 筆,**全數(2/2)走完人工決策閉環**;其中
+   1 筆走完 approve→dispatch→domain 執行→人工檢視全鏈,另 1 筆真實走
+   reject 路徑(reject 是核准流程的正當出口,§0.1 第 2 點本就把
+   approve/reject 並列,不是缺漏)。全程零未經核准的自動執行。使用者
+   據此判定 2.6d 驗收通過、全階段關閉。
+3. 冪等與稽核經實測 ✅:`list` 重跑零重複登記;`dispatch_events` 可
+   完整回答每筆候選的決策歷史(候選 1 的 event_seq=2 為實例)。
+4. 既有系統零回歸 ✅:全部測試套件綠、`db.py` 零刪除、`worker.py`
+   零改動;headless 邊界抽查通過(§15.3)。
+5. 成本、偏差與 needs_review 觸發率回報 ✅:dispatch 單筆 $0.846;
+   needs_review 現況 0 筆;decision 計數 memory_only=5/
+   action_candidate=2/異常=0——作為 Stage 2.7(排程化/Slack 投遞)
+   規劃與否的決策依據。
+
+### 15.6 遺留事項(不阻塞關閉)
+
+1. **07-18 09:00 cron 投遞最終確認**:allowlist 與 gateway restart 已
+   完成(§15.3),待 `daily-github-ai-models-applications` cron 自然
+   執行後人工檢視 #ai-news 是否收到投遞——這是候選 2 後續行動的收尾,
+   不是 dispatch 機制的缺口。
+2. **cron/platform 唯讀橋接構想**(automation subagent 於狀態報告中
+   提出的建議):讓橋接層能唯讀取得 cron/gateway 即時狀態,避免只能靠
+   間接證據回答平台狀態問題——列為**未排程想法**,不指派 stage、不
+   承諾時程。
+3. **Slack 投遞**:維持既拍板結論(§7、§11 第 2 題),屬 Stage 2.7,
+   本階段零實作。
