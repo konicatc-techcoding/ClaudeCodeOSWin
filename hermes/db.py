@@ -44,6 +44,13 @@ class RequeueRejected(RuntimeError):
     （分支 4c），一律用這個例外，呼叫端不需分辨偵測路徑。"""
 
 
+class DispatchTransitionRejected(RuntimeError):
+    """Stage 2.6b（提案 stage2.6 §5.3／§9「2.6b」DoD）：dispatch_records
+    狀態機拒絕本次轉換——record 不存在、或目前 status 不是 'proposed'
+    （重複 approve、reject 後 approve、approve 後 reject 等非法轉換）。
+    一律明確報錯，不靜默 no-op（比照 RequeueRejected 的 fail-visible 慣例）。"""
+
+
 class RequeueRetryableDBError(RuntimeError):
     """requeue_dead_letter 遇到暫時性 DB 爭用（busy/snapshot 衝突），且
     重新查詢確認 job 當下仍是 dead_letter（§4.1c 分支 4d）。本函式不自動
@@ -155,6 +162,35 @@ def _migrate_schema(conn: sqlite3.Connection):
             previous_error    TEXT,
             previous_attempts INTEGER NOT NULL,
             PRIMARY KEY (job_id, requeue_seq)
+        )
+    """)
+    # Stage 2.6b（提案 stage2.6 §5.1）：dispatch 資料層兩張新表。冪等
+    # （CREATE TABLE IF NOT EXISTS）、對既有列零影響、不動 jobs 表既有欄位、
+    # 不碰 bridge_state.db。dispatch_records 的 UNIQUE(triage_job_id) 是
+    # 第一層冪等錨點；dispatch_events 為 append-only 稽核（樣板＝
+    # job_requeue_events：複合 PK、actor 必填、與狀態轉換同 transaction 寫入、
+    # 只有 INSERT 沒有 UPDATE/DELETE 路徑）。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dispatch_records (
+            triage_job_id    TEXT NOT NULL UNIQUE,
+            event_id         TEXT NOT NULL,
+            suggested_owner  TEXT,
+            status           TEXT NOT NULL DEFAULT 'proposed',
+            task_description TEXT,
+            dispatch_job_id  TEXT,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dispatch_events (
+            triage_job_id    TEXT    NOT NULL,
+            event_seq        INTEGER NOT NULL,
+            occurred_at      TEXT    NOT NULL,
+            action           TEXT    NOT NULL,
+            actor            TEXT    NOT NULL,
+            reason           TEXT,
+            PRIMARY KEY (triage_job_id, event_seq)
         )
     """)
 
@@ -316,6 +352,152 @@ def requeue_dead_letter(job_id: str, actor: str, reason: str | None = None) -> d
         # 分支 4d：job 仍是 dead_letter，純暫時性 DB 爭用——不自動重試、
         # 不誤報成「已被別人 requeue 過」。
         raise RequeueRetryableDBError(job_id, exc) from exc
+
+
+# ---------- Stage 2.6b：dispatch 資料層（提案 stage2.6 §5） ----------
+
+def _normalize_actor(actor) -> str:
+    """actor 驗證（§5.1：沿用 requeue_dead_letter 慣例）——任何 DB 操作之前
+    拒絕空/純空白；寫入稽核列的是 strip() 後的正規化字串。"""
+    if not isinstance(actor, str) or actor.strip() == "":
+        raise ValueError("actor 不得為空或純空白")
+    return actor.strip()
+
+
+def _insert_dispatch_event(conn: sqlite3.Connection, triage_job_id: str,
+                           action: str, actor: str, reason: str | None,
+                           now: str) -> int:
+    """在**呼叫端的同一 transaction 內**append 一筆 dispatch_events 稽核列
+    （比照 job_requeue_events：MAX(seq)+1、只 INSERT）。回傳 event_seq。"""
+    seq_row = conn.execute(
+        "SELECT COALESCE(MAX(event_seq), 0) + 1 AS seq "
+        "FROM dispatch_events WHERE triage_job_id=?",
+        (triage_job_id,),
+    ).fetchone()
+    event_seq = seq_row["seq"]
+    conn.execute(
+        "INSERT INTO dispatch_events (triage_job_id, event_seq, occurred_at, "
+        "action, actor, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        (triage_job_id, event_seq, now, action, actor, reason),
+    )
+    return event_seq
+
+
+def register_dispatch_record(triage_job_id: str, event_id: str,
+                             suggested_owner: str | None, actor: str) -> bool:
+    """冪等登記一筆 dispatch record（§5.2 第 3 點）。
+
+    INSERT ... ON CONFLICT(triage_job_id) DO NOTHING——比照 enqueue_once 的
+    exactly-once 精神，UNIQUE(triage_job_id) 是權威。只有**真的新建**時才
+    append 一筆 action='proposed' 的稽核列（同 transaction）；已存在 →
+    回傳 False、零寫入（重跑 list 零重複登記，§9 2.6b DoD）。
+    suggested_owner 原樣保存（可能是髒值如 "na"，§5.1——驗證與人工確認在
+    CLI 呈現層，資料層不清洗）。
+    """
+    actor = _normalize_actor(actor)
+    now = _now_iso()
+    with _lock, _db() as conn:
+        cur = conn.execute(
+            "INSERT INTO dispatch_records (triage_job_id, event_id, "
+            "suggested_owner, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'proposed', ?, ?) "
+            "ON CONFLICT(triage_job_id) DO NOTHING",
+            (triage_job_id, event_id, suggested_owner, now, now),
+        )
+        if cur.rowcount == 1:
+            _insert_dispatch_event(conn, triage_job_id, "proposed", actor,
+                                   None, now)
+            return True
+        return False
+
+
+def _dispatch_transition(triage_job_id: str, actor: str, reason: str | None,
+                         new_status: str,
+                         task_description: str | None) -> dict:
+    """proposed → approved/rejected 的共用狀態機（§5.3 第一層的簡化版：
+    conditional UPDATE + rowcount 檢查；rowcount=0 一律明確報錯不靜默）。
+    只有 status='proposed' 的 record 允許轉換——重複 approve、reject 後
+    approve、approve 後 reject 全部走 DispatchTransitionRejected。
+    稽核列與狀態轉換在同一 transaction 內寫入。"""
+    actor = _normalize_actor(actor)
+    now = _now_iso()
+    with _lock, _db() as conn:
+        if task_description is not None:
+            cur = conn.execute(
+                "UPDATE dispatch_records SET status=?, task_description=?, "
+                "updated_at=? WHERE triage_job_id=? AND status='proposed'",
+                (new_status, task_description, now, triage_job_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE dispatch_records SET status=?, updated_at=? "
+                "WHERE triage_job_id=? AND status='proposed'",
+                (new_status, now, triage_job_id),
+            )
+        if cur.rowcount == 1:
+            event_seq = _insert_dispatch_event(
+                conn, triage_job_id, new_status, actor, reason, now)
+            return {
+                "triage_job_id": triage_job_id, "status": new_status,
+                "task_description": task_description, "actor": actor,
+                "reason": reason, "occurred_at": now, "event_seq": event_seq,
+            }
+        row = conn.execute(
+            "SELECT status FROM dispatch_records WHERE triage_job_id=?",
+            (triage_job_id,),
+        ).fetchone()
+        if row is None:
+            raise DispatchTransitionRejected(
+                f"查無 triage_job_id={triage_job_id} 的 dispatch record——"
+                "請先跑 dispatch CLI list 完成冪等登記（不提供繞過 triage 的"
+                "人工直建路徑，提案 §5.4）")
+        raise DispatchTransitionRejected(
+            f"dispatch record {triage_job_id} 目前 status={row['status']!r}，"
+            f"不允許轉換為 {new_status!r}（只有 'proposed' 可以 approve/"
+            "reject；重複 approve、reject 後 approve 等一律明確拒絕，"
+            "提案 §9 2.6b DoD）")
+
+
+def approve_dispatch(triage_job_id: str, actor: str, task_description: str,
+                     reason: str | None = None) -> dict:
+    """proposed → approved（§9「2.6b」：**只落 record 與稽核，不 enqueue、
+    不呼叫模型**——執行閉環是 2.6c）。task_description 必填非空
+    （§5.1：approved 起非空；內容是核准當下經人確認的任務描述）。"""
+    if not isinstance(task_description, str) or task_description.strip() == "":
+        raise ValueError("task_description 不得為空或純空白（approved 的 "
+                         "record 必須帶人工確認過的任務描述，提案 §5.1）")
+    return _dispatch_transition(triage_job_id, actor, reason, "approved",
+                                task_description.strip())
+
+
+def reject_dispatch(triage_job_id: str, actor: str,
+                    reason: str | None = None) -> dict:
+    """proposed → rejected（到此為止，不建任何 job，§3）。"""
+    return _dispatch_transition(triage_job_id, actor, reason, "rejected", None)
+
+
+def get_dispatch_record(triage_job_id: str) -> sqlite3.Row | None:
+    with _db() as conn:
+        return conn.execute(
+            "SELECT * FROM dispatch_records WHERE triage_job_id=?",
+            (triage_job_id,),
+        ).fetchone()
+
+
+def list_dispatch_records() -> list[sqlite3.Row]:
+    with _db() as conn:
+        return conn.execute(
+            "SELECT * FROM dispatch_records ORDER BY created_at ASC"
+        ).fetchall()
+
+
+def list_dispatch_events(triage_job_id: str) -> list[sqlite3.Row]:
+    with _db() as conn:
+        return conn.execute(
+            "SELECT * FROM dispatch_events WHERE triage_job_id=? "
+            "ORDER BY event_seq ASC",
+            (triage_job_id,),
+        ).fetchall()
 
 
 def claim_next_job(worker_id: str) -> dict | None:
