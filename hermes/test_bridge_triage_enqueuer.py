@@ -5,6 +5,9 @@
 （v6）第 14 節測試矩陣中屬於 2.5b 的項目：第 12、13、17、24、25 項，外加
 §6.5 條件 2 的唯一定位（找不到／多處定位 → ineligible）、legacy 列候選、
 bridge_state.db 唯讀、CLI exit code。
+Stage 2.6a 追加（docs/stage2.6-domain-dispatch-proposal.md §6／§9）：
+DEFAULT_PROMPT_VERSION 升版 v2、`--event-id` 單筆 enqueue（存在／不存在／
+ineligible、dry-run 相容、identity 冪等）、v1 job 零改動。
 
 全部沙箱化：tmp 目錄下的 bridge_state.db／inbox 樹／jobs.db（monkeypatch
 db.DB_PATH），絕不碰真實 DB 與真實 memory/inbox/。
@@ -244,13 +247,109 @@ class EnqueueOnceAuthorityTests(EnqueuerTestCase):
         self.assertEqual(rows[0]["payload_hash"], original_hash)
 
     def test_new_prompt_version_creates_new_job(self):
-        """§2.2：同 episode、新 prompt_version → 新 job，不與舊版本衝突。"""
+        """§2.2：同 episode、新 prompt_version → 新 job，不與舊版本衝突
+        （2.6a 後預設已是 v2，這裡用假想的 v3 驗證同一機制）。"""
         self._episode_row()
         self._write_artifact("hermes_session_sess1_ep1-5.md")
         self._run()
-        result = self._run(prompt_version="bridge_episode_triage_v2")
+        result = self._run(prompt_version="bridge_episode_triage_v3")
         self.assertEqual(result["counts"]["created"], 1)
         self.assertEqual(len(self._job_rows()), 2)
+
+    def test_v1_to_v2_upgrade_leaves_v1_job_untouched(self):
+        """2.6a：既有 v1 job 零改動——以 v1 建一筆後改用預設（v2）再跑，
+        v1 job 的每個欄位 byte 不變、v2 是獨立新 job。"""
+        self._episode_row()
+        self._write_artifact("hermes_session_sess1_ep1-5.md")
+        self._run(prompt_version="bridge_episode_triage_v1")
+        v1_row = dict(self._job_rows()[0])
+        result = self._run()  # 預設 = v2
+        self.assertEqual(result["prompt_version"], "bridge_episode_triage_v2")
+        self.assertEqual(result["counts"]["created"], 1)
+        rows = {r["prompt_version"]: dict(r) for r in self._job_rows()}
+        self.assertEqual(set(rows), {"bridge_episode_triage_v1",
+                                     "bridge_episode_triage_v2"})
+        self.assertEqual(rows["bridge_episode_triage_v1"], v1_row)
+
+
+class PromptVersionDefaultTests(unittest.TestCase):
+    """2.6a：DEFAULT_PROMPT_VERSION 升版為 bridge_episode_triage_v2
+    （2.6 提案 §6；handler 的回聲驗證以 job payload 的 prompt_version 為準，
+    天然同步——見 test_bridge_triage_handler 的 v2 回聲測試）。"""
+
+    def test_default_prompt_version_is_v2(self):
+        self.assertEqual(enq.DEFAULT_PROMPT_VERSION, "bridge_episode_triage_v2")
+
+
+class EventIdFlagTests(EnqueuerTestCase):
+    """2.6a：`--event-id` 單筆 enqueue——存在／不存在／ineligible 三路，
+    與整批模式並存、dry-run 相容、identity 冪等重跑。"""
+
+    def test_single_event_enqueues_only_that_one(self):
+        target = self._episode_row(sid="one", first=1, last=2)
+        self._write_artifact("hermes_session_one_ep1-2.md")
+        self._episode_row(sid="two", first=1, last=3)
+        self._write_artifact("hermes_session_two_ep1-3.md")
+        result = self._run(event_id=target)
+        self.assertEqual(result["event_id_filter"], target)
+        self.assertEqual(result["candidates"], 1)
+        self.assertEqual(result["counts"],
+                         {"created": 1, "existing": 0, "conflict": 0,
+                          "ineligible": 0})
+        rows = self._job_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["external_key"], target)
+        # identity 冪等：同一單筆重跑 → existing no-op，不建第二筆
+        second = self._run(event_id=target)
+        self.assertEqual(second["counts"]["existing"], 1)
+        self.assertEqual(len(self._job_rows()), 1)
+        # 整批模式並存：之後整批跑會把 two 補進來、one 仍是 existing
+        batch = self._run()
+        self.assertEqual(batch["counts"],
+                         {"created": 1, "existing": 1, "conflict": 0,
+                          "ineligible": 0})
+
+    def test_single_event_dry_run_zero_writes(self):
+        target = self._episode_row(sid="dry1", first=1, last=2)
+        self._write_artifact("hermes_session_dry1_ep1-2.md")
+        dry = self._run(dry_run=True, event_id=target)
+        self.assertEqual(dry["counts"]["created"], 1)
+        self.assertEqual(dry["items"][0]["display"], "would-create")
+        self.assertFalse(self.jobs_db.exists())
+        self._run(event_id=target)
+        dry2 = self._run(dry_run=True, event_id=target)
+        self.assertEqual(dry2["counts"]["existing"], 1)
+        self.assertEqual(len(self._job_rows()), 1)
+
+    def test_unknown_event_id_fails_visible_no_job(self):
+        self._episode_row()  # 有別的候選存在也不得波及
+        self._write_artifact("hermes_session_sess1_ep1-5.md")
+        with self.assertRaisesRegex(ValueError, "找不到"):
+            self._run(event_id="hermes:no-such:1..2")
+        self.assertFalse(self.jobs_db.exists())
+
+    def test_ineligible_status_fails_visible_no_job(self):
+        target = self._episode_row(sid="skip1", first=1, last=2,
+                                   status="skipped")
+        self._write_artifact("hermes_session_skip1_ep1-2.md")
+        with self.assertRaisesRegex(ValueError, "skipped"):
+            self._run(event_id=target)
+        self.assertFalse(self.jobs_db.exists())
+
+    def test_single_event_artifact_not_found_is_ineligible(self):
+        """狀態合格但 artifact 定位不到 → 走既有 ineligible 呈現（條件 2
+        的判定與整批模式共用同一實作）。"""
+        target = self._episode_row()  # 不寫 artifact
+        result = self._run(event_id=target)
+        self.assertEqual(result["counts"]["ineligible"], 1)
+        self.assertIn("定位不到", result["items"][0]["label"])
+        self.assertEqual(len(self._job_rows()), 0)
+
+    def test_missing_bridge_db_with_event_id_is_error(self):
+        with self.assertRaises(FileNotFoundError):
+            enq.enqueue_candidates(bridge_db=self.tmp / "nope.db",
+                                   inbox_dir=self.inbox,
+                                   event_id="hermes:x:1..2")
 
 
 class DryRunTests(EnqueuerTestCase):
@@ -365,6 +464,28 @@ class CliTests(EnqueuerTestCase):
         artifact.write_text("v2\n", encoding="utf-8")
         self.assertEqual(self._cli(), 3)
         self.assertEqual(self._cli("--dry-run"), 3)
+
+    def test_cli_event_id_single_enqueue(self):
+        """2.6a：--event-id 單筆（含 --dry-run 相容）——存在 → 0；
+        不存在／狀態不合格 → 1（fail-visible，不建 job）。"""
+        target = self._episode_row()
+        self._write_artifact("hermes_session_sess1_ep1-5.md")
+        self.assertEqual(self._cli("--dry-run", "--event-id", target), 0)
+        self.assertFalse(self.jobs_db.exists())
+        self.assertEqual(self._cli("--event-id", target), 0)
+        rows = self._job_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["external_key"], target)
+        # 不存在的 event_id → exit 1
+        self.assertEqual(self._cli("--event-id", "hermes:no-such:1..2"), 1)
+        self.assertEqual(len(self._job_rows()), 1)
+
+    def test_cli_event_id_ineligible_status_exit_1(self):
+        target = self._episode_row(sid="skipcli", first=1, last=2,
+                                   status="skipped")
+        self._write_artifact("hermes_session_skipcli_ep1-2.md")
+        self.assertEqual(self._cli("--event-id", target), 1)
+        self.assertFalse(self.jobs_db.exists())
 
     def test_cli_missing_inbox_dir_exit_1(self):
         self._episode_row()

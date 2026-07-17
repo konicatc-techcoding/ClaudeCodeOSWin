@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# hermes/adapter/invoke_cos_triage.sh — v0.1（Stage 2.5c）
+# hermes/adapter/invoke_cos_triage.sh — v0.2（Stage 2.5c；2.6a schema 硬化）
 #
 # Episode triage 專屬的 headless 呼叫入口點（規格正本：
-# docs/stage2.5-episode-triage-proposal.md v6 §7.2／§7.3）。
+# docs/stage2.5-episode-triage-proposal.md v6 §7.2／§7.3；
+# suggested_owner enum 硬化見 docs/stage2.6-domain-dispatch-proposal.md §6）。
 # 與一般用途的 invoke_cos.sh **完全分離**（獨立腳本本身就是「這條呼叫
 # 路徑與其他 job source 不同」的具體證明，§7.2）：
 #   - 不載入任何工具（zero-tools，技術強制，見下方旗標組合）
@@ -51,8 +52,33 @@ if [[ -z "$PROMPT" ]]; then
 fi
 
 # §7.1 固定輸出 schema——五個欄位一個不多一個不少、decision 鎖 enum。
-# 呼叫端（bridge_triage_handler.py）仍會獨立做第二層驗證，兩層防護不互相取代。
-SCHEMA='{"type":"object","properties":{"decision":{"type":"string","enum":["memory_only","action_candidate","needs_review"]},"summary":{"type":"string"},"suggested_owner":{"type":"string"},"reason":{"type":"string"},"prompt_version":{"type":"string"}},"required":["decision","summary","suggested_owner","reason","prompt_version"],"additionalProperties":false}'
+# Stage 2.6a（prompt v2，2.6 提案 §6）：suggested_owner 也鎖 enum——名單由
+# registry/agents.yaml 的 status=active domain 動態注入（外加空字串 ""，
+# 供非 action_candidate 的 decision 使用），不在本腳本硬編碼第二份名單。
+# 「action_candidate 時必須非空、其他 decision 必須是空字串」的條件式約束
+# 由呼叫端（bridge_triage_handler.py）程式碼層把關——兩層防護不互相取代。
+# 注意：registry 讀取與 schema 組裝必須在 cd 到中性 mktemp 目錄**之前**完成
+# （路徑以本腳本自身位置解析，fail closed：讀不到或名單為空一律退出）。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENTS_YAML="$SCRIPT_DIR/../../registry/agents.yaml"
+if [[ ! -f "$AGENTS_YAML" ]]; then
+  echo "registry/agents.yaml 不存在，無法注入 owner enum（fail closed）: $AGENTS_YAML" >&2
+  exit 1
+fi
+ACTIVE_DOMAINS="$(awk '/^[[:space:]]*-[[:space:]]+id:/ {id=$NF; next} /^[[:space:]]+status:[[:space:]]*active[[:space:]]*$/ {if (id != "") {print id; id=""}}' "$AGENTS_YAML")"
+if [[ -z "$ACTIVE_DOMAINS" ]]; then
+  echo "registry/agents.yaml 沒有任何 status=active 的 domain，無法注入 owner enum（fail closed）" >&2
+  exit 1
+fi
+OWNER_ENUM='""'
+for d in $ACTIVE_DOMAINS; do
+  if [[ ! "$d" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+    echo "domain id 含非預期字元，拒絕注入 schema（fail closed）: $d" >&2
+    exit 1
+  fi
+  OWNER_ENUM="$OWNER_ENUM,\"$d\""
+done
+SCHEMA='{"type":"object","properties":{"decision":{"type":"string","enum":["memory_only","action_candidate","needs_review"]},"summary":{"type":"string"},"suggested_owner":{"type":"string","enum":['"$OWNER_ENUM"']},"reason":{"type":"string"},"prompt_version":{"type":"string"}},"required":["decision","summary","suggested_owner","reason","prompt_version"],"additionalProperties":false}'
 
 # 中性 cwd：全新空的 mktemp 目錄，保證沒有 CLAUDE.md 會被自動載入（實測事實 2）
 NEUTRAL_DIR="$(mktemp -d)"

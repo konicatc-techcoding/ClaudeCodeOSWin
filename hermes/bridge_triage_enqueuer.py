@@ -53,7 +53,11 @@ dead_letter 重跑的唯一路徑（§4.3，本 CLI 不重複實作）：
 CLI（exit code：0＝成功且無 conflict；1＝執行期錯誤；2＝參數用法錯誤；
 3＝執行完成但至少一筆 conflict——內容漂移紅旗，需人工調查）：
     python3 hermes/bridge_triage_enqueuer.py [--bridge-db PATH] [--jobs-db PATH] \
-        enqueue [--dry-run] [--inbox DIR] [--prompt-version V]
+        enqueue [--dry-run] [--inbox DIR] [--prompt-version V] [--event-id ID]
+
+`--event-id`（2.6a，2.6 提案 §6）：單筆 enqueue——只處理指定 event_id 的
+候選，與整批模式並存、dry-run 相容。event_id 在 bridge_state.db 不存在、
+或 import_status 不具候選資格 → 執行期錯誤（exit 1），不建 job。
 """
 import argparse
 import contextlib
@@ -73,7 +77,10 @@ import db  # noqa: E402
 from adapter import HermesSessionAdapter  # noqa: E402
 
 SOURCE = "bridge_episode_triage"
-DEFAULT_PROMPT_VERSION = "bridge_episode_triage_v1"
+# 2.6a（docs/stage2.6-domain-dispatch-proposal.md §6）：預設契約升版為 v2
+# （suggested_owner enum 硬化＋固定輸出繁體中文）。既有 v1 job 零改動、
+# 不重跑；同一 episode 以 v2 enqueue 會天然建新 job（§2.2 既有行為）。
+DEFAULT_PROMPT_VERSION = "bridge_episode_triage_v2"
 DEFAULT_INBOX_DIR = ROOT / "memory" / "inbox"
 
 # §6.5 條件 1：合格的 import_status（明確排除 needs_review/skipped/failed/discovered）
@@ -130,6 +137,32 @@ def list_candidates(bridge_db: Path) -> list[dict]:
             CANDIDATE_STATUSES,
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _lookup_single_candidate(bridge_db: Path, event_id: str) -> dict:
+    """`--event-id` 單筆模式（2.6a）的候選查詢——**唯讀**。
+
+    fail-visible：查無此列、或 import_status 不在候選資格內 → ValueError
+    （CLI 層轉 exit 1），不建 job、不靜默略過。資格判定與整批模式同一條
+    規則（§6.5 條件 1）；artifact 唯一定位（條件 2）仍走共用的
+    locate_artifact 路徑，不在這裡重複。
+    """
+    with _read_only_conn(bridge_db) as conn:
+        row = conn.execute(
+            "SELECT event_id, session_id, import_status FROM bridge_sessions "
+            "WHERE event_id=?", (event_id,)).fetchone()
+    if row is None:
+        raise ValueError(
+            f"--event-id {event_id!r} 在 bridge_state.db 找不到對應的列——"
+            "不建 job；請確認 event_id 是否正確（完整格式 "
+            "hermes:<sid>:<first>..<last> 或 legacy hermes:<sid>）")
+    if row["import_status"] not in CANDIDATE_STATUSES:
+        raise ValueError(
+            f"--event-id {event_id!r} 的 import_status="
+            f"{row['import_status']!r} 不具候選資格（合格狀態："
+            f"{'、'.join(CANDIDATE_STATUSES)}）——不建 job；若認為應可 "
+            "triage，請先人工排查（必要時跑 bridge_scanner.py reconcile）")
+    return dict(row)
 
 
 def _artifact_matches(candidate: Path, *, episode: bool, session_id: str,
@@ -278,7 +311,8 @@ def enqueue_candidates(*, dry_run: bool = False,
                        bridge_db: Path | str = bridge_state.DEFAULT_DB_PATH,
                        inbox_dir: Path | str = DEFAULT_INBOX_DIR,
                        prompt_version: str = DEFAULT_PROMPT_VERSION,
-                       jobs_db: Path | str | None = None) -> dict:
+                       jobs_db: Path | str | None = None,
+                       event_id: str | None = None) -> dict:
     """對每個合格候選呼叫（或 dry-run 模擬呼叫）`enqueue_once`（§6.5／§6.6）。
 
     - jobs_db 非 None 時把 hermes.db 模組的 DB_PATH 指到該路徑（process
@@ -286,8 +320,11 @@ def enqueue_candidates(*, dry_run: bool = False,
     - dry_run=True：對 jobs.db 零寫入（不建檔、不 migrate），但對每個候選
       執行與真實模式完全相同的候選查詢、hash 計算、三分支分類。
     - bridge_state.db 兩種模式下都唯讀；不存在時直接回報（不建檔）。
-    - 回傳 dict：mode/dry_run/prompt_version/bridge_db_exists/candidates/
-      items（逐筆：event_id/category/display/label/artifact/job_id）/
+    - event_id 非 None（2.6a `--event-id` 單筆模式）：只處理該筆候選；
+      查無此列或 import_status 不具資格 → ValueError（fail-visible，
+      不靜默略過）；後續分類/寫入邏輯與整批模式完全共用（含 dry-run）。
+    - 回傳 dict：mode/dry_run/prompt_version/bridge_db_exists/event_id_filter/
+      candidates/items（逐筆：event_id/category/display/label/artifact/job_id）/
       counts（created/existing/conflict/ineligible）。
     """
     if jobs_db is not None:
@@ -296,16 +333,24 @@ def enqueue_candidates(*, dry_run: bool = False,
     inbox_dir = Path(inbox_dir)
     result: dict = {
         "mode": "enqueue", "dry_run": dry_run, "prompt_version": prompt_version,
-        "bridge_db_exists": bridge_db.exists(), "candidates": 0, "items": [],
+        "bridge_db_exists": bridge_db.exists(), "event_id_filter": event_id,
+        "candidates": 0, "items": [],
         "counts": {"created": 0, "existing": 0, "conflict": 0, "ineligible": 0},
     }
     if not bridge_db.exists():
+        if event_id is not None:
+            raise FileNotFoundError(
+                f"--event-id 指定了單筆 enqueue，但 bridge db 不存在："
+                f"{bridge_db}（不建立 db 檔）")
         return result
     if not inbox_dir.is_dir():
         raise FileNotFoundError(
             f"inbox 目錄不存在：{inbox_dir}（不代建目錄，避免對錯位置定位 artifact）")
 
-    candidates = list_candidates(bridge_db)
+    if event_id is not None:
+        candidates = [_lookup_single_candidate(bridge_db, event_id)]
+    else:
+        candidates = list_candidates(bridge_db)
     result["candidates"] = len(candidates)
     if candidates and not dry_run:
         db.init_db()  # 2.5a 的冪等 migration——真實模式寫入前確保 schema
@@ -416,6 +461,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_enq.add_argument("--prompt-version", default=DEFAULT_PROMPT_VERSION,
                        help=f"triage 契約版本字串（預設 {DEFAULT_PROMPT_VERSION}；"
                             "升版對同一 episode 會建立新 job，§2.2）")
+    p_enq.add_argument("--event-id", default=None,
+                       help="只 enqueue 指定 event_id 的單筆候選（2.6a；與 "
+                            "--dry-run 相容）。查無此列或狀態不具候選資格 → "
+                            "exit 1，不建 job")
     return parser
 
 
@@ -433,7 +482,8 @@ def _cli(argv=None) -> int:
         result = enqueue_candidates(
             dry_run=args.dry_run, bridge_db=bridge_db,
             inbox_dir=Path(args.inbox), prompt_version=args.prompt_version,
-            jobs_db=Path(args.jobs_db) if args.jobs_db else None)
+            jobs_db=Path(args.jobs_db) if args.jobs_db else None,
+            event_id=args.event_id)
     except (ValueError, FileNotFoundError, sqlite3.Error) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
