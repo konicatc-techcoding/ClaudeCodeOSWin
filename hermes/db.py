@@ -32,6 +32,31 @@ BACKOFF_CAP_SECONDS = 1800
 _lock = threading.Lock()
 
 
+class TriageEnqueueConflict(RuntimeError):
+    """同一 identity tuple (source, external_key, prompt_version) 已存在，
+    但 payload_hash 不同——代表 artifact 內容漂移，fail closed，需人工調查。
+    （提案 stage2.5 §2.2 分支 3）"""
+
+
+class RequeueRejected(RuntimeError):
+    """requeue_dead_letter 拒絕：這個 job 不是（或已不是）dead_letter。
+    不論是乾淨的 rowcount=0（§4.1c 分支 3）還是 busy 衝突後重新確認
+    （分支 4c），一律用這個例外，呼叫端不需分辨偵測路徑。"""
+
+
+class RequeueRetryableDBError(RuntimeError):
+    """requeue_dead_letter 遇到暫時性 DB 爭用（busy/snapshot 衝突），且
+    重新查詢確認 job 當下仍是 dead_letter（§4.1c 分支 4d）。本函式不自動
+    重試；要不要重試由呼叫端決定。攜帶 job_id 與底層原始例外供除錯。"""
+
+    def __init__(self, job_id: str, original: BaseException):
+        super().__init__(
+            f"暫時性 DB 爭用，job {job_id} 仍是 dead_letter，可由呼叫端決定重試：{original}"
+        )
+        self.job_id = job_id
+        self.original = original
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -102,6 +127,36 @@ def _migrate_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE jobs ADD COLUMN cost_usd REAL")
     if "delivered_at" not in cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN delivered_at TEXT")
+    # Stage 2.5a（提案 §2／§4.1a）：triage identity 三元組五欄＋三欄唯一索引
+    # ＋append-only 稽核表 job_requeue_events。全部冪等，對既有列零影響
+    # （既有 source 的 external_key/prompt_version 恆為 NULL，SQLite UNIQUE
+    # index 對含 NULL 的列不視為互相衝突）。
+    if "external_key" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN external_key TEXT")
+    if "payload_hash" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN payload_hash TEXT")
+    if "prompt_version" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN prompt_version TEXT")
+    if "requeue_count" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN requeue_count INTEGER NOT NULL DEFAULT 0")
+    if "last_requeued_at" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN last_requeued_at TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_triage_identity "
+        "ON jobs(source, external_key, prompt_version)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_requeue_events (
+            job_id            TEXT    NOT NULL,
+            requeue_seq       INTEGER NOT NULL,
+            requeued_at       TEXT    NOT NULL,
+            actor             TEXT    NOT NULL,
+            reason            TEXT,
+            previous_error    TEXT,
+            previous_attempts INTEGER NOT NULL,
+            PRIMARY KEY (job_id, requeue_seq)
+        )
+    """)
 
 
 def enqueue(source: str, prompt: str, payload: dict | None = None,
@@ -117,6 +172,150 @@ def enqueue(source: str, prompt: str, payload: dict | None = None,
              max_attempts, priority, now, now),
         )
     return job_id
+
+
+def enqueue_once(source: str, external_key: str, prompt_version: str,
+                 payload_hash: str, prompt: str, payload: dict | None = None,
+                 priority: int = 0, max_attempts: int = 1) -> tuple[str, bool]:
+    """Exactly-once enqueue（提案 stage2.5 §2／§3.1）。
+
+    Identity 是三元組 (source, external_key, prompt_version)。三分支語意：
+      1. 查無既有 row → insert 新 job，回傳 (job_id, True)。
+      2. 既有 row 且 payload_hash 相符 → idempotent no-op，回傳 (job_id, False)。
+      3. 既有 row 但 payload_hash 不同 → fail closed，拋 TriageEnqueueConflict
+         （內容漂移紅旗，不靜默覆蓋、不建第二筆）。
+
+    creation exactly-once 由三欄 UNIQUE index 保證；insert 撞到
+    IntegrityError 時重查既有 row、走同一組三分支邏輯。整個流程在單一
+    DB 交易內完成。max_attempts 預設 1（§3.2 Option A：at-most-one
+    automatic attempt，失敗即死信，只能人工 requeue）。thread_id 恆為
+    NULL——這個 API 建立的 job 從不使用 session resume。
+    """
+    now = _now_iso()
+    with _lock, _db() as conn:
+        def _find_existing():
+            return conn.execute(
+                "SELECT id, payload_hash FROM jobs "
+                "WHERE source=? AND external_key=? AND prompt_version=?",
+                (source, external_key, prompt_version),
+            ).fetchone()
+
+        row = _find_existing()
+        if row is None:
+            job_id = str(uuid.uuid4())
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (id, source, payload, prompt, thread_id, "
+                    "max_attempts, priority, external_key, payload_hash, "
+                    "prompt_version, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, source, json.dumps(payload or {}), prompt,
+                     max_attempts, priority, external_key, payload_hash,
+                     prompt_version, now, now),
+                )
+                return (job_id, True)
+            except sqlite3.IntegrityError:
+                # 並行 race：撞到三元組 unique index → 重查、走同一組三分支
+                row = _find_existing()
+                if row is None:
+                    raise  # IntegrityError 不是三元組衝突造成的，如實往外拋
+        if row["payload_hash"] == payload_hash:
+            return (row["id"], False)
+        raise TriageEnqueueConflict(
+            f"identity (source={source!r}, external_key={external_key!r}, "
+            f"prompt_version={prompt_version!r}) 已存在 job {row['id']}，"
+            f"但 payload_hash 不同（既有 {row['payload_hash']!r} vs 本次 "
+            f"{payload_hash!r}）——artifact 內容漂移，需人工調查"
+        )
+
+
+_REQUEUE_UPDATE_SQL = """
+    UPDATE jobs
+    SET status='queued', attempts=0, next_attempt_at=NULL, worker_id=NULL,
+        locked_at=NULL, requeue_count=requeue_count+1,
+        last_requeued_at=?, updated_at=?
+    WHERE id=? AND status='dead_letter'
+"""
+
+
+def _execute_requeue_update(conn: sqlite3.Connection, now: str, job_id: str) -> sqlite3.Cursor:
+    """執行 requeue 的 conditional UPDATE。
+
+    獨立成模組層函式，是提案 §4.1d 要求的決定性 fault-injection 注入點：
+    正常路徑就是單純執行底層的 conn.execute(...)，測試用 monkeypatch 替換
+    它來決定性地模擬 SQLITE_BUSY／SQLITE_BUSY_SNAPSHOT。不改動共用
+    _db()／連線設定。
+    """
+    return conn.execute(_REQUEUE_UPDATE_SQL, (now, now, job_id))
+
+
+def requeue_dead_letter(job_id: str, actor: str, reason: str | None = None) -> dict:
+    """把一筆 dead_letter job 原子性地重置回 queued，並寫入一筆稽核事件。
+
+    只對 status='dead_letter' 生效（並行安全狀態機見提案 §4.1c 四分支）；
+    不建立第二筆 job；identity／payload／payload_hash／prompt_version 不變；
+    只能由明確的人工動作觸發。actor 為必填且不得為空或純空白（任何 DB
+    操作之前驗證）；寫入稽核列的是 strip() 後的正規化字串。
+
+    絕不自動重試：每次呼叫只執行一輪嘗試序列，遇到暫時性 DB 爭用拋
+    RequeueRetryableDBError，由呼叫端決定是否重試。
+    """
+    if not isinstance(actor, str) or actor.strip() == "":
+        raise ValueError("actor 不得為空或純空白")
+    actor = actor.strip()
+    now = _now_iso()
+    try:
+        with _lock, _db() as conn:
+            # 同一 transaction 內、UPDATE 之前先捕捉 previous_* 值（§4.1a）
+            prev = conn.execute(
+                "SELECT error_message, attempts FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            cur = _execute_requeue_update(conn, now, job_id)
+            if cur.rowcount == 1:
+                # 分支 2：同一 transaction 內插入稽核列後 commit
+                seq_row = conn.execute(
+                    "SELECT COALESCE(MAX(requeue_seq), 0) + 1 AS seq "
+                    "FROM job_requeue_events WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                requeue_seq = seq_row["seq"]
+                conn.execute(
+                    "INSERT INTO job_requeue_events (job_id, requeue_seq, "
+                    "requeued_at, actor, reason, previous_error, previous_attempts) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, requeue_seq, now, actor, reason,
+                     prev["error_message"], prev["attempts"]),
+                )
+                return {
+                    "job_id": job_id,
+                    "requeue_seq": requeue_seq,
+                    "requeued_at": now,
+                    "actor": actor,
+                    "reason": reason,
+                    "previous_error": prev["error_message"],
+                    "previous_attempts": prev["attempts"],
+                }
+            # 分支 3：乾淨的 rowcount=0——job 不存在或已不是 dead_letter。
+            # 不寫任何稽核列（例外往外拋，with conn: 自動 rollback）。
+            raise RequeueRejected(
+                f"job {job_id} 不是（或已不是）dead_letter，requeue 被拒絕"
+            )
+    except sqlite3.OperationalError as exc:
+        # 分支 4：busy/snapshot 衝突。失敗的 transaction 已 rollback；
+        # 開一個全新、獨立的唯讀查詢確認 job 目前的 status。
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT status FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        if row is None or row["status"] != "dead_letter":
+            # 分支 4c：另一個並行呼叫已搶先成功——正規化成 RequeueRejected，
+            # 呼叫端不需（也不能）分辨輸家是撞到分支 3 還是 4c。
+            raise RequeueRejected(
+                f"job {job_id} 不是（或已不是）dead_letter，requeue 被拒絕"
+            ) from exc
+        # 分支 4d：job 仍是 dead_letter，純暫時性 DB 爭用——不自動重試、
+        # 不誤報成「已被別人 requeue 過」。
+        raise RequeueRetryableDBError(job_id, exc) from exc
 
 
 def claim_next_job(worker_id: str) -> dict | None:
@@ -288,6 +487,15 @@ def _cli():
     p_show = sub.add_parser("show", help="顯示單一 job 的完整內容")
     p_show.add_argument("job_id")
 
+    p_requeue = sub.add_parser(
+        "requeue", help="把一筆 dead_letter job 重置回 queued（寫入稽核事件）"
+    )
+    p_requeue.add_argument("job_id")
+    # --actor 必填、無預設值——不用任何假預設值頂替身份（提案 §4.3）。
+    # API 層（requeue_dead_letter）仍會再驗證一次空/純空白，雙重保險。
+    p_requeue.add_argument("--actor", required=True)
+    p_requeue.add_argument("--reason", default=None)
+
     args = parser.parse_args()
     init_db()
 
@@ -313,6 +521,16 @@ def _cli():
             sys.exit(1)
         for k in row.keys():
             print(f"{k}: {row[k]}")
+    elif args.cmd == "requeue":
+        try:
+            event = requeue_dead_letter(args.job_id, args.actor, reason=args.reason)
+        except (ValueError, RequeueRejected, RequeueRetryableDBError) as exc:
+            print(f"requeue 失敗：{exc}", file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"requeued job {event['job_id']} (requeue_seq={event['requeue_seq']}, "
+            f"actor={event['actor']})"
+        )
 
 
 if __name__ == "__main__":
