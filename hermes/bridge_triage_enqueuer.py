@@ -51,13 +51,22 @@ dead_letter 重跑的唯一路徑（§4.3，本 CLI 不重複實作）：
 （`--actor` 必填、沒有任何預設值——不會用 "anonymous" 之類的假身份頂替。）
 
 CLI（exit code：0＝成功且無 conflict；1＝執行期錯誤；2＝參數用法錯誤；
-3＝執行完成但至少一筆 conflict——內容漂移紅旗，需人工調查）：
+3＝執行完成但至少一筆 conflict——內容漂移紅旗，需人工調查；4＝因
+--max-new 上限截斷，尚有候選未處理——非錯誤，但以非零 exit 浮現，剩餘
+候選下輪處理或人工介入；conflict 與截斷同時發生時 conflict 的 3 優先）：
     python3 hermes/bridge_triage_enqueuer.py [--bridge-db PATH] [--jobs-db PATH] \
-        enqueue [--dry-run] [--inbox DIR] [--prompt-version V] [--event-id ID]
+        enqueue [--dry-run] [--inbox DIR] [--prompt-version V] [--event-id ID] \
+                [--max-new N]
 
 `--event-id`（2.6a，2.6 提案 §6）：單筆 enqueue——只處理指定 event_id 的
 候選，與整批模式並存、dry-run 相容。event_id 在 bridge_state.db 不存在、
 或 import_status 不具候選資格 → 執行期錯誤（exit 1），不建 job。
+
+`--max-new N`（2.7a，2.7 提案 §4.4 成本上限防護，拍板排程帶 --max-new 5）：
+單次執行**新建 job 數**上限（existing no-op／ineligible 不計入）。新建數
+達到 N 後即停止處理剩餘候選（不多建第 N+1 筆，剩餘候選連分類都不做、
+留待下輪——冪等機制保證不漏不重），並以 exit 4＋訊息浮現。dry-run 下
+以 would-create 計數套用同一條規則（分類邏輯一致鐵律）。
 """
 import argparse
 import contextlib
@@ -312,7 +321,8 @@ def enqueue_candidates(*, dry_run: bool = False,
                        inbox_dir: Path | str = DEFAULT_INBOX_DIR,
                        prompt_version: str = DEFAULT_PROMPT_VERSION,
                        jobs_db: Path | str | None = None,
-                       event_id: str | None = None) -> dict:
+                       event_id: str | None = None,
+                       max_new: int | None = None) -> dict:
     """對每個合格候選呼叫（或 dry-run 模擬呼叫）`enqueue_once`（§6.5／§6.6）。
 
     - jobs_db 非 None 時把 hermes.db 模組的 DB_PATH 指到該路徑（process
@@ -323,10 +333,16 @@ def enqueue_candidates(*, dry_run: bool = False,
     - event_id 非 None（2.6a `--event-id` 單筆模式）：只處理該筆候選；
       查無此列或 import_status 不具資格 → ValueError（fail-visible，
       不靜默略過）；後續分類/寫入邏輯與整批模式完全共用（含 dry-run）。
+    - max_new 非 None（2.7a，§4.4）：新建（dry-run＝would-create）數達上限
+      後停止處理剩餘候選；capped=True、skipped_due_to_cap=剩餘筆數。
+      max_new < 1 → ValueError（上限為 0 沒有意義——那等於不該跑）。
     - 回傳 dict：mode/dry_run/prompt_version/bridge_db_exists/event_id_filter/
-      candidates/items（逐筆：event_id/category/display/label/artifact/job_id）/
-      counts（created/existing/conflict/ineligible）。
+      max_new/capped/skipped_due_to_cap/candidates/items（逐筆：event_id/
+      category/display/label/artifact/job_id）/counts（created/existing/
+      conflict/ineligible）。
     """
+    if max_new is not None and max_new < 1:
+        raise ValueError(f"--max-new 必須 >= 1（收到 {max_new}）")
     if jobs_db is not None:
         db.DB_PATH = Path(jobs_db)
     bridge_db = Path(bridge_db)
@@ -334,6 +350,7 @@ def enqueue_candidates(*, dry_run: bool = False,
     result: dict = {
         "mode": "enqueue", "dry_run": dry_run, "prompt_version": prompt_version,
         "bridge_db_exists": bridge_db.exists(), "event_id_filter": event_id,
+        "max_new": max_new, "capped": False, "skipped_due_to_cap": 0,
         "candidates": 0, "items": [],
         "counts": {"created": 0, "existing": 0, "conflict": 0, "ineligible": 0},
     }
@@ -356,7 +373,14 @@ def enqueue_candidates(*, dry_run: bool = False,
         db.init_db()  # 2.5a 的冪等 migration——真實模式寫入前確保 schema
 
     display = _DISPLAY[dry_run]
-    for cand in candidates:
+    for idx, cand in enumerate(candidates):
+        # §4.4（2.7a）：新建數已達上限 → 停止處理剩餘候選（連分類都不做，
+        # 留待下輪；冪等機制保證不漏不重）。放在迴圈頂端檢查＝絕不多建
+        # 第 max_new+1 筆；dry-run 以 would-create 計數走同一條規則。
+        if max_new is not None and result["counts"]["created"] >= max_new:
+            result["capped"] = True
+            result["skipped_due_to_cap"] = len(candidates) - idx
+            break
         event_id = cand["event_id"]
         item: dict = {"event_id": event_id, "import_status": cand["import_status"],
                       "artifact": None, "job_id": None}
@@ -431,6 +455,11 @@ def _print_result(result: dict):
     if c["conflict"]:
         print(f"{prefix}注意：{c['conflict']} 筆 CONFLICT（payload_hash 漂移）"
               "需要人工調查——見上方逐筆訊息", file=sys.stderr)
+    if result.get("capped"):
+        print(f"{prefix}注意：新建數已達 --max-new={result['max_new']} 上限，"
+              f"停止處理剩餘 {result['skipped_due_to_cap']} 筆候選（§4.4 成本"
+              "上限防護）——剩餘候選下輪處理，或人工確認後不帶上限重跑",
+              file=sys.stderr)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -443,7 +472,8 @@ def _build_parser() -> argparse.ArgumentParser:
                "<job_id> --actor <identifier> [--reason \"...\"]（--actor 必填、"
                "沒有任何預設值——本 CLI 不重複實作 requeue）。exit code：0 成功"
                "且無 conflict；1 執行期錯誤；2 參數用法錯誤；3 有 conflict "
-               "（payload_hash 漂移，需人工調查）。")
+               "（payload_hash 漂移，需人工調查）；4 因 --max-new 截斷"
+               "（剩餘候選下輪處理；與 conflict 並發時 3 優先）。")
     parser.add_argument(
         "--bridge-db", default=None,
         help=f"bridge_state.db 路徑（預設 {bridge_state.DEFAULT_DB_PATH}；一律唯讀）")
@@ -465,6 +495,11 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="只 enqueue 指定 event_id 的單筆候選（2.6a；與 "
                             "--dry-run 相容）。查無此列或狀態不具候選資格 → "
                             "exit 1，不建 job")
+    p_enq.add_argument("--max-new", type=int, default=None,
+                       help="單次執行新建 job 數上限（2.7a §4.4 成本上限防護；"
+                            "排程拍板帶 --max-new 5）。達上限即停止處理剩餘"
+                            "候選並 exit 4；預設無上限（人工模式既有行為"
+                            "不變）")
     return parser
 
 
@@ -483,12 +518,14 @@ def _cli(argv=None) -> int:
             dry_run=args.dry_run, bridge_db=bridge_db,
             inbox_dir=Path(args.inbox), prompt_version=args.prompt_version,
             jobs_db=Path(args.jobs_db) if args.jobs_db else None,
-            event_id=args.event_id)
+            event_id=args.event_id, max_new=args.max_new)
     except (ValueError, FileNotFoundError, sqlite3.Error) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
     _print_result(result)
-    return 3 if result["counts"]["conflict"] else 0
+    if result["counts"]["conflict"]:
+        return 3  # conflict 紅旗優先於 max-new 截斷
+    return 4 if result["capped"] else 0
 
 
 if __name__ == "__main__":

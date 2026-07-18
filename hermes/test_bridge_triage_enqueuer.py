@@ -496,5 +496,101 @@ class CliTests(EnqueuerTestCase):
         self.assertEqual(code, 1)
 
 
+class MaxNewCapTests(EnqueuerTestCase):
+    """Stage 2.7a：`--max-new`（2.7 提案 §4.4 成本上限防護，§9 2.7a DoD
+    「--max-new 截斷測試」）。"""
+
+    def _three_candidates(self):
+        for sid in ("capa", "capb", "capc"):
+            self._episode_row(sid=sid, first=1, last=2, seq=1)
+            self._write_artifact(f"hermes_session_{sid}_ep1-2.md",
+                                 content=f"body {sid}\n")
+
+    def test_cap_stops_after_n_creates(self):
+        self._three_candidates()
+        result = self._run(max_new=2)
+        self.assertEqual(result["counts"]["created"], 2)
+        self.assertTrue(result["capped"])
+        self.assertEqual(result["skipped_due_to_cap"], 1)
+        self.assertEqual(len(self._job_rows()), 2)  # 絕不多建第 3 筆
+
+        # 下輪不帶上限：前兩筆 existing no-op、第三筆補建——不漏不重
+        result2 = self._run()
+        self.assertEqual(result2["counts"],
+                         {"created": 1, "existing": 2, "conflict": 0,
+                          "ineligible": 0})
+        self.assertFalse(result2["capped"])
+        self.assertEqual(len(self._job_rows()), 3)
+
+    def test_existing_noop_does_not_consume_cap(self):
+        """上限計的是**新建**數：既有 no-op 不吃額度。"""
+        self._episode_row(sid="capa", first=1, last=2)
+        self._write_artifact("hermes_session_capa_ep1-2.md")
+        self._run()  # capa 先建好
+        self._episode_row(sid="capb", first=1, last=2)
+        self._write_artifact("hermes_session_capb_ep1-2.md")
+        result = self._run(max_new=1)
+        self.assertEqual(result["counts"]["created"], 1)   # capb 新建
+        self.assertEqual(result["counts"]["existing"], 1)  # capa 不吃額度
+        self.assertFalse(result["capped"])  # 上限剛好用完且無剩餘候選
+        self.assertEqual(len(self._job_rows()), 2)
+
+    def test_cap_not_hit_no_flag(self):
+        self._three_candidates()
+        result = self._run(max_new=5)
+        self.assertEqual(result["counts"]["created"], 3)
+        self.assertFalse(result["capped"])
+        self.assertEqual(result["skipped_due_to_cap"], 0)
+
+    def test_dry_run_cap_same_classification_zero_writes(self):
+        """dry-run 以 would-create 計數走同一條規則（分類一致鐵律）。"""
+        self._three_candidates()
+        dry = self._run(dry_run=True, max_new=2)
+        self.assertEqual(dry["counts"]["created"], 2)
+        self.assertTrue(dry["capped"])
+        self.assertEqual(dry["skipped_due_to_cap"], 1)
+        self.assertFalse(self.jobs_db.exists())  # 零寫入
+        real = self._run(max_new=2)
+        self.assertEqual(real["counts"], dry["counts"])
+        self.assertEqual(real["capped"], dry["capped"])
+
+    def test_invalid_max_new_rejected(self):
+        self._three_candidates()
+        for bad in (0, -1):
+            with self.assertRaises(ValueError):
+                self._run(max_new=bad)
+        self.assertFalse(self.jobs_db.exists())  # 驗證在任何處理之前
+
+    def test_cli_exit_4_on_cap_and_exit_1_on_invalid(self):
+        self._three_candidates()
+        code = enq._cli([
+            "--bridge-db", str(self.bridge_db),
+            "--jobs-db", str(self.jobs_db),
+            "enqueue", "--inbox", str(self.inbox), "--max-new", "2"])
+        self.assertEqual(code, 4)
+        self.assertEqual(len(self._job_rows()), 2)
+        code = enq._cli([
+            "--bridge-db", str(self.bridge_db),
+            "--jobs-db", str(self.jobs_db),
+            "enqueue", "--inbox", str(self.inbox), "--max-new", "0"])
+        self.assertEqual(code, 1)
+
+    def test_conflict_exit_3_takes_precedence_over_cap(self):
+        """conflict 紅旗（3）優先於 max-new 截斷（4）。"""
+        self._three_candidates()
+        artifact = self.inbox / "hermes_session_capa_ep1-2.md"
+        self._run()  # 全建好
+        artifact.write_text("drifted\n", encoding="utf-8")
+        self._episode_row(sid="capd", first=1, last=2)
+        self._write_artifact("hermes_session_capd_ep1-2.md")
+        self._episode_row(sid="cape", first=1, last=2)
+        self._write_artifact("hermes_session_cape_ep1-2.md")
+        code = enq._cli([
+            "--bridge-db", str(self.bridge_db),
+            "--jobs-db", str(self.jobs_db),
+            "enqueue", "--inbox", str(self.inbox), "--max-new", "1"])
+        self.assertEqual(code, 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

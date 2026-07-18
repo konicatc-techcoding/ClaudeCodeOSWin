@@ -193,6 +193,21 @@ def _migrate_schema(conn: sqlite3.Connection):
             PRIMARY KEY (triage_job_id, event_seq)
         )
     """)
+    # Stage 2.7a（提案 stage2.7 §2.3）：notification_log——通知冪等的第一層
+    # 權威（第二層是 hermes send 的 message-key ledger）。append-only 慣例：
+    # 只 INSERT、無 UPDATE/DELETE 路徑；UNIQUE(message_key) 是冪等錨點；
+    # **送成功才寫入**（send 失敗不落表，下輪重掃自然補送）。這是 notifier
+    # 唯一可寫的表——它對 jobs／dispatch_records 一律唯讀（§0.1 鐵律配套）。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notification_log (
+            message_key  TEXT NOT NULL UNIQUE,
+            event_type   TEXT NOT NULL,
+            subject_id   TEXT NOT NULL,
+            channel      TEXT NOT NULL,
+            sent_at      TEXT NOT NULL,
+            send_result  TEXT
+        )
+    """)
 
 
 def enqueue(source: str, prompt: str, payload: dict | None = None,
@@ -556,6 +571,37 @@ def list_dispatch_events(triage_job_id: str) -> list[sqlite3.Row]:
             "SELECT * FROM dispatch_events WHERE triage_job_id=? "
             "ORDER BY event_seq ASC",
             (triage_job_id,),
+        ).fetchall()
+
+
+# ---------- Stage 2.7a：notification_log（提案 stage2.7 §2.3） ----------
+
+def record_notification(message_key: str, event_type: str, subject_id: str,
+                        channel: str, send_result: str | None = None) -> dict:
+    """append 一筆通知稽核列（**送成功之後**才呼叫——§2.3 拍板順序）。
+
+    只 INSERT；同 message_key 重複寫入會撞 UNIQUE 直接拋
+    sqlite3.IntegrityError（fail-visible——notifier 本來就該先過濾已通知的
+    key，走到重複代表流程有 bug，不靜默吞掉）。"""
+    now = _now_iso()
+    with _lock, _db() as conn:
+        conn.execute(
+            "INSERT INTO notification_log (message_key, event_type, "
+            "subject_id, channel, sent_at, send_result) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (message_key, event_type, subject_id, channel, now, send_result),
+        )
+    return {"message_key": message_key, "event_type": event_type,
+            "subject_id": subject_id, "channel": channel, "sent_at": now,
+            "send_result": send_result}
+
+
+def list_notification_log() -> list[sqlite3.Row]:
+    """唯讀列出全部通知稽核列（觀測／測試斷言用——§2.3 否決「只靠 hermes
+    send ledger」的理由 (i)：本 repo 要能自己回答「哪些已通知」）。"""
+    with _db() as conn:
+        return conn.execute(
+            "SELECT * FROM notification_log ORDER BY sent_at ASC, message_key ASC"
         ).fetchall()
 
 
