@@ -1,0 +1,37 @@
+# hermes/systemd/hermes-bridge-pipeline.service — Stage 2.7b
+# 一次性執行單元：依序執行 bridge_importer.py import → bridge_triage_enqueuer.py
+# enqueue，觸發時機交給搭配的 hermes-bridge-pipeline.timer（每天 08:15）。
+#
+# 排程化設計（見 docs/stage2.7-notification-scheduling-proposal.md §4.1）：
+# 單一 oneshot service 用兩行 ExecStart 依序執行 importer → enqueuer——
+# systemd 對多行 ExecStart 的既有語義是「依序執行、任一行失敗（非零 exit
+# 且未加 `-` 前綴忽略錯誤）即中止後續行、unit 進入 failed」，因此 importer
+# 失敗時 enqueuer 不會被執行，失敗語意天然滿足 §4.1 的「單一失敗點」設計
+# ——不需要另寫 wrapper script 或用 systemd 依賴鏈（已否決的替代方案 (c)）。
+#
+# 兩個指令都刻意帶固定旗標，排程一律不得再加其他範圍／dry-run 參數：
+#   --limit 10   importer 單輪落地上限（既有旗標，異常大量湧入時 fail-safe）
+#   --max-new 5  enqueuer 單次新建 job 數上限（§4.4 成本上限防護，拍板值，
+#                單日 triage 自動成本硬上限 ≈ 5×$0.12 = $0.60）
+#
+# 失敗語義：任一步驟非零 exit → unit 進入 failed 狀態（systemctl --user
+# list-units --failed 可觀測）。不設 Restart——下次 timer 觸發從冪等狀態
+# 續跑（importer 的 episode-aware 查重、enqueuer 的 enqueue_once 三元組
+# 唯一索引皆保證重跑安全，見提案 §4.3）。enqueuer 若因 payload_hash 漂移
+# 而 conflict，exit code 3，同樣落在「unit failed」語意內，不做行內重試。
+#
+# scanner（08:05）與本 unit（08:15）之間刻意不做 systemd 依賴——兩者本就
+# 冪等且解耦（提案 §4.1），10 分鐘間隔沿用既有 5 分鐘間隔慣例並留餘裕。
+
+[Unit]
+Description=Hermes bridge pipeline (import then enqueue, one-shot, triggered by hermes-bridge-pipeline.timer)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/bridge_importer.py import --limit 10
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/bridge_triage_enqueuer.py enqueue --max-new 5
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/bridge_pipeline_systemd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/bridge_pipeline_systemd.stderr.log

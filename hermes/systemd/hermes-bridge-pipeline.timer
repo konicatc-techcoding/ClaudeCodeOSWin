@@ -1,0 +1,22 @@
+# hermes/systemd/hermes-bridge-pipeline.timer — Stage 2.7b
+# 每天 08:15 觸發一次 pipeline（import → enqueue）。時間選擇：scanner
+# （08:05）之後 10 分鐘，沿用既有「相鄰 timer 至少隔 5 分鐘」慣例並留
+# 餘裕（提案 §4.1）。scanner 與本 timer 之間刻意不做 systemd 依賴鏈——
+# 兩者冪等且解耦，catch-up 情境下即使補跑順序顛倒，效果只是「當日新
+# episode 延到下一輪才 enqueue」，不漏不重（提案 §4.1／§4.3）。
+#
+# Persistent=true 與既有 timer 一致：WSL 睡過觸發時刻，喚醒後 catch-up
+# 補跑一次；pipeline 兩段皆冪等，補跑安全。同樣繼承「WSL on-demand」
+# 誠實前提（見 hermes-bridge-scanner.timer 註解、提案 §1.2）：多數情況
+# 下「每天 08:15 觸發」實際上是之後某次手動喚醒 WSL 時的 catch-up 補跑。
+
+[Unit]
+Description=Run hermes-bridge-pipeline.service every day at 08:15
+
+[Timer]
+OnCalendar=*-*-* 08:15:00
+Unit=hermes-bridge-pipeline.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,19 @@
+# hermes/systemd/hermes-bridge-notifier.timer — Stage 2.7b
+# 每天 08:25 觸發一次 notify。時間選擇：pipeline（08:15）之後 10 分鐘，
+# 讓「當日新候選在同一個早上批次內完成產生→通知」（提案 §4.2）。
+#
+# Persistent=true 與既有 timer 一致：WSL 睡過觸發時刻，喚醒後 catch-up
+# 補跑一次；notify 冪等（notification_log UNIQUE + send ledger 雙層），
+# 補跑安全，不會重複投遞。繼承「WSL on-demand」誠實前提：dispatch job
+# 完成通知最壞延遲一天，v1 接受（提案 §4.2／§4.5）。
+
+[Unit]
+Description=Run hermes-bridge-notifier.service every day at 08:25
+
+[Timer]
+OnCalendar=*-*-* 08:25:00
+Unit=hermes-bridge-notifier.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

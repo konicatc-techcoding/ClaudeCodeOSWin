@@ -6,14 +6,13 @@
 # 走 2.4a 的安全預設（effective since ＝ max(config cutover, watermark)）。
 # 排程一律不帶 --since——這是 roadmap 明文規則，不要在這裡加範圍參數。
 #
-# 現況（2026-07-12）：這個 unit 目前仍是 **legacy ended_at scanner**——只掃
-# `ended_at` 已設的「完結」session（Stage 2.3/2.4a/2.4b 既有行為）。Episode
-# capture 功能（Stage 2.4d，見 docs/stage2.4d-episode-capture-proposal.md）
-# 尚未啟用：`episodes.enabled` 尚不存在於 hermes/config/bridge.yaml（等同
-# false），scanner 沒有 episode 偵測邏輯路徑。`ended_at` 已知對 Desktop/TUI
-# session 結構性不可靠（64 個 session 只 20 個有值，Desktop 0/2、TUI 8/46）
-# ——這正是 Stage 2.4d 要解決的問題，部署 episode capture 前不要誤以為這個
-# unit 已經在做 episode 偵測。
+# 現況（2026-07-18 更正，2.7b）：Episode capture 功能（Stage 2.4d，見
+# docs/stage2.4d-episode-capture-proposal.md）已於 2026-07-12 部署上線
+# （`episodes.enabled=true`，見 hermes/config/bridge.yaml）——scanner 已具備
+# episode 偵測邏輯路徑，不再是純粹的 legacy ended_at scanner。`ended_at`
+# 對 Desktop/TUI session 結構性不可靠（64 個 session 只 20 個有值，
+# Desktop 0/2、TUI 8/46）這一觀察本身仍成立，但已是 Stage 2.4d 解決過的
+# 舊問題背景，不代表 episode capture 尚未啟用。
 #
 # 失敗語義：scanner 非零 exit（例如 config 缺失 fail loud）→ unit 進入 failed
 # 狀態（systemctl --user list-units --failed 可觀測）。不設 Restart——失敗不推進

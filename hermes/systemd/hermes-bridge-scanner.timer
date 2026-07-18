@@ -12,9 +12,9 @@
 # always-on production——多數情況下「每天 08:05 觸發」實際上是之後某次
 # 手動喚醒 WSL 時的 catch-up 補跑，不是固定時刻真的有人在跑。
 #
-# 現況（2026-07-12）：搭配的 hermes-bridge-scanner.service 目前仍是 legacy
-# ended_at scanner，episode capture（Stage 2.4d）尚未啟用（episodes.enabled
-# 尚不存在於 bridge.yaml）。
+# 現況（2026-07-18 更正，2.7b）：搭配的 hermes-bridge-scanner.service 已於
+# 2026-07-12 隨 Stage 2.4d 啟用 episode capture（episodes.enabled=true，見
+# hermes/config/bridge.yaml），不再是純粹的 legacy ended_at scanner。
 
 [Unit]
 Description=Run hermes-bridge-scanner.service every day at 08:05

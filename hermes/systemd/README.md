@@ -44,6 +44,8 @@ wsl --shutdown
 - `hermes-cron-daily-memory-check.service` + `.timer` — 每天 08:00 觸發一次（等效同名 plist 的 `StartCalendarInterval`）
 - `hermes-bridge.service` + `.timer` — 每天 08:10 觸發一次（等效 `hermes-bridge.plist`）
 - `hermes-bridge-scanner.service` + `.timer` — 每天 08:05 觸發一次 `bridge_scanner.py scan`（Stage 2.4b 新增，無 launchd 前身）。**只排程 scan**：ExecStart 無參數，走 2.4a 安全預設（effective since ＝ max(config cutover, watermark)），排程一律不帶 `--since`；`reconcile` 是回填/對帳工具，人工或未來 2.4c 串接時才用，**刻意不進排程**。失敗（如 config 缺失）→ unit failed 可觀測，不設 Restart——失敗不推進 watermark，下次觸發從同一下界重掃，不會跳漏
+- `hermes-bridge-pipeline.service` + `.timer` — 每天 08:15 觸發一次（Stage 2.7b 新增，尚未 enable／部署，見 docs/stage2.7-notification-scheduling-proposal.md §9 2.7b）。單一 oneshot service 依序執行 `bridge_importer.py import --limit 10` → `bridge_triage_enqueuer.py enqueue --max-new 5`；任一步驟失敗，後續步驟不執行、unit failed 可觀測（多行 `ExecStart=` 的既有 systemd 語義，不需另寫 wrapper）。旗標固定，排程一律不加其他範圍／dry-run 參數
+- `hermes-bridge-notifier.service` + `.timer` — 每天 08:25 觸發一次 `bridge_notifier.py notify`（Stage 2.7b 新增，尚未 enable／部署）。走預設頻道（`bridge_notifier.py` 的 `DEFAULT_CHANNEL`＝正式頻道 `#agentos`）與預設 send-cli；2.7c 部署驗收時人工帶 `--channel` 覆寫成測試頻道先行驗證，通過後才回到本檔預設。notifier 對 jobs.db 唯讀，失敗（含 `hermes` CLI 不可用）→ fail loud、unit failed，不落 `notification_log`，下輪補送
 - `install.sh` / `uninstall.sh` — 安裝/移除腳本，用法跟原本 `hermes/launchd/install.sh` 一致，只是底層換成 `systemctl --user`
 
 ## 安裝 / 移除
@@ -55,6 +57,8 @@ hermes/systemd/install.sh hermes-rss                          # 安裝 rss（ser
 hermes/systemd/install.sh hermes-cron-daily-memory-check      # 安裝 cron（service+timer，每天 08:00）
 hermes/systemd/install.sh hermes-bridge                       # 安裝 hermes bridge（service+timer，每天 08:10）
 hermes/systemd/install.sh hermes-bridge-scanner               # 安裝 bridge scanner（service+timer，每天 08:05）
+hermes/systemd/install.sh hermes-bridge-pipeline              # 安裝 bridge pipeline（service+timer，每天 08:15，Stage 2.7b，尚未部署）
+hermes/systemd/install.sh hermes-bridge-notifier              # 安裝 bridge notifier（service+timer，每天 08:25，Stage 2.7b，尚未部署）
 
 hermes/systemd/uninstall.sh                                   # 預設移除 worker
 hermes/systemd/uninstall.sh hermes-telegram                   # 移除 telegram

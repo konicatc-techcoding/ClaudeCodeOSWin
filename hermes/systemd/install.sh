@@ -25,6 +25,8 @@
 #   hermes/systemd/install.sh hermes-cron-daily-memory-check   # 安裝 cron adapter（service+timer）
 #   hermes/systemd/install.sh hermes-bridge         # 安裝 hermes bridge（service+timer）
 #   hermes/systemd/install.sh hermes-bridge-scanner # 安裝 bridge scanner（service+timer，每天 08:05）
+#   hermes/systemd/install.sh hermes-bridge-pipeline # 安裝 bridge pipeline（import→enqueue，service+timer，每天 08:15，Stage 2.7b）
+#   hermes/systemd/install.sh hermes-bridge-notifier # 安裝 bridge notifier（Slack 通知，service+timer，每天 08:25，Stage 2.7b）
 
 set -euo pipefail
 

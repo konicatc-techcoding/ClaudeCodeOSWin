@@ -1,0 +1,28 @@
+# hermes/systemd/hermes-bridge-notifier.service — Stage 2.7b
+# 一次性執行單元：跑一輪 bridge_notifier.py notify 就結束，觸發時機交給
+# 搭配的 hermes-bridge-notifier.timer（每天 08:25）。
+#
+# ExecStart 刻意「無額外參數」：notify 走程式內建預設——正式頻道
+# `#agentos`（C0BHE9NFW0P，bridge_notifier.py 的 DEFAULT_CHANNEL）、預設
+# send-cli（`hermes`）。2.7c 部署驗收階段人工帶 `--channel` 覆寫成測試
+# 頻道 C0BHZC2EG84 先驗收，通過後才回到本檔的預設正式頻道——不在本檔
+# 寫死測試頻道、也不加 --dry-run（那是人工驗證用旗標，不是排程預設）。
+#
+# notifier 對 jobs.db 全程唯讀（除了自己的 notification_log 表），失敗
+# 語義：send 失敗或 hermes CLI 不存在 → notifier 非零 exit → unit 進入
+# failed 狀態，零通知送出、零 log 寫入（fail loud，不靜默降級，見提案
+# §5／§8）。不設 Restart——下次 timer 重掃，message-key 冪等保證補送不
+# 重複。notifier 只能通知「DB 可見」的失敗，不能偵測自己或其他 unit
+# 沒被執行——v1 不做 meta-monitoring（提案 §4.5，已拍板）。
+
+[Unit]
+Description=Hermes bridge notifier (Slack notify, one-shot, triggered by hermes-bridge-notifier.timer)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/hermes/bridge_notifier.py notify
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/bridge_notifier_systemd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/bridge_notifier_systemd.stderr.log

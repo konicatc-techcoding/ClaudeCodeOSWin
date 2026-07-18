@@ -6,6 +6,8 @@
 #   hermes/systemd/uninstall.sh hermes-telegram     # 移除 telegram adapter
 #   hermes/systemd/uninstall.sh hermes-rss          # 移除 rss adapter（連 timer 一起移除）
 #   hermes/systemd/uninstall.sh hermes-bridge-scanner   # 移除 bridge scanner（連 timer 一起移除）
+#   hermes/systemd/uninstall.sh hermes-bridge-pipeline  # 移除 bridge pipeline（連 timer 一起移除，Stage 2.7b）
+#   hermes/systemd/uninstall.sh hermes-bridge-notifier  # 移除 bridge notifier（連 timer 一起移除，Stage 2.7b）
 
 set -euo pipefail
 
