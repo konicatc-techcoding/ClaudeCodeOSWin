@@ -737,9 +737,23 @@ Stage 2.6 整體視為完成,當且僅當:
    完成(§15.3),待 `daily-github-ai-models-applications` cron 自然
    執行後人工檢視 #ai-news 是否收到投遞——這是候選 2 後續行動的收尾,
    不是 dispatch 機制的缺口。
+   **✅ 已解決(2026-07-18,過程有轉折)**:07-18 09:00 cron 準時執行
+   但未投遞。診斷發現**不是 Slack 鏈的問題**,而是 default profile 的
+   web backend(brave-free)系統性 HTTP 422 → agent 回 `[SILENT]` →
+   scheduler 依設計跳過投遞。修正:default profile 改用 **Tavily**
+   backend(root `config.yaml`;`TAVILY_API_KEY` 自 intelligence
+   profile 複製;六個 profile 的 web 設定已一致化為 tavily)。修正後
+   手動重跑 cron:Tavily 搜尋/extract 正常、真實新聞摘要成功投遞
+   #ai-news(`C0BHG2195BL`),send ledger 冪等 key 在案——**§15.3
+   automation subagent 報告所指向的原始問題(該 cron 投遞失敗)至此
+   完整結案**,07-19 起全自動。
 2. **cron/platform 唯讀橋接構想**(automation subagent 於狀態報告中
    提出的建議):讓橋接層能唯讀取得 cron/gateway 即時狀態,避免只能靠
    間接證據回答平台狀態問題——列為**未排程想法**,不指派 stage、不
    承諾時程。
 3. **Slack 投遞**:維持既拍板結論(§7、§11 第 2 題),屬 Stage 2.7,
    本階段零實作。
+4. **cron prompt 的無聲失敗改進**(2026-07-18 新增,未排程改進):
+   cron prompt 應在搜尋工具故障時投遞簡短故障通知而非 `[SILENT]`,
+   避免無聲失敗——本次 brave-free 422 導致連續兩天無聲跳過即為實例。
+   列為**未排程想法**,不指派 stage、不承諾時程。

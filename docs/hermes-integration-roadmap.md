@@ -481,8 +481,15 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 >   fault-injection mock 測試＋2.5a requeue CLI 已實測），不刻意誘發真實
 >   失敗——原 DoD「失敗路徑實走」以此方式滿足／調整（提案 §15.4）。
 > - **遺留（不阻塞關閉）**：07-18 09:00 cron 自然執行後的 Slack 投遞最終
->   確認（人工檢視）；automation subagent 建議的 cron／platform 唯讀橋接
->   構想列**未排程想法**；Slack 投遞維持既拍板結論，屬 **Stage 2.7**。
+>   確認（人工檢視）——**✅ 已解決（2026-07-18，過程有轉折）**：cron 準時
+>   執行但未投遞，診斷發現非 Slack 鏈問題，而是 default profile web
+>   backend（brave-free）系統性 HTTP 422 → agent 回 `[SILENT]` →
+>   scheduler 依設計跳過投遞；default profile 換 Tavily backend 後手動
+>   重跑，真實新聞摘要成功投遞 #ai-news，07-19 起全自動——§15.3
+>   automation subagent 報告所指向的原始問題至此完整結案（細節與新增的
+>   「cron prompt 無聲失敗改進」未排程待辦見提案 §15.6）；automation
+>   subagent 建議的 cron／platform 唯讀橋接構想列**未排程想法**；
+>   Slack 投遞維持既拍板結論，屬 **Stage 2.7**。
 >
 > 完工紀錄正本（逐筆驗收、完成定義覆核、拍板調整、遺留事項）見提案 **§15**。
 
