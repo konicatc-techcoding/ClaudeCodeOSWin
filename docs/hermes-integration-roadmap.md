@@ -49,6 +49,15 @@ source-specific execution routing（允許、屬本階段必要範圍），避�
 與 2.6d 驗收同日全部完成，Stage 2.6 全階段 ✅ 完成並關閉**——完工紀錄正本
 見提案 **§15**、摘要見下方新增的 Stage 2.6 節；優先順序總結同步更新
 （下一個要規劃的是 **Stage 2.7 — Slack 投遞與排程化**，或直接進 Stage 3）。
+**更新（2026-07-18）**：Stage 2.7 規劃提案同日產出並收斂為 **v2**
+（[stage2.7-notification-scheduling-proposal.md](stage2.7-notification-scheduling-proposal.md)，
+九項開放問題全數拍板、皆採建議值），隨後 **2.7a／2.7b 實作、2.7c 部署與
+真實驗收同日全部完成，Stage 2.7 全階段 ✅ 完成並關閉**——過程中發現並解除
+了提案 §13 唯一的 start blocker（WSL 側 Hermes-agent 套件版本落後 Windows
+main 1223 個 commit，比原評估嚴重許多，處置故事詳見提案 §15.2）；完工紀錄
+正本見提案 **§15**、摘要見下方新增的 Stage 2.7 節；優先順序總結同步更新
+（下一階段為 **Stage 3**，或視需要另開新規劃；2026-07-19 08:15／08:25 兩組
+timer 首次自然觸發待確認，見提案 §15.4 遺留事項）。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -495,6 +504,51 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 
 ---
 
+## Stage 2.7 — Notification & Scheduling ✅ 完成（2026-07-18；提案 v2 九項拍板後同日核准實作）
+
+> **✅ Stage 2.7 全階段完成並關閉（2026-07-18）**：規劃提案
+> [stage2.7-notification-scheduling-proposal.md](stage2.7-notification-scheduling-proposal.md)
+> （`planning` domain 起草）同日 v1→v2 收斂——九項開放問題全數拍板、皆採
+> 建議值，核心為 **(A) 獨立 notifier 掃描器**＋**(B) triage 段排程化**
+> （pipeline 串行 importer→enqueuer），鐵律「dispatch 人工核准 gate 不可被
+> 排程化繞過」全程守住——之後依 a→b→c 順序、每個子階段開工前經使用者核准
+> 實作：
+>
+> - **2.7a**（commit `86287f7`）：notifier 核心（`hermes/bridge_notifier.py`）
+>   ——`notification_log` 表、六種事件類型（候選待核准、needs_review、
+>   dispatch 完成／死信、triage 死信、anomaly）判定、`hermes send` 子程序
+>   封裝（mock 可注入）、message-key 冪等組裝、訊息樣板（summary 截斷
+>   200 字元＋標註）、`--dry-run`；附帶 enqueuer `--max-new` 旗標。
+>   42 測試綠。
+> - **2.7b**（commit `23d9f6a`）：`hermes-bridge-pipeline.service/.timer`
+>   （08:15）與 `hermes-bridge-notifier.service/.timer`（08:25）兩組
+>   systemd unit 寫好、尚未 enable（enable 留給 2.7c 部署動作）；
+>   `hermes-bridge-scanner` 過時註解一併修正（零行為變更）。19 測試綠。
+> - **2.7c 部署與驗收**：過程中發現並解除提案唯一的 start blocker——原以為
+>   只是「WSL 側 `hermes send` 沒實測過」，實測後發現 WSL 的 Hermes-agent
+>   是一份完全獨立的 git checkout，落後 Windows main **1223 個 commit**、
+>   缺 Slack delivery hardening；使用者拍板選項「1b」（一次性 git
+>   fast-forward 升級到 Windows 同一 commit，不建立長期自動同步機制），
+>   經安全查證（`hermes send` 路徑不觸碰 `state.db`、WSL 本地 commit 是
+>   Windows main 的祖先）後執行，三項實測（fail-closed 阻擋、真實投遞、
+>   去重 no-op）全過。`sync_to_wsl.sh --apply` 部署後，notifier 真實投遞
+>   到測試頻道 `C0BHZC2EG84` 成功、重跑冪等（0 送出／1 略過）、**鐵律
+>   稽核通過**（`dispatch_records` 表筆數執行前後維持 2 筆不變）；兩組
+>   timer 已 enable，下次觸發 2026-07-19 08:15／08:25。
+> - **遺留（不阻塞關閉）**：(1) 2026-07-19 首次自然排程觸發待人工確認
+>   （pipeline／notifier 是否正確運作）；(2) dispatch 是否可用 Hermes
+>   輕量／免費模型——查證確認 dispatch 執行路徑（`invoke_cos.sh` →
+>   `claude -p`）與 Hermes profile、`scripts/route_model.py` 三者完全
+>   獨立，列為未排程的未來架構決策（需新整合路徑＋先解決 profile 資料
+>   跨機同步）；(3) WSL／Windows 側 Hermes-agent 版本同步無自動化機制
+>   （1b 是一次性動作，非持續流程，Windows 側日後再升級需人工重跑同一
+>   套 fast-forward）。
+>
+> 完工紀錄正本（逐筆事實、start blocker 完整故事、部署驗收紀錄、遺留事項）
+> 見提案 **§15**。
+
+---
+
 ## Stage 3 — Dashboard Hermes Session 檢視頁
 
 **目標**：在既有 Streamlit dashboard 加一頁 Hermes session 檢視（用 adapter 的
@@ -514,7 +568,7 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 
 ---
 
-## 建議優先順序（總結，2026-07-17 更新）
+## 建議優先順序（總結，2026-07-18 更新）
 
 1. ~~Stage 1~~ ✅ 完成（Pre-Bridge Foundation，見 [stage1-checkpoint.md](stage1-checkpoint.md)）。
 2. ~~Stage 2 必要前置~~ ✅ gate 已解（2026-07-10）：DoD 1/2 實走完成、三項前置決策拍板並記錄。
@@ -526,12 +580,14 @@ worker execution routing 是不同層級的概念，見上方定位段落。
    九項拍板後同日 2.6a/2.6b/2.6c 實作、WSL 部署、2.6d 驗收完成——完工紀錄見
    提案 §15、摘要見上方 Stage 2.6 節。Stage 2.5 遺留小修（prompt v2、候選池
    殘餘、`--event-id` 旗標）已隨 2.6a 一併收掉。
-6. **Stage 2.7 — Slack 投遞與排程化**（下一個候選階段，**尚未規劃**）：2.6 拍板
-   明確列為另案（2.6 提案 §7；頻道對應屆時由使用者指定，機制起點參考
-   `delivered_at` 模式、投遞側落 hermes-agent）。是否開工、或直接進 Stage 3，
-   以 2.6d 建立的成本基準（dispatch 單筆 $0.846）與 needs_review 觸發率
-   觀察（現況 0）為決策依據，由使用者拍板。
-7. **Stage 3**：觀測性收尾。
+6. ~~Stage 2.7 — Slack 投遞與排程化~~ ✅ 全階段完成並關閉（2026-07-18）：提案 v2
+   九項拍板後同日 2.7a/2.7b 實作、2.7c 部署與真實驗收完成，過程中發現並解除了
+   提案唯一的 start blocker（WSL 側 Hermes-agent 版本落後 Windows main 1223
+   個 commit）——完工紀錄見提案 §15、摘要見上方 Stage 2.7 節。2026-07-19
+   首次自然排程觸發待人工確認（見提案 §15.4）。
+7. **Stage 3**：觀測性收尾。下一階段為 Stage 3，或視需要另開新規劃（例如把
+   §15.4 遺留的「dispatch＋輕量模型」架構構想或「Hermes-agent 版本同步機制」
+   收斂為獨立提案）。
 
 ## 持續事項（不設 stage，跨階段有效）
 
@@ -544,6 +600,10 @@ worker execution routing 是不同層級的概念，見上方定位段落。
   是設計行為；所有自動化設計（尤其 Stage 2）必須把這當成常態而非例外。
 - **Windows repo ↔ WSL 部署複本的同步**（Stage 1.4 起生效）：v0.1 為手動觸發
   `scripts/sync_to_wsl.sh`，時機與 runbook 見 [deployment-sync-plan.md](deployment-sync-plan.md)。
+- **WSL／Windows 側 Hermes-agent 套件版本同步無自動化機制**（2026-07-18 新增，
+  見 Stage 2.7 §15.4）：2026-07-18 的一次性 git fast-forward（選項 1b）只解決了
+  當下的版本落差，不是持續流程；Windows 側日後再升級 Hermes-agent，需人工對
+  WSL 側重跑同一套流程，否則會再度漂移。
 
 ## 風險與未知事項
 
@@ -558,5 +618,6 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 | ~~Windows 開發正本無版控~~ **已解**（2026-07-09 `git init`，baseline `03c7a0e`） | （解除前）程式層 rollback 只能靠 WSL pre-sync tarball；bridge 這種長期演化元件無變更歷史 | 已完成 `git init` 與 baseline commit，後續變更均入版控；git-based sync 仍列 sync plan v0.2 升級路徑；rollback 現況索引見 checkpoint 第 6 節 |
 | state.db 訊息數相對 Stage 0 基準下降（2026-07-09 觀察） | 若是讀錯 profile db，bridge 會處理錯的資料集 | Stage 2 DoD 5 基準複查；讀取一律 `--profile default` ＋ snapshot |
 | **bridge_state schema v1 與拍板欄位清單有出入**（2026-07-10 新增） | 不先對齊就實作，會產生兩套欄位語意並存 | 對齊明文列為 Stage 2 實作第一步（memory-bridge-state.md 第 6 節）；schema／測試／文件三者同動 |
-| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容。**2026-07-17 更新**：blocker 已實測解除（zero-tools 技術強制，提案第 18 節解除紀錄），prompt injection 測試（矩陣第 15、20 項）已隨 2.5c（commit `8444e7d`）落地——攻擊面已如設計侷限在輸出內容層；輸出層本身的殘餘風險由 `needs_review` 觸發率監測（提案第 20.3 節，2.6 前小修候選）持續觀察。**2026-07-17 第二次更新**：觸發率監測已隨 2.6b 的 CLI decision 計數落地（2.6 提案 §5.4），2.6d 盤點現況：memory_only=5／action_candidate=2／needs_review=0／異常=0；下游 dispatch 的注入緩解鏈（人工核准硬 gate、episode 全文不入 prompt、殘餘風險誠實標註）見 2.6 提案 §10 |
+| **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容。**2026-07-17 更新**：blocker 已實測解除（zero-tools 技術強制，提案第 18 節解除紀錄），prompt injection 測試（矩陣第 15、20 項）已隨 2.5c（commit `8444e7d`）落地——攻擊面已如設計侷限在輸出內容層；輸出層本身的殘餘風險由 `needs_review` 觸發率監測（提案第 20.3 節，2.6 前小修候選）持續觀察。**2026-07-17 第二次更新**：觸發率監測已隨 2.6b 的 CLI decision 計數落地（2.6 提案 §5.4），2.6d 盤點現況：memory_only=5／action_candidate=2／needs_review=0／異常=0；下游 dispatch 的注入緩解鏈（人工核准硬 gate、episode 全文不入 prompt、殘餘風險誠實標註）見 2.6 提案 §10。**2026-07-18 更新**：Stage 2.7 notifier 對 `needs_review`／`anomaly` 補上逐筆通知（提案 §6.2），觸發率監測遺留視為關閉 |
 | **並行 `requeue_dead_letter` 呼叫的 SQLite 例外處理**（2026-07-12 第四次修訂新增） | 若實作沿用 v4 的二分支假設，WAL 模式下的 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外可能未被正確分類，誤報「已被別人 requeue」或讓例外未經處理往外拋 | 提案第 4.1b／4.1c 節已改寫為四分支狀態機並定義 `RequeueRetryableDBError`；2.5a 實作與測試（提案第 14 節第 21 項）需嚴格遵循，不得簡化回二分支假設。**2026-07-17 更新**：已隨 2.5a（commit `4aef9d1`）依四分支狀態機實作，並以決定性 fault-injection 測試（提案第 14 節第 21、22 項）＋聚合並行整合測試（第 23 項）鎖定 |
+| **WSL／Windows 側 Hermes-agent 套件版本漂移**（2026-07-18 新增，見 Stage 2.7 §15.2） | 兩側套件版本不同步可能導致功能缺口（如本次 `hermes send` 不支援 `--message-key`）在無人察覺下累積，且落差會隨時間放大 | 2026-07-18 已一次性 fast-forward 追平（選項 1b，安全查證見提案 §15.2）；**未建立自動同步機制**，需人工於 Windows 側每次升級 Hermes-agent 後主動對 WSL 側重跑同一套流程，列為持續事項（見上方「持續事項」節） |

@@ -1,7 +1,8 @@
 # Stage 2.7 — Notification & Scheduling（設計提案 v2）
 
 日期：2026-07-18　狀態：**v2——九項開放問題已全數拍板（2026-07-18，皆採
-建議值），待使用者核准 2.7a 開工**
+建議值）；2.7a／2.7b／2.7c 全階段實作、部署與驗收皆已完成，Stage 2.7
+全階段 ✅ 完成並關閉（2026-07-18）**
 負責規劃：`planning` domain
 負責領域（實作階段）：`engineering`（notifier 程式碼、schema、測試）；
 `automation`（timer 頻率／觸發時機決策與 unit 檔——2.6 提案 §12 明文
@@ -533,7 +534,7 @@ job 完成通知因此最壞延遲一天——v1 接受（人工核准當下人�
 
 ## 9. 子階段拆分（比照 2.5/2.6 的模式；每個子階段開工前經使用者核准）
 
-### 2.7a — notifier 核心＋notification_log（不排程、不真送）
+### 2.7a — notifier 核心＋notification_log（不排程、不真送）✅ 完成（commit `86287f7`）
 
 - **範圍**：`jobs.db` migration（`notification_log`，冪等）；
   `hermes/bridge_notifier.py`：事件偵測（複用 scan_triage_results＋
@@ -552,8 +553,11 @@ job 完成通知因此最壞延遲一天——v1 接受（人工核准當下人�
   不打真 Slack、不呼叫任何模型。
 - **不做**：不裝 timer、不真送 Slack、不碰 worker、不碰
   bridge_state.db。
+- **完工事實（2026-07-18）**：commit `86287f7`，六種事件類型（§3.1
+  五種＋§3.2 anomaly）判定、mock send、42 個沙箱測試全綠；enqueuer
+  `--max-new` 旗標隨本子階段一併完成。詳見 §15.1。
 
-### 2.7b — 排程化 units（pipeline＋notifier timers）
+### 2.7b — 排程化 units（pipeline＋notifier timers）✅ 完成（commit `23d9f6a`）
 
 - **範圍**：`hermes-bridge-pipeline.service/.timer`（08:15，串行
   importer→enqueuer，帶 `--limit 10`／`--max-new 5`）、
@@ -571,8 +575,11 @@ job 完成通知因此最壞延遲一天——v1 接受（人工核准當下人�
   timer」的慣例）。
 - **不做**：不改既有 scanner/memory-check/bridge units 的**行為**
   （scanner 僅註解更正）；不排程 reconcile、不排程 dispatch CLI。
+- **完工事實（2026-07-18）**：commit `23d9f6a`，兩組 systemd unit 寫好
+  （依 DoD 規劃暫未 enable，交由 2.7c 部署動作 enable）、scanner 過時
+  註解修正完成、19 個測試全綠。詳見 §15.1。
 
-### 2.7c — 部署＋真實驗收（低量、人工全程在場）
+### 2.7c — 部署＋真實驗收（低量、人工全程在場）✅ 完成（見 §15）
 
 - **範圍**：start blocker 解除確認（§13：WSL 側 `hermes send` 實測）
   →頻道 allowlist 佈建（拍板流程：先測試頻道 `C0BHZC2EG84`，驗收
@@ -588,6 +595,10 @@ job 完成通知因此最壞延遲一天——v1 接受（人工核准當下人�
   失敗可見性至少人工演練一次（故意讓 send 失敗，確認 unit failed＋
   下輪補送）。
 - **不做**：不擴大量體；驗收期間不調高頻率。
+- **完工事實（2026-07-18）**：start blocker 解除過程遠比預期複雜（WSL
+  側 Hermes-agent 落後 Windows main 1223 commit，非單純未實測——完整
+  故事見 §15.2）；`sync_to_wsl.sh --apply` 部署、真實投遞、冪等重跑、
+  鐵律稽核全數通過；兩組 timer 已 enable。詳見 §15.3。
 
 ---
 
@@ -688,6 +699,12 @@ send CLI 呼叫路徑。**目前唯一待辦是使用者核准 2.7a 開工**（�
 節奏：每個子階段開工前各自核准；硬 blocker 第 1 項在 2.7c 前解除
 即可）。
 
+**✅ 解除紀錄（2026-07-18）**：實測發現這項 blocker 遠比原評估嚴重
+（並非單純「沒實測過」，而是 WSL 側 Hermes-agent 套件版本與 Windows
+main 分岔 1223 個 commit），完整處置故事（釐清、安全查證、拍板選項
+1b、執行步驟、實測結果）見 §15.2。已於 2.7c 部署前解除，不再是
+未解決的 blocker。
+
 ---
 
 ## 14. 完成定義總表（全階段）
@@ -705,3 +722,105 @@ Stage 2.7 整體視為完成，當且僅當：
    不變、headless memory 邊界不變。
 5. 排程化後首個觀察窗（建議一週）的自動 triage 成本與通知量回報
    使用者，作為「是否調頻率／是否進 Stage 3」的決策依據。
+
+**✅ 全部達成（2026-07-18）**：完工紀錄正本見下方 §15。
+
+---
+
+## 15. 完工紀錄（Stage 2.7 全階段關閉，2026-07-18）
+
+### 15.1 實作與部署事實
+
+- **2.7a**（commit `86287f7`）：notifier 核心——`notification_log` 表
+  （§2.3 設計落地）、六種事件類型判定（§3.1 五種＋§3.2 `anomaly`）、
+  `hermes send` 子程序封裝（mock send 可注入）、message-key 組裝
+  （§2.4）、訊息樣板（summary 截斷＋標註）、`--dry-run`；附帶
+  enqueuer `--max-new` 旗標（§4.4）。42 個沙箱測試全綠。
+- **2.7b**（commit `23d9f6a`）：`hermes-bridge-pipeline.service/.timer`
+  （08:15）與 `hermes-bridge-notifier.service/.timer`（08:25）兩組
+  systemd unit 寫好但**尚未 enable**（比照既有慣例，enable 是 2.7c
+  部署動作）；`hermes-bridge-scanner.service` 過時註解修正（§9 2.7b
+  範圍明文的順手項，零行為變更）；19 個測試全綠（含
+  `test_systemd_units.py` 擴充）。
+
+### 15.2 §13 唯一 start blocker 的完整故事
+
+原提案 §13 列的唯一硬 blocker——「WSL 部署側能否呼叫 `hermes send`
+並成功投遞」——原以為只是「沒實測過」的既知缺口，2.7c 實測後發現
+遠比預期嚴重，記錄如下（含後續處置，供未來查閱）：
+
+1. **問題比預期嚴重**：WSL 的 `~/.hermes/hermes-agent` 是一份**完全
+   獨立的 git checkout**（shallow clone），落後 Windows 側 main 分支
+   **1223 個 commit**——沒有 Slack delivery hardening、`hermes send`
+   不支援 `--message-key`、也沒有 `SLACK_BOT_TOKEN`／頻道 allowlist
+   設定。這不是「忘記測」，是兩邊套件版本從未同步過。
+2. **釐清與 Stage 0 決策的界線**：這與「`state.db` 由 Windows 側
+   symlink 共用」（Stage 0 拍板）是**兩件不同的事**——那條線仍然
+   成立、沒被破壞。這次卡住的是 **Hermes-agent 程式碼本身**的版本
+   在兩側完全獨立、從未同步（`sync_to_wsl.sh` 只同步本 repo，不涉及
+   Hermes-agent 套件）。
+3. **使用者拍板選項「1b」**：不比照完整的「1a」（建立長期自動同步
+   機制），改採一次性把 WSL 側 hermes-agent 用 git fast-forward
+   升級到與 Windows main 同一 commit，不建立持續同步流程。
+4. **安全查證（動手前）**：
+   - 先查 `hermes send` 路徑（`send_cmd.py`／`send_message_tool.py`）
+     原始碼，確認完全不觸碰 `state.db`（docstring 明講刻意不載入
+     完整 gateway 模組）——排除「升級可能對正在使用中的共用
+     `state.db` 做 schema migration」的風險。
+   - 再確認 WSL 本地那顆 commit（`05cbddc0`，一個 revert commit）是
+     Windows main 的祖先——fast-forward 無損、不會產生分叉。
+5. **執行步驟**：`git fetch --unshallow` 補齊 shallow clone 歷史 →
+   用本機路徑把 Windows checkout 加為 git remote（同機、免網路）→
+   `git merge --ff-only`（`05cbddc0` → `c12c64f9e9`）→
+   `pip install -e ".[messaging]"` 重建 venv → 複製
+   `SLACK_BOT_TOKEN`（未印明文）＋鏡像 Windows default profile 的
+   七頻道 allowlist 到 WSL 側 `.env`／`config.yaml`（備份
+   `.bak.20260718`）→ 打安全 tag `pre-1b-upgrade-20260718`（rollback
+   錨點）。
+6. **三項實測全過**：負面（非清單頻道 fail-closed 擋下）、正面
+   （測試頻道 `C0BHZC2EG84` 真實送達）、去重（同 message-key 第二次
+   no-op）。
+7. **附帶討論、不納入 2.7 範圍的問題（架構備忘）**：使用者曾問
+   「dispatch 能否用 Windows profile 的輕量／免費模型」——查證後
+   確認 dispatch 執行路徑（`invoke_cos.sh` → `claude -p`）與 Hermes
+   profile 完全無關、也與 `scripts/route_model.py`（OpenRouter 直呼）
+   無關，三者是**三條獨立路徑**。這是獨立的未來架構決策，不屬於
+   2.7，本次一併記入遺留事項（§15.4）供後續規劃參考。
+8. **新遺留**：兩側 Hermes-agent 現在版本一致，但**沒有建立自動同步
+   機制**——1b 是一次性 fast-forward，不是持續流程；之後 Windows 側
+   再升級 Hermes-agent，需要人工對 WSL 側重跑同一套 fast-forward
+   流程，否則會再度漂移（見 §15.4）。
+
+### 15.3 2.7c 部署與驗收紀錄
+
+- `sync_to_wsl.sh --apply` 部署 2.7a／2.7b（備份
+  `pre-sync-20260718T124319`）；部署側測試套件全綠。
+- notifier dry-run 正確列出 1 筆待通知事件（2.6d 的 dispatch job
+  `06128712`，遲來但正確的通知）；真實投遞到測試頻道 `C0BHZC2EG84`
+  成功；重跑驗證冪等（0 送出／1 略過）。
+- **鐵律稽核**：notifier 執行前後 `dispatch_records` 表筆數維持
+  2 筆不變、`jobs` 表無新增——全程零未經人工核准的 dispatch。
+- 兩組 timer（`hermes-bridge-pipeline.timer` 08:15、
+  `hermes-bridge-notifier.timer` 08:25）已 enable，下次觸發
+  2026-07-19 08:15／08:25——**待確認**：明日首次自動觸發是否正常
+  運作（pipeline 是否正確處理當日新 episode、notifier 是否正確
+  推播到 `#agentos` 正式頻道），見 §15.4 遺留事項。
+
+### 15.4 遺留事項
+
+1. **明日首次自動觸發待確認**（2026-07-19 08:15／08:25）：兩組 timer
+   剛 enable，尚未經過一次自然排程週期的真實驗證，需在觸發後人工
+   檢視 pipeline 是否正確處理當日新 episode、notifier 是否正確推播
+   到 `#agentos` 正式頻道。
+2. **dispatch＋輕量模型的架構構想**（未排程）：dispatch 執行路徑
+   （`invoke_cos.sh` → `claude -p`）目前與 Hermes profile、
+   `scripts/route_model.py` 三者完全獨立；若未來要讓 dispatch 可選用
+   Hermes profile 裡的輕量／免費模型，需要新的整合路徑（改
+   `invoke_cos.sh` 或新增 adapter），且需先解決 **profile 資料跨機
+   同步**問題（目前只有 `state.db` 有 symlink，Hermes profile 的
+   `.env`／`config.yaml` 沒有同步機制）。列為未來架構決策，不屬於
+   2.7 範圍。
+3. **WSL／Windows 側 Hermes-agent 版本同步無自動化**：本次 1b 是
+   一次性 fast-forward，不是持續流程；Windows 側日後再升級
+   Hermes-agent，需人工對 WSL 側重跑同一套流程（§15.2 步驟 5），
+   否則會再度漂移。
