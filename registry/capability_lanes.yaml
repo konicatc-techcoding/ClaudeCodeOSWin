@@ -129,8 +129,19 @@ lanes:
     provider: hermes
     model: null                    # 由 profile 自身設定決定，本 registry 不重複記載
     hermes_profile: nemocoding
-    status: reference
-    cost_tier: unknown
+    status: active
+    cost_tier: free                # Phase 2a 稽核（2026-07-20）：config.yaml 宣告
+                                    # provider: openrouter，model:
+                                    # nvidia/nemotron-3-ultra-550b-a55b:free；`:free`
+                                    # 後綴 = OpenRouter 免費層。auth.json 的
+                                    # credential_pool.openrouter 有對應 entry
+                                    # （source: env:OPENROUTER_API_KEY，last_status: ok）
+                                    # ，declared provider 與實際可用憑證吻合。
+                                    # Phase 2d（2026-07-20，同日稍晚）：真實（非
+                                    # mock）dispatch_domain.py 呼叫的 JSON envelope
+                                    # usage.cost_status 回報 "estimated"，與既有
+                                    # free 判定一致，維持不變；status 隨此次真實
+                                    # smoke test 通過由 reference 轉 active。
     risk_tier: medium
     allowed_agents: [engineering]
     intended_use: Hermes 側的 Nemotron coding profile；session 產出經 Stage 2 bridge／to-inbox 才進入本系統
@@ -144,8 +155,27 @@ lanes:
     provider: hermes
     model: null
     hermes_profile: gptcoding
-    status: reference
-    cost_tier: unknown
+    status: active
+    cost_tier: included            # Phase 2a 稽核（2026-07-20）：config.yaml 宣告
+                                    # provider: openai-codex，model: gpt-5.6-sol
+                                    # （ChatGPT backend-api/codex，OAuth）。auth.json
+                                    # 的 credential_pool.openai-codex 確實有對應
+                                    # OAuth entry（source: device_code，last_status:
+                                    # ok）——宣告與憑證吻合，非稽核前懷疑的「設定跟
+                                    # 認證對不上」。但 openai-codex OAuth 走 ChatGPT
+                                    # 訂閱制，本檔查不到綁定的訂閱方案（Plus/Pro/
+                                    # 其他），無法確認是 included 還是 paid，故維持
+                                    # unknown，不瞎猜。（原註記誤植 model 為
+                                    # gpt-5.6-terra——那其實是 hermes-intelligence 的
+                                    # model；本次任務 2026-07-20 複查時一併修正，並
+                                    # 重新核對 config.yaml/auth.json，判斷仍成立。）
+                                    # Phase 2d（2026-07-20，同日稍晚）：對這條 lane 跑
+                                    # 了一次真實（非 mock）dispatch_domain.py 呼叫，
+                                    # 回傳 JSON envelope 的 usage.cost_status 欄位為
+                                    # "included"——API 回應本身給出的訂閱內判斷，不是
+                                    # 臆測，unknown 因此解除，改記 included；status
+                                    # 隨此次真實 smoke test 通過由 reference 轉
+                                    # active。
     risk_tier: medium
     allowed_agents: [engineering]
     intended_use: Hermes 側的 GPT coding profile；同上，產出經 bridge／to-inbox 才進入本系統
@@ -153,20 +183,11 @@ lanes:
       - ClaudeCodeOS 不寫入 Hermes 資料；session 內容進入記憶一律走 memory/inbox/ 政策（memory-taxonomy 4.2/4.3）
       - 自動化呼叫 Hermes CLI 一律明確 --profile
 
-  - id: hermes-codereviewer
-    capability: complex_coding
-    execution: hermes_profile
-    provider: hermes
-    model: null
-    hermes_profile: codereviewer
-    status: reference
-    cost_tier: unknown
-    risk_tier: medium
-    allowed_agents: [engineering]
-    intended_use: Hermes 側的 code review profile（Stage 0.5 待決：此 profile 去留未定，定案前僅登記）
-    guardrails:
-      - ClaudeCodeOS 不寫入 Hermes 資料；session 內容進入記憶一律走 memory/inbox/ 政策（memory-taxonomy 4.2/4.3）
-      - 自動化呼叫 Hermes CLI 一律明確 --profile
+  # hermes-codereviewer（codereviewer profile）已於 2026-07-20 Phase 2a 稽核移除——
+  # 使用者拍板不留（Stage 0.5「codereviewer profile 去留」殘項定案，見
+  # docs/hermes-integration-roadmap.md Stage 0.5 表格）。Windows 側 profile 實際刪除
+  # （備份＋刪除）由 automation domain 平行處理，不在本檔範圍內；本檔僅移除對應 lane
+  # 登記，避免留一條指向已不存在 profile 的 reference lane。
 
   - id: hermes-financialresearch
     capability: bulk_research
@@ -174,8 +195,50 @@ lanes:
     provider: hermes
     model: null
     hermes_profile: financialresearch
-    status: reference
-    cost_tier: unknown
+    status: active
+    cost_tier: included             # Phase 2a 稽核（2026-07-20）判定 free 的依據已
+                                     # 失效——那時 config.yaml 宣告 provider:
+                                     # openrouter，model:
+                                     # nvidia/nemotron-3-ultra-550b-a55b:free（跟
+                                     # hermes-nemocoding 共用同一顆免費模型）。使用者
+                                     # 之後在 Windows 端手動把這個 profile 改成
+                                     # provider: openai-codex，model: gpt-5.6-luna，
+                                     # 「跟 nemocoding 共用免費模型」的敘述已不成立。
+                                     # openai-codex OAuth 走 ChatGPT 訂閱制，無法從
+                                     # 憑證本身判斷免費/付費層，維持 unknown。
+                                     # 複查一（2026-07-20 上午）：config.yaml 確認已
+                                     # 吻合新設定；auth.json 的
+                                     # credential_pool.openai-codex 有對應 OAuth
+                                     # entry（id 62a425——與 default/gptcoding/
+                                     # nemocoding pool 內的同一份裝置授權共用同一
+                                     # id），但這個 profile 專屬副本的 last_status 是
+                                     # null（last_refresh 05:06 UTC，剛 refresh 過，
+                                     # 但尚未見過成功呼叫紀錄，跟 hermes-gptcoding
+                                     # 副本的 last_status: ok 不同）。
+                                     # 複查二（2026-07-20，同日稍晚）：使用者表示已在
+                                     # CLI 手動呼叫確認這個 profile 的 openai-codex
+                                     # 模型呼叫成功。重新讀取 auth.json 白名單欄位：
+                                     # last_refresh 仍是 05:06:44Z（沒有更新的
+                                     # refresh 紀錄），last_status 仍是 null，不是
+                                     # ok——pool 的 bookkeeping 欄位不支持「已證實打
+                                     # 通」的說法。agent.log 目前保留的範圍內也查不到
+                                     # 任何一筆含 financialresearch 字樣的紀錄可佐證
+                                     # 該次手動呼叫（有可能是日誌已輪替，也有可能是
+                                     # 呼叫方式沒有寫進這個 log）。結論：使用者所稱
+                                     # 「已確認打通」目前查無憑證面證據支持，也查無
+                                     # 反證；如實記錄為未證實，2d smoke test 前建議
+                                     # 直接排一次這個 profile 的真實呼叫，看
+                                     # last_status 會不會轉成 ok。
+                                     # Phase 2d（2026-07-20，同日稍晚）：真實（非
+                                     # mock）dispatch_domain.py 呼叫已執行且成功，
+                                     # 回傳 JSON envelope 的 usage.cost_status 欄位為
+                                     # "included"——這是這次真實呼叫本身給出的訂閱內
+                                     # 判斷，直接解決了複查一／複查二遺留的「查無憑證
+                                     # 面證據」問題（不必再靠 auth.json 的
+                                     # last_status/last_refresh 佐證，這次是呼叫本身
+                                     # 成功並回報成本狀態）。cost_tier 由 unknown 改記
+                                     # included；status 隨此次真實 smoke test 通過由
+                                     # reference 轉 active。
     risk_tier: high
     allowed_agents: [intelligence]
     intended_use: Hermes 側的財務研究 profile；產出常含財務個資訊號，落地判斷從嚴
@@ -189,8 +252,64 @@ lanes:
     provider: hermes
     model: null
     hermes_profile: intelligence
-    status: reference
-    cost_tier: unknown
+    status: active
+    cost_tier: included              # Phase 2a 稽核（2026-07-20）：config.yaml 宣告
+                                     # provider: openai-codex，model: gpt-5.6-terra，
+                                     # 但 auth.json 的 providers／credential_pool 只有
+                                     # nous 這個 provider，完全查不到 openai-codex 的
+                                     # OAuth entry（跟 gptcoding／nemocoding 不同——
+                                     # 那兩個 profile 的 credential_pool 都有
+                                     # openai-codex entry）。
+                                     # 複查一（2026-07-20 上午）：使用者表示已針對這個
+                                     # profile 補做 openai-codex 登入。auth.json 的
+                                     # updated_at 顯示 05:12:58 UTC 有被寫入過，但
+                                     # providers／credential_pool 仍然只有 nous，
+                                     # openai-codex entry 依然不存在。如實回報：這次
+                                     # 補登入沒有成功在 profile 本地寫入 openai-codex
+                                     # 憑證。
+                                     # 複查二（2026-07-20，同日稍晚）：再次確認，
+                                     # auth.json 的 updated_at 已推進到 05:34:56 UTC
+                                     # （五個 profile 裡最晚更新的一個），但
+                                     # providers／credential_pool 仍然只有 nous 一個
+                                     # provider，openai-codex entry 仍然不存在——這個
+                                     # profile 本地端從未真的補上 openai-codex 憑證。
+                                     # 但這次複查在 hermes-agent 原始碼
+                                     # （hermes_cli/auth.py read_credential_pool）
+                                     # 確認了一個先前未記錄的機制：profile 對某個
+                                     # provider 若本地零筆記錄，會唯讀 fallback 讀取
+                                     # global-root（%LOCALAPPDATA%\hermes\auth.json）
+                                     # 同一 provider 的 entry。root 的
+                                     # credential_pool.openai-codex 確實有一筆 entry
+                                     # （id 62a425，與 gptcoding／nemocoding 本地副本
+                                     # 是同一顆裝置授權；那兩個 profile 各自的副本
+                                     # last_status 都是 ok，代表這顆憑證本身是通的）。
+                                     # 因此 intelligence profile 呼叫 openai-codex
+                                     # 「功能上」很可能真的能透過 fallback 打通——這與
+                                     # 使用者所稱 CLI 呼叫成功的說法不衝突，只是成功
+                                     # 的來源不是「這次幫 intelligence 做了新的 OAuth
+                                     # 登入」，而是借用了 root 既有（2026-07-17 建立）
+                                     # 的裝置授權，登入操作本身沒有寫入任何新憑證。
+                                     # 風險提醒：fallback 明訂唯讀，token 若在
+                                     # intelligence profile 底下被 rotate，程式碼裡只
+                                     # 找到 xAI OAuth 有 write-through 回 root 的專屬
+                                     # 函式，沒找到 openai-codex 對應的
+                                     # write-through，rotate 後可能出現多 profile 共用
+                                     # 同一 refresh token 導致 refresh_token_reused
+                                     # 失效的已知風險類別（credential_pool.py 註解裡
+                                     # 明確描述過這個 hazard）。結論：目前功能上大機率
+                                     # 可用，但不是「已補齊獨立憑證」，屬於借用共用
+                                     # root 憑證、有 rotation 風險的狀態，2d smoke test
+                                     # 時建議留意是否觸發 token 失效。
+                                     # Phase 2d（2026-07-20，同日稍晚）：真實（非
+                                     # mock）dispatch_domain.py 呼叫已執行且成功，
+                                     # 未觀察到 token 失效；回傳 JSON envelope 的
+                                     # usage.cost_status 欄位為 "included"，功能面
+                                     # 借用 root 共用憑證確實打通，成本歸類也有了
+                                     # 直接證據。cost_tier 由 unknown 改記 included；
+                                     # status 隨此次真實 smoke test 通過由 reference
+                                     # 轉 active。rotation 風險本身未解除（憑證仍是
+                                     # 借用 root 而非獨立補齊），沿用既有 guardrails
+                                     # 繼續留意。
     risk_tier: medium
     allowed_agents: [intelligence]
     intended_use: Hermes 側的情報蒐集 profile；產出經 bridge／to-inbox 才進入本系統

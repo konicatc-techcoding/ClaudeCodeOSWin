@@ -107,7 +107,14 @@ timer 首次自然觸發待確認，見提案 §15.4 遺留事項）。
 | nemocoding／gptcoding gateway 未啟動 | ✅ 根因查明結案（非效能問題；診斷見 checkpoint） | — |
 | profile 處置 | ✅ 診斷完成，採「不刪 profile」建議 | — |
 | financialresearch 自啟腳本修復（腳本已壞） | ⏳ 殘項（非阻塞） | engineering |
-| codereviewer profile 去留（從未裝自啟） | ⏳ 殘項（非阻塞，使用者決定） | 使用者；移除則 automation 執行 |
+| codereviewer profile 去留（從未裝自啟） | ✅ 使用者拍板移除（2026-07-20，Phase 2a 稽核）；Windows 側實際刪除由 automation 平行處理；本 repo 側登記收尾見 `registry/capability_lanes.yaml` | — |
+
+> **Phase 2d 補記（2026-07-20）**：剩餘四條 `hermes-*` capability lane（`hermes-gptcoding`、
+> `hermes-nemocoding`、`hermes-financialresearch`、`hermes-intelligence`）各跑了一次真實
+> （非 mock）`scripts/dispatch_domain.py` 呼叫，全部成功，四條均由 `status: reference`
+> 轉 `active`；其中三條（openai-codex 訂閱制）的 `cost_tier` 也依真實呼叫回報的
+> `usage.cost_status: included` 由 `unknown` 改記 `included`。詳見
+> `registry/capability_lanes.yaml`。
 | 三個殭屍 Startup vbs 清除 | ⏳ 殘項（非阻塞） | automation |
 | sticky profile 緩解（自動化一律 `--profile default` 的習慣／機制化） | ⏳ 殘項（非阻塞） | engineering／automation |
 
