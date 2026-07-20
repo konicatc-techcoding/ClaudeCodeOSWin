@@ -91,7 +91,8 @@ ClaudeCodeOS/
 │   ├── agents.yaml                    ← 領域能力清單
 │   └── model_router.yaml              ← 能力 → 供應商/模型
 ├── scripts/
-│   └── route_model.py                 ← Model Router 的 script adapter
+│   ├── route_model.py                 ← Model Router 的 script adapter
+│   └── dispatch_domain.py             ← Domain Execution Router（可選路到 Hermes lane，見 5.1）
 ├── memory/
 │   ├── MEMORY.md
 │   └── inbox/                         ← 背景寫入區，只能新增檔案（已有真實匯入內容，
@@ -141,9 +142,15 @@ Windows Hermes（`%LOCALAPPDATA%\hermes\state.db`）是唯一 Source of Truth；
 
 **Agent Registry** = Claude Code 原生 subagents（`.claude/agents/*.md`），`registry/agents.yaml` 是加在上面的中繼資料，供 CoS／Hermes 查詢路由對象與狀態。CoS 的工作只是查表、挑 `subagent_type`、呼叫 `Agent` 工具。
 
-**Model Router** 的介面約定：subagent 只請求「能力」（capability），不直接指定模型名稱。實作先用 `scripts/route_model.py` 這個 script adapter 解析 `registry/model_router.yaml` 並呼叫 OpenRouter；用量變多、需要 streaming 或結構化 tool call 時再升級成 MCP server。
+**Model Router** 的介面約定：subagent 只請求「能力」（capability），不直接指定模型名稱。實作用 `scripts/route_model.py` 這個 script adapter 解析 `registry/model_router.yaml`；2026-07-20 起所有 route 的 `via` 都是 `native`（直接由目前的 Claude session 處理），原本呼叫 OpenRouter 的分支已移除（見下）。
 
-**每個領域預設用哪個 capability，寫在 `registry/agents.yaml` 的 `default_capability` 欄位**（2026-07-04 新增）——這是唯一的真相來源，subagent 檔案本身不寫死 capability 名稱，都是查這個欄位。目前：`intelligence` → `bulk_research`（OpenRouter free tier，nemotron）、`engineering` → `complex_coding`（GPT-5.5）、`automation`／`knowledge`／`planning` → `claude_native`（Claude 原生，不對外呼叫）。`scripts/test_route_model.py` 有一個跨 registry 的一致性測試，確保 `agents.yaml` 裡每個 active 領域的 `default_capability` 在 `model_router.yaml` 裡真的存在。
+**每個領域預設用哪個 capability，寫在 `registry/agents.yaml` 的 `default_capability` 欄位**（2026-07-04 新增）——這是唯一的真相來源，subagent 檔案本身不寫死 capability 名稱，都是查這個欄位。目前：`intelligence`／`engineering`／`automation`／`knowledge`／`planning` 五個領域全部 → `claude_native`（Claude 原生，不對外呼叫）。`scripts/test_route_model.py` 有一個跨 registry 的一致性測試，確保 `agents.yaml` 裡每個 active 領域的 `default_capability` 在 `model_router.yaml` 裡真的存在。
+
+**2026-07-20：移除 OpenRouter provider 相關路徑**——查證確認 `OPENROUTER_API_KEY` 自系統建成以來從未真正設定過（無 `.env`、無 shell 環境變數、`scripts/route_model.py` 也沒有任何 `.env` loader），原本走 OpenRouter 的三條 route（`complex_coding` → GPT-5.5、`bulk_research` → Nemotron 免費層、`google_ecosystem` → Gemini，皆登記於 `registry/model_router.yaml`／`registry/capability_lanes.yaml`）實務上從未打通過。使用者拍板全部移除：`engineering`／`intelligence` 的 `default_capability` 改成 `claude_native`（比照 `automation`／`knowledge`／`planning`）；`registry/model_router.yaml` 刪除 `google_ecosystem`（無其他參照），但保留 `complex_coding`／`bulk_research` 兩個 capability key（`via` 改成 `native`）——因為 `registry/capability_lanes.yaml` 的四條 `hermes-*` lane（`hermes-nemocoding`／`hermes-gptcoding`／`hermes-financialresearch`／`hermes-intelligence`，皆 `status: active`）仍用這兩個名稱做 capability 標記，整個刪掉會讓這四條現行 active 的 Hermes lane 在 `scripts/dispatch_domain.py` 的驗證階段失敗；`registry/capability_lanes.yaml` 對應刪除 `openrouter-gpt55-coding`／`openrouter-gemini-google-ecosystem`／`openrouter-nemotron-bulk-research` 三條 lane；`scripts/route_model.py` 移除 `call_openrouter` 及相關 import（不留死代碼，via 不是 native 時 fail-visible 而非嘗試呼叫已不存在的函式）。
+
+### 5.1 Domain Execution Router（`scripts/dispatch_domain.py`）
+
+`route_model.py` 只解析 `model_router.yaml` 的 `via`（目前全部是 `native`），本身不會呼叫 Hermes。`scripts/dispatch_domain.py`（Phase 1，Phase 2d 起四條 `hermes-*` lane 皆 `status: active`）是另一條、subagent 可自行選用的執行通道：查 `registry/capability_lanes.yaml`，可用 `--capability` 自動選路（只挑 `status: active` 的 lane）或 `--lane` 明確指定 Hermes profile，執行後回傳單一 JSON envelope。這是**可選手段**，不是新的預設行為——`engineering`／`intelligence` 的 `default_capability` 仍是 `claude_native`，是否使用、何時使用仍由 subagent 當下判斷（比照它們既有對 `route_model.py` 的判斷方式）。目前只有 `.claude/agents/engineering.md`（`complex_coding` → `hermes-nemocoding`／`hermes-gptcoding`）與 `.claude/agents/intelligence.md`（`bulk_research` → `hermes-financialresearch`／`hermes-intelligence`）的 `allowed_agents` 接得到現有 lane；`automation`／`knowledge`／`planning` 目前不在任何 `hermes-*` lane 的 `allowed_agents` 內，沒有東西好接。
 
 ---
 
@@ -159,7 +166,8 @@ Windows Hermes（`%LOCALAPPDATA%\hermes\state.db`）是唯一 Source of Truth；
 - `INTEGRATION_TEST.md`（v0.1 整合測試紀錄與已修復的缺口）
 - `.claude/skills/consolidate-memory/SKILL.md`（inbox 整併流程，已用真實/假造兩種內容驗證過完整路徑；`memory/` 已有第一筆真正的正本內容）
 - `hermes/db.py` + `hermes/worker.py`（SQLite job queue，設計見 `hermes/DESIGN.md`；狀態機先簡化成 `queued/running/completed/failed/dead_letter` 五種，併發先 `MAX_CONCURRENT_JOBS=1`）——已驗證正常完成、session resume、retry 後成功、dead-letter、reaper 回收 stale job 五種情境
-- `scripts/route_model.py`（Model Router script adapter，可實際呼叫 OpenRouter）
+- `scripts/route_model.py`（Model Router script adapter；2026-07-20 起僅支援 `via=native`，OpenRouter 呼叫路徑已移除，見上）
+- `scripts/dispatch_domain.py`（Domain Execution Router；`engineering`／`intelligence` 可選用它路到 `hermes-*` lane，見 5.1）
 - `hermes/adapter/invoke_cos.sh`（Hermes → CoS 呼叫，可實際執行）
 - `memory/MEMORY.md`、`memory/inbox/`（已有真實匯入內容累積並整併過——非「空的、尚未累積記憶」；已整併者見 `memory/inbox/.processed/`）
 

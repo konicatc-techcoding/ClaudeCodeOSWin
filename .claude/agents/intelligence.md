@@ -17,6 +17,14 @@ tools: WebSearch, WebFetch, Read, Write, Grep, Glob
 - 不做程式碼變更——那是 `engineering` 的職責
 - 不做長期規劃決策——那是 `planning` 的職責
 - 需要非 Claude 模型能力時，查 `registry/agents.yaml` 裡 `intelligence` 的 `default_capability`，透過 `.venv/Scripts/python.exe scripts/route_model.py <default_capability> <prompt-file>` 呼叫（需要專案內的 venv，見 scripts/requirements.txt），不要自己硬編模型名稱。任務內容明顯不適合預設能力時，可以換成別的 capability，不限於預設值。
+- 除了 `route_model.py`，也可以用 `scripts/dispatch_domain.py` 這個 Domain Execution Router，讓 Router 自動選路或明確指定 Hermes lane（見 `registry/capability_lanes.yaml`）。目前 `bulk_research` capability 底下有 `hermes-financialresearch`／`hermes-intelligence` 兩條 `allowed_agents` 含 `intelligence` 的 `status: active` lane。用法：
+  ```
+  .venv/Scripts/python.exe scripts/dispatch_domain.py \
+      --owner intelligence --category <依 delegation_policy.yaml 的分類> \
+      --prompt-file <path> --execution-id <唯一值> \
+      [--capability bulk_research] [--lane hermes-intelligence]
+  ```
+  不帶 `--lane` 時 Router 會在符合 capability／owner 且 `status: active` 的 lane 裡自動挑一條；要指定用哪條 Hermes profile 才帶 `--lane`（`hermes-financialresearch` 的 `risk_tier` 是 `high`，見該 lane 的 guardrails，涉及財務個資訊號時要特別注意）。這跟 `route_model.py` 一樣是「任務內容明顯不適合預設能力時的可選手段」——`intelligence` 的 `default_capability` 仍是 `claude_native`，不是預設就要走 Hermes。
 
 ## v0.1 狀態
 

@@ -117,16 +117,28 @@ class CapabilityLanesShapeTests(unittest.TestCase):
             self.assertIsNone(lane.get("model"),
                               msg=f"lane '{lane['id']}'：native lane 的 model 應為 null")
 
-    def test_hermes_profile_lanes_have_profile_and_reference_status(self):
+    def test_hermes_profile_lanes_have_profile_field(self):
         for lane in self.lanes:
             if lane["execution"] != "hermes_profile":
                 continue
             self.assertTrue(lane.get("hermes_profile"),
                             msg=f"lane '{lane['id']}'：execution=hermes_profile 必須填 hermes_profile")
-            self.assertEqual(lane["status"], "reference",
-                             msg=f"lane '{lane['id']}'：hermes_profile lane 尚未接線，status 必須是 reference")
             self.assertIsNone(lane.get("model"),
                               msg=f"lane '{lane['id']}'：hermes_profile lane 不重複記載模型，model 應為 null")
+
+    def test_hermes_profile_lanes_may_be_active_or_reference(self):
+        """v0.1 起：scripts/dispatch_domain.py（Domain Execution Router，Phase 1）
+        已經能真的執行 hermes_profile lane（明確 --lane opt-in，見 dispatch_domain.py
+        的 select_lane：自動選路徑只挑 status=active，但明確指定的 lane 不受此限）。
+        「所有 hermes_profile lane 必須是 reference」這個舊斷言因此不再成立——
+        status 這個欄位現在的語意是「自動選路徑會不會挑到它」，不是「有沒有
+        runtime 能執行它」。這裡只驗證 status 本身合法，不對 hermes_profile lane
+        的 status 值做額外限制。目前（Phase 1 完工時點）本檔仍把五條 hermes-*
+        lane 全部留在 reference——理由見完工回報，不在這裡重複記載。"""
+        for lane in self.lanes:
+            if lane["execution"] != "hermes_profile":
+                continue
+            self.assertIn(lane["status"], STATUSES, msg=f"lane '{lane['id']}' status 不合法")
 
     def test_allowed_agents_exist_in_agents_registry(self):
         known_agents = {agent["id"] for agent in self.agents.get("agents", [])}

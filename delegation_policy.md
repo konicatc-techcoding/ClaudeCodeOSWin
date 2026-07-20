@@ -51,4 +51,4 @@ CoS 收到任何任務時，依序執行：
 - **CoS**（本版本已生效）：每次任務都走上面的決策程序。
 - **Hermes**（規劃中）：目前 Hermes 收到觸發事件後統一交給 CoS 決策，不自己判斷。如果之後想在 Hermes 端做輕量前置分類（例如先幫任務貼標籤，加速 CoS 判斷），應該查同一份 `registry/delegation_policy.yaml`，不要另外維護一套規則。
 - **Job Queue**（規劃中）：job 的 owner 欄位可以直接沿用這份分類結果，方便之後做路由、優先順序、或監控「哪個領域的 job 最多」。
-- **Model Router**（`registry/model_router.yaml`）：這是不同的軸——delegation policy 決定「哪個領域負責」，model router 決定「該領域內部呼叫哪個模型」。兩者不互相取代：一個任務先被分派給 `engineering`，`engineering` subagent 內部才會視情況呼叫 `scripts/route_model.py complex_coding`。
+- **Model Router**（`registry/model_router.yaml`）：這是不同的軸——delegation policy 決定「哪個領域負責」，model router 決定「該領域內部呼叫哪個模型」。兩者不互相取代：一個任務先被分派給 `engineering`，`engineering` subagent 內部才會視情況呼叫 `scripts/route_model.py <capability>`，或（任務明顯不適合預設能力時）改用 `scripts/dispatch_domain.py` 選路到 Hermes lane（目前 `engineering` 的 `default_capability` 是 `claude_native`；2026-07-20 起 OpenRouter provider 相關路徑已全部移除，見 ARCHITECTURE.md 第 5／5.1 節）。
