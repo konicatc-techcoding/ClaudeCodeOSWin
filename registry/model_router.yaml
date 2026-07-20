@@ -1,18 +1,33 @@
 # registry/model_router.yaml — v0.1
 # Domain subagent 只請求「能力」（capability），不直接指定模型名稱。
-# 實際呼叫由 scripts/route_model.py 解析這份設定並透過 OpenRouter 執行。
+# 實際呼叫由 scripts/route_model.py 解析這份設定執行。
 #
-# openrouter_model 是 OpenRouter 上的實際 model slug。
-# TODO: 使用前請到 openrouter.ai/models 確認正確的 slug，這裡先放常見命名的佔位值。
+# 2026-07-20：原本 complex_coding／google_ecosystem／bulk_research 三條 route
+# 走 OpenRouter provider，但 OPENROUTER_API_KEY 自系統建成以來從未真正設定過，
+# 這三條路徑實務上從未打通。使用者拍板全部移除 OpenRouter provider 相關路徑，
+# engineering／intelligence 改用 claude_native（比照 automation／knowledge／
+# planning 既有模式）。
+#
+# google_ecosystem 整個 key 已刪除——除了已移除的 openrouter-gemini-google-
+# ecosystem lane 外沒有任何 registry/capability_lanes.yaml 的 lane 引用它，
+# 也沒有任何 domain 把它設成 default_capability，移除後沒有殘留參照。
+#
+# complex_coding／bulk_research 這兩個 key 則保留（但 via 改成 native，
+# openrouter_model／cost_tier 等 OpenRouter 專屬欄位一併移除）——這兩個
+# capability 名稱仍被 registry/capability_lanes.yaml 的四條 hermes-* lane
+# （hermes-nemocoding／hermes-gptcoding／hermes-financialresearch／
+# hermes-intelligence，皆 status: active）當作 capability 欄位引用；
+# capability 名稱正本必須是這裡存在的 key（見 docs/capability-lanes.md），
+# 整個刪掉會讓這四條現行 active 的 Hermes lane 在 dispatch_domain.py 的
+# validate_lane() 當場失敗（「capability 在 model_router.yaml 不存在」），
+# 這牴觸了「不動 hermes-* lane 本身內容」的範圍界線，因此改為保留 key、
+# 拔除 OpenRouter 專屬欄位。這兩個 capability 目前沒有任何 domain 的
+# default_capability 指向它們（engineering／intelligence 都已改
+# claude_native），直接呼叫也只是印出 via=native 提示，不對外呼叫。
 
 default: claude
 
 routes:
-  complex_coding:
-    model: gpt-5.5
-    via: openrouter
-    openrouter_model: openai/gpt-5.5   # TODO: 確認實際 slug
-
   architecture_reasoning:
     model: claude
     via: native   # 直接由目前的 Claude session 處理，不對外呼叫
@@ -20,18 +35,20 @@ routes:
   claude_native:
     model: claude
     via: native   # 跟 architecture_reasoning 行為相同（native），但這個命名是給
-                  # automation/knowledge/planning 這類「本來就該用 Claude」的領域用，
-                  # 不要借用 architecture_reasoning 這個為了工程/CoS 情境取的名字
+                  # automation/knowledge/planning/engineering/intelligence 這類
+                  # 「本來就該用 Claude」的領域用，不要借用 architecture_reasoning
+                  # 這個為了工程/CoS 情境取的名字
 
-  google_ecosystem:
-    model: gemini
-    via: openrouter
-    openrouter_model: google/gemini-3-pro   # TODO: 確認實際 slug
+  complex_coding:
+    model: claude
+    via: native   # 原走 OpenRouter GPT-5.5，2026-07-20 移除；保留這個 capability
+                  # key 只是因為 hermes-nemocoding／hermes-gptcoding 兩條 active
+                  # lane 仍引用它做 capability 標記，見上方說明。沒有 domain 的
+                  # default_capability 指向它。
 
   bulk_research:
-    model: nemotron
-    via: openrouter
-    cost_tier: free
-    openrouter_model: nvidia/nemotron-70b-instruct   # TODO: 確認實際 slug
-
-fallback_order: [claude, gpt-5.5, gemini, nemotron]
+    model: claude
+    via: native   # 原走 OpenRouter Nemotron 免費層，2026-07-20 移除；保留這個
+                  # capability key 只是因為 hermes-financialresearch／
+                  # hermes-intelligence 兩條 active lane 仍引用它做 capability
+                  # 標記，見上方說明。沒有 domain 的 default_capability 指向它。

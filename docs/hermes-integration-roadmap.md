@@ -316,7 +316,11 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
    Lane 自動路由；`capability_lanes.yaml` 目前為 reference/planning 層；
    `model_router.yaml` 的 TODO 模型值先不硬接 active route；OpenRouter／Hermes profile／
    Gemini 等 lane 保留 reference 或 experimental，**bridge 穩定後再進 Stage 3 或
-   Stage 2.x**。
+   Stage 2.x**。（2026-07-20 現況更新：OpenRouter provider 相關路徑因
+   `OPENROUTER_API_KEY` 從未真正設定過而經使用者拍板全部移除，`engineering`／
+   `intelligence` 改用 `claude_native`；Hermes profile lane 已在 Phase 2d
+   通過真實 smoke test 轉 `active`，見 ARCHITECTURE.md 第 5 節與
+   `capability-lanes.md`。此節其餘內容為 2026-07-10 決策當下的記錄，不再更動。）
 
 ### 必要前置（gate）狀態 — ✅ 已解（2026-07-10）
 

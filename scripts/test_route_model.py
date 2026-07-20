@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import route_model  # noqa: E402
@@ -59,15 +60,25 @@ class ResolveRouteTests(unittest.TestCase):
     def setUp(self):
         self.config = route_model.load_config()
 
-    def test_complex_coding_routes_to_openrouter(self):
+    def test_complex_coding_routes_to_native(self):
+        # 2026-07-20：OpenRouter provider 路徑已移除（OPENROUTER_API_KEY 從未
+        # 真正設定過，實務上從未打通）。complex_coding 這個 capability key
+        # 仍保留在 model_router.yaml——registry/capability_lanes.yaml 的
+        # hermes-nemocoding／hermes-gptcoding 兩條 active lane 仍引用它做
+        # capability 標記——但 via 已改成 native，不再對外呼叫。
         route = route_model.resolve_route(self.config, "complex_coding")
-        self.assertEqual(route["via"], "openrouter")
-        self.assertEqual(route["model"], "gpt-5.5")
+        self.assertEqual(route["via"], "native")
 
-    def test_bulk_research_routes_to_openrouter_free_tier(self):
+    def test_bulk_research_routes_to_native(self):
+        # 同上，bulk_research 仍保留給 hermes-financialresearch／
+        # hermes-intelligence 兩條 active lane 引用，但 via 已改成 native。
         route = route_model.resolve_route(self.config, "bulk_research")
-        self.assertEqual(route["via"], "openrouter")
-        self.assertEqual(route.get("cost_tier"), "free")
+        self.assertEqual(route["via"], "native")
+
+    def test_google_ecosystem_no_longer_a_known_capability(self):
+        # google_ecosystem 沒有任何 lane 或 default_capability 依賴它，
+        # 2026-07-20 隨 OpenRouter provider 路徑整個移除。
+        self.assertNotIn("google_ecosystem", self.config.get("routes", {}))
 
     def test_claude_native_routes_to_native(self):
         route = route_model.resolve_route(self.config, "claude_native")
@@ -108,6 +119,25 @@ class AgentsRegistryConsistencyTests(unittest.TestCase):
                 msg=f"{agent['id']} 的 default_capability='{agent['default_capability']}' "
                     f"在 model_router.yaml 裡不存在",
             )
+
+
+class MainNonNativeViaFailsVisibleTests(unittest.TestCase):
+    """2026-07-20：OpenRouter provider 路徑（call_openrouter）已整個移除，
+    main() 目前只認得 via=native；registry/model_router.yaml 現在也確實不再
+    有任何 via 不是 native 的 route。這裡用合成 config（monkeypatch
+    load_config）驗證：萬一 registry 之後又出現 via 不是 native 的 route，
+    main() 會 fail-visible（sys.exit）而不是嘗試呼叫一個已經不存在的
+    call_openrouter 函式而炸成 AttributeError。
+    """
+
+    def test_non_native_via_exits_with_clear_message(self):
+        fake_config = {"default": "claude", "routes": {"some_capability": {"via": "some-other-provider"}}}
+        prompt_path = route_model.ROOT / "scripts" / "requirements.txt"
+        with mock.patch.object(route_model, "load_config", return_value=fake_config), \
+             mock.patch.object(sys, "argv", ["route_model.py", "some_capability", str(prompt_path)]):
+            with self.assertRaises(SystemExit) as ctx:
+                route_model.main()
+        self.assertIn("via", str(ctx.exception))
 
 
 if __name__ == "__main__":

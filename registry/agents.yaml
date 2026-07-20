@@ -16,14 +16,14 @@ agents:
     file: .claude/agents/intelligence.md
     description: 情報蒐集、市場/競品研究、RSS 與新聞內容整理
     triggers: [manual, rss]
-    default_capability: bulk_research
+    default_capability: claude_native
 
   - id: engineering
     status: active
     file: .claude/agents/engineering.md
     description: 程式碼變更、code review、技術實作
     triggers: [manual]
-    default_capability: complex_coding
+    default_capability: claude_native
 
   - id: automation
     status: active
