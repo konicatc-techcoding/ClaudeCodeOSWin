@@ -3,7 +3,7 @@
 **版本**：v0.1
 **里程碑**：`v0.1-alpha`（2026-07-04，穩定基線）— 詳細範圍與下一步見 [ROADMAP.md](ROADMAP.md)
 **狀態**：介面設計已定案，實作涵蓋 v0.1-alpha 範圍（見文末「v0.1 實作範圍」）
-**最後更新**：2026-07-09
+**最後更新**：2026-07-21
 
 > **部署環境註記（2026-07-09）**：目標環境是 **Windows/WSL2**。常駐服務（worker、
 > Telegram、RSS、cron timer）跑在 WSL2 側的 `systemd --user`（`hermes/systemd/`）；
@@ -138,6 +138,13 @@ Windows Hermes（`%LOCALAPPDATA%\hermes\state.db`）是唯一 Source of Truth；
 [hermes/README.md](hermes/README.md) 與
 [memory/project_v0_1_status.md](memory/project_v0_1_status.md) 最新一條記錄。
 
+**4.2.1 資料流向與 Stage 4 的反向橋接**：以上 4.1／4.2 描述的是「Hermes →
+匯入進 ClaudeCodeOS 記憶」這個方向（唯讀）。反方向——「ClaudeCodeOS／CoS 主動
+呼叫出去、把 Hermes profile 當成執行通道」——是另一條獨立的機制（Domain
+Execution Router，見下方 5.1 節），兩者角色不對稱（一個是資料來源、一個是
+執行後端），不要混為同一條管線。完整背景與完工紀錄見
+[docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md) Stage 4 節。
+
 ## 5. Agent Registry 與 Model Router
 
 **Agent Registry** = Claude Code 原生 subagents（`.claude/agents/*.md`），`registry/agents.yaml` 是加在上面的中繼資料，供 CoS／Hermes 查詢路由對象與狀態。CoS 的工作只是查表、挑 `subagent_type`、呼叫 `Agent` 工具。
@@ -151,6 +158,8 @@ Windows Hermes（`%LOCALAPPDATA%\hermes\state.db`）是唯一 Source of Truth；
 ### 5.1 Domain Execution Router（`scripts/dispatch_domain.py`）
 
 `route_model.py` 只解析 `model_router.yaml` 的 `via`（目前全部是 `native`），本身不會呼叫 Hermes。`scripts/dispatch_domain.py`（Phase 1，Phase 2d 起四條 `hermes-*` lane 皆 `status: active`）是另一條、subagent 可自行選用的執行通道：查 `registry/capability_lanes.yaml`，可用 `--capability` 自動選路（只挑 `status: active` 的 lane）或 `--lane` 明確指定 Hermes profile，執行後回傳單一 JSON envelope。這是**可選手段**，不是新的預設行為——`engineering`／`intelligence` 的 `default_capability` 仍是 `claude_native`，是否使用、何時使用仍由 subagent 當下判斷（比照它們既有對 `route_model.py` 的判斷方式）。目前只有 `.claude/agents/engineering.md`（`complex_coding` → `hermes-nemocoding`／`hermes-gptcoding`）與 `.claude/agents/intelligence.md`（`bulk_research` → `hermes-financialresearch`／`hermes-intelligence`）的 `allowed_agents` 接得到現有 lane；`automation`／`knowledge`／`planning` 目前不在任何 `hermes-*` lane 的 `allowed_agents` 內，沒有東西好接。
+
+五個 Hermes profile（`default`／`gptcoding`／`nemocoding`／`financialresearch`／`intelligence`）2026-07-20～21 已完成各自獨立的 openai-codex OAuth 憑證登入，不再共用同一顆會輪替失效的 refresh token；「依任務類型（而非整個 domain）自動選 lane」的規則引擎目前不存在，屬未排程的未來功能（見 `memory/hermes-task-category-model-routing-preference.md`）。完整完工紀錄、關鍵決策與安全事故記錄見 [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md) Stage 4 節。
 
 ---
 
@@ -179,7 +188,7 @@ RSS Adapter（`hermes/adapters/rss.py`）已完成並常駐（每 30 分鐘；�
 
 Dashboard（`dashboard/app.py` + `dashboard/data.py`）已完成：localhost-only、read-only，手動啟動（不裝 launchd）。Read-only 是技術上強制的——`data.py` 用 `mode=ro` 開 SQLite 連線、完全不 import `hermes/db.py`，不是只靠程式碼自律。涵蓋 worker/adapter 狀態、五種 job 狀態統計、最近 jobs、單筆 job detail、成本統計、memory inbox 數量、log 檢視。
 
-Telegram Polling Adapter（`hermes/adapters/telegram.py`）已完成，含 `delivered_at` 回覆追蹤與 12 個 mock 過網路呼叫的單元測試。**Live 驗證已通過**：用真的 bot token 收發過真實訊息，使用者在 Telegram 上確認收到回覆，細節見 `hermes/README.md`。目前已在 WSL2 側以 systemd 常駐（`hermes-telegram.service`）。
+Telegram Polling Adapter（`hermes/adapters/telegram.py`）已完成，含 `delivered_at` 回覆追蹤與 12 個 mock 過網路呼叫的單元測試。**Live 驗證已通過**：用真的 bot token 收發過真實訊息，使用者在 Telegram 上確認收到回覆，細節見 `hermes/README.md`。目前已在 WSL2 側以 systemd 常駐（`hermes-telegram.service`）。**2026-07-20 新增**獨立推播進入點 `push_message()`／`push_cli()`（不經過 job queue，直接呼叫既有 `send_message()`）——給 CoS 互動觸發的主動通知用（例如長時間的 Hermes lane 呼叫完成），與 cron／排程觸發的通知（走既有 Slack `bridge_notifier.py`／`#agentos` 慣例）分流；已真實送出測試訊息驗證送達，細節見 [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md) Stage 4 節。
 
 Cron Adapter（`hermes/adapters/cron.py`）已完成並常駐（`daily-memory-check`，每天 08:00；目前為 WSL2 systemd timer `hermes-cron-daily-memory-check.timer`）。刻意設計成無狀態、不做排程判斷，排程完全交給部署層（systemd timer；當時 macOS 為 launchd）。**當時驗證特別確認了「排程器真的自己觸發」，不是只手動跑**：裝了一個 30 秒間隔的臨時 plist，觀察到 5 次自動觸發、5 筆 job 全部處理成功，才移除臨時設定改裝正式的每日排程。
 

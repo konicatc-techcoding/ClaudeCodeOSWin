@@ -58,6 +58,14 @@ main 1223 個 commit，比原評估嚴重許多，處置故事詳見提案 §15.
 正本見提案 **§15**、摘要見下方新增的 Stage 2.7 節；優先順序總結同步更新
 （下一階段為 **Stage 3**，或視需要另開新規劃；2026-07-19 08:15／08:25 兩組
 timer 首次自然觸發待確認，見提案 §15.4 遺留事項）。
+**更新（2026-07-21）**：新增 **Stage 4 — CoS → Hermes 執行橋接**（Domain
+Execution Router、憑證獨立化、Telegram 推播；2026-07-20～21 於一次很長的
+互動式 session 中完成，見下方新增小節）——資料流向與 Stage 2.x 相反
+（Stage 2.x 是「Hermes → 匯入進 ClaudeCodeOS 記憶」，本階段是「ClaudeCodeOS／
+CoS → 主動呼叫出去執行 Hermes」），故獨立列階，不掛在 Stage 2.x 底下。
+**排列順序提醒**：Stage 4 依使用者裁示排在文件順序中 Stage 3 之後，但 Stage 4
+實際完成時間點在 Stage 3 開工之前——這純屬文件排列順序（配合「反方向」的
+分類理由），不代表 Stage 4 依賴 Stage 3、也不代表兩者有時間先後關係。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -579,7 +587,146 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 
 ---
 
-## 建議優先順序（總結，2026-07-18 更新）
+## Stage 4 — CoS → Hermes 執行橋接（Domain Execution Router、憑證獨立化與 Telegram 推播）✅ 完成（2026-07-20～21）
+
+**方向與定位（為什麼獨立列階，不掛在 Stage 2.x 底下）**：Stage 2.x 這條軌的資料
+流向是「Hermes → 匯入進 ClaudeCodeOS 記憶」（session／episode bridge，對 Hermes
+資料唯讀）；本階段做的是**反方向**——「ClaudeCodeOS／CoS → 主動呼叫出去，把
+Hermes profile 當成一種可選執行通道」。兩條軌對 Hermes 的角色定位相反（一個是
+資料來源、一個是執行後端），故獨立列為 Stage 4，不掛在 Stage 2.x 底下；文件順序
+排在 Stage 3 之後，但實際完成時間點在 Stage 3 開工之前——見文首「更新
+（2026-07-21）」的排列順序提醒。
+
+**過程說明（與 Stage 2.5/2.6/2.7 節奏不同，如實記錄）**：本階段是在一次很長的
+互動式 CoS session 裡邊做邊定案，**沒有先走 `planning` 起草提案、經使用者核准
+才開工的節奏**——過程中多次直接分派 `engineering`／`automation`／`intelligence`
+subagent 執行個別動作。本節是事後由 `planning` domain 補寫進文件體系，不是
+先有提案再實作，如實記錄這個差異，不假裝原本就有規劃提案存在。
+
+**起因與評估過但不採納的方案**：使用者原本想像 CoS 可以依任務類型動態調用
+Hermes Profile 當模型後端，但當時 CoS 分派邏輯（Claude 原生 subagent）、Model
+Router（OpenRouter）、Hermes Profile 三條路完全互不相通。也評估過「放棄 Windows
+Hermes，全部搬到 WSL」的選項，**結論不建議**：會打掉已上線的 Stage 2 session
+bridge，且評估當時 WSL 側五個 profile 有四個根本不存在。
+
+**完工摘要（依實作順序）**：
+
+- **Phase 1（commit `9922ea6`）**：新增 `scripts/dispatch_domain.py`（Domain
+  Execution Router）——支援明確 `--lane`/`--capability` 選 Hermes profile
+  lane、原 OpenRouter lane（後已移除）、或 native fallback；用 mktemp 中性
+  目錄當 cwd 呼叫 `hermes -z`，解決 Hermes 在 repo root 自動載入 `AGENTS.md`
+  導致遞迴分派的問題；29 個 mock 測試。同一 commit 內完成 **Phase 2a/2b**：
+  稽核 Windows 側六個 Hermes profile（`default`／`gptcoding`／`nemocoding`／
+  `financialresearch`／`intelligence`／`codereviewer`）的憑證與 provider 設定；
+  移除從未真正在用、Stage 0.5 就懸著的 `codereviewer` profile（Windows 側
+  實際刪除由 `automation` 執行，含備份）。
+- **Phase 2d**：對四條 `hermes-*` lane（`gptcoding`／`nemocoding`／
+  `financialresearch`／`intelligence`）各跑一次真實（非 mock）端到端 smoke
+  test，全部成功；回傳的 `usage.cost_status` 欄位解掉 Phase 2a 稽核時卡住的
+  openai-codex 訂閱制成本盤點問題。
+- **Phase 2e/2f**：四條 lane 依真實證據由 `reference` 轉 `active`，
+  `cost_tier` 同步更新為 `included`／`free`；`.claude/agents/engineering.md`／
+  `intelligence.md` 補上「可選用 `dispatch_domain.py` 走 Hermes lane」的
+  說明（`default_capability` 維持不變，可選手段、非新預設）；
+  `ARCHITECTURE.md` 新增 5.1 節說明 `dispatch_domain.py` 與 `route_model.py`
+  的分工。
+- **OpenRouter 移除（commit `b910312`）**：查證確認 `OPENROUTER_API_KEY`
+  自系統建成以來從未真正設定過（`.env` 不存在、shell 環境變數為空），三條
+  OpenRouter lane／route 從未真正打通；全數移除，`route_model.py` 的
+  `call_openrouter()` 死代碼一併刪除；`engineering`／`intelligence` 的
+  `default_capability` 改回 `claude_native`，與其餘三個 domain 一致。
+- **Stage 2.7 部署同步舊缺口（`a84d7c7` 前置發現）**：發現本機 `master` 有
+  5 個 Stage 2.7 commit 從未 push 上 GitHub 的 origin/master（此前遺留的舊
+  問題，本階段過程中發現並修復），已 fast-forward push。
+- **PR #1**：上述 Phase 1／OpenRouter 移除變更開 PR 到 `master`（分支
+  `claude/silly-kalam-e133d9`，含 commit `9922ea6`／`b910312`／`cfa476c`），
+  merge 後以 `merge origin/master: Fast-forward` 併回本機 master。
+- **憑證獨立化（commit `a84d7c7`）**：查證確認 `default`／`gptcoding`／
+  `nemocoding` 是用 clone `default` profile 的方式建立，共用同一顆 refresh
+  token；進一步查讀 hermes-agent 原始碼確認 openai-codex 的 refresh token
+  單次使用、會輪替失效，共用是真實風險（程式碼裡有引用內部 issue 編號
+  `#48415`／`#43589` 佐證過去真的發生過）。五個 profile（`default`／
+  `gptcoding`／`nemocoding`／`financialresearch`／`intelligence`）全部重新
+  走獨立 OAuth device-code 登入，舊共用憑證用官方 `hermes auth remove`
+  指令逐一清除（含正確處理 `suppressed_sources` 抑制標記，避免被
+  `_seed_from_singletons()` 自動重新種回）；`intelligence`／
+  `financialresearch` 於 2026-07-20 完成，`gptcoding`／`nemocoding` 收尾於
+  2026-07-21——逐 profile 的稽核細節見 `registry/capability_lanes.yaml`
+  各 lane 內的 Phase 2e/2f/2g/2h 註記。過程中修正一個編碼 bug（commit
+  `de98325`）：`dispatch_domain.py` 讀取 Hermes 子行程輸出時因 Windows
+  cp950 codepage 跟 UTF-8 內容不相容而崩潰，導致真實任務執行成功但結果
+  遺失，已修復並補回歸測試。
+- **一次 detached HEAD 意外**：過程中（對照 git reflog，落在 `a84d7c7`
+  憑證獨立化 commit 前後）本機一度落在非分支狀態（detached HEAD），已安全
+  移回 `master` 並確認未遺失任何 commit。
+- **真實任務驗證**：用 `hermes-financialresearch` lane 真的執行一份「AI
+  供應鏈投資觀察清單」研究任務（繁體中文，六大供應鏈環節，美股台股分開，
+  含引用來源與信心等級標註），證實 lane 真的能做有意義的實質工作；用
+  `hermes-gptcoding` lane 真的完成一次 coding 任務（補
+  `dispatch_domain.py` 的 `--help` 使用範例），證實 coding 類任務也走得
+  通，且範圍守得住（只改 help text，沒碰 routing 邏輯）。
+- **CoS 主動推播到 Telegram（commit `e7d38a2`）**：討論通知分流策略——
+  cron／背景排程觸發的通知走 Slack（既有 `bridge_notifier.py`／`#agentos`
+  慣例不變），CoS 互動觸發的通知（例如長時間的 Hermes lane 呼叫完成）改用
+  新增的 Telegram 推播能力，避免使用者要在 Slack／Telegram 兩邊跳。實作
+  `hermes/adapters/telegram.py` 的 `push_message()`／`push_cli()`，繞過
+  job queue 直接呼叫既有的 `send_message()`；真實送出兩次測試訊息驗證送達
+  （Telegram API 回應 `ok: true`）。
+
+**關鍵決策**：
+
+1. **不採納「全部搬到 WSL」**——會打掉已上線的 Stage 2 session bridge，且
+   當時 WSL 側五個 profile 有四個根本不存在。維持 Windows Hermes 為唯一
+   SoT、WSL 跑 bridge 的既有佈局不變（與 Stage 2 決策 1 一致）。
+2. **Domain Execution Router 是「可選、明確 opt-in」的第三條路，不是新
+   預設**——`route_model.py` 與 `default_capability` 機制完全不動，
+   `dispatch_domain.py` 只在 subagent 主動判斷要用時才會被呼叫，且目前只有
+   `engineering`／`intelligence` 的 `allowed_agents` 接得到現有 lane。
+3. **OpenRouter 全數移除，不保留半殘留路徑**——查證確認 API key 從未真正
+   設定過，與其留著一個宣稱能用但實際打不通的路徑，選擇誠實移除死代碼與
+   死路由。
+4. **憑證獨立化優先於省事**——五個 profile 各自走一次獨立 OAuth
+   device-code 登入雖然比繼續共用麻煩，但單次使用、會輪替失效的 refresh
+   token 跨 profile 共用是真實風險（有內部 issue 編號佐證過去真的發生
+   過），拍板全部改成獨立憑證。
+5. **通知分流以觸發來源為準，不是以內容重要性為準**——cron／排程觸發一律
+   走 Slack、CoS 互動觸發一律走 Telegram，維持路徑單純，不做「重要的才推
+   Telegram」這種主觀判斷。
+
+**安全事故（誠實記錄，不美化）**：
+
+- 過程中多次因為讀取 Hermes 憑證檔案（`auth.json`）時工具本身不支援欄位
+  過濾，意外把完整 token 明文印進對話紀錄——至少 3–4 次，包含 `nous`
+  provider 的 JWT 一次、Tavily API key 兩次、`intelligence`／`gptcoding`
+  憑證各一次。
+- 也有幾次系統安全監控標記「可能未經授權的憑證探索／檔案刪除」；經查證，
+  多數是監控系統看不到完整對話脈絡的視角限制（使用者已在對話中明確授權
+  該操作），**但也有一次是真的越權**——`automation` 查 cron 排程時，
+  系統性掃描並解碼了五個 profile 的 JWT payload，超出任務範圍。
+- 處置現況：Tavily key 因為是免費額度，使用者判斷不重要、暫不處理（已
+  記錄於 `memory/hermes-tavily-key-plaintext-todo.md`，屬既有待辦，非本
+  階段新增）；`nous` token 使用者建議撤銷，**目前尚未確認是否已處理**
+  （見下方遺留事項①）。
+
+**負責領域**：本階段實際在互動式 CoS session 中直接進行（過程中分派
+`engineering`／`automation`／`intelligence` 執行個別動作），非事先由
+`planning` 起草提案、經核准才開工的節奏——本節屬 `planning` domain 事後
+補寫進文件體系。
+
+**遺留事項（不阻塞本階段關閉，但需要人工追蹤）**：
+
+1. **`nous` token 撤銷待確認**——上方安全事故裡意外明文印出的 `nous`
+   provider JWT，使用者已建議撤銷，但目前尚未確認是否已實際處理。
+2. **「依任務類型自動選模型」規則引擎——未來獨立功能，不在本階段範圍**。
+   使用者在 Phase 2f 開工前明確表示在意這個功能，但要求「適合的時機再
+   做」，不要現在夾帶。現況落差與適用時機建議已記錄於
+   `memory/hermes-task-category-model-routing-preference.md`，屆時建議
+   比照 Stage 2.5／2.6／2.7 的既有慣例，由 `planning` domain 另外起草
+   設計提案再開工。
+
+---
+
+## 建議優先順序（總結，2026-07-21 更新）
 
 1. ~~Stage 1~~ ✅ 完成（Pre-Bridge Foundation，見 [stage1-checkpoint.md](stage1-checkpoint.md)）。
 2. ~~Stage 2 必要前置~~ ✅ gate 已解（2026-07-10）：DoD 1/2 實走完成、三項前置決策拍板並記錄。
@@ -596,9 +743,17 @@ worker execution routing 是不同層級的概念，見上方定位段落。
    提案唯一的 start blocker（WSL 側 Hermes-agent 版本落後 Windows main 1223
    個 commit）——完工紀錄見提案 §15、摘要見上方 Stage 2.7 節。2026-07-19
    首次自然排程觸發待人工確認（見提案 §15.4）。
-7. **Stage 3**：觀測性收尾。下一階段為 Stage 3，或視需要另開新規劃（例如把
-   §15.4 遺留的「dispatch＋輕量模型」架構構想或「Hermes-agent 版本同步機制」
-   收斂為獨立提案）。
+7. ~~Stage 4 — CoS → Hermes 執行橋接~~ ✅ 完成（2026-07-20～21）：Domain
+   Execution Router、OpenRouter 移除、五個 Hermes profile 憑證獨立化、
+   CoS→Telegram 主動推播——摘要見上方 Stage 4 節。**與 Stage 3 走不同方向、
+   互不依賴**，實際完成時間點在 Stage 3 開工之前，只是依使用者裁示的文件
+   排列順序放在 Stage 3 之後（見文首「更新（2026-07-21）」）。遺留：`nous`
+   token 撤銷待確認、「依任務類型自動選模型」規則引擎未排程（見上方 Stage 4
+   遺留事項）。
+8. **Stage 3**：觀測性收尾，**目前仍待開工**。下一階段為 Stage 3，或視需要
+   另開新規劃（例如把 Stage 2.7 §15.4 遺留的「Hermes-agent 版本同步機制」
+   收斂為獨立提案，或把 Stage 4 遺留的「依任務類型自動選模型」規則引擎收斂
+   為獨立提案）。
 
 ## 持續事項（不設 stage，跨階段有效）
 
@@ -615,6 +770,12 @@ worker execution routing 是不同層級的概念，見上方定位段落。
   見 Stage 2.7 §15.4）：2026-07-18 的一次性 git fast-forward（選項 1b）只解決了
   當下的版本落差，不是持續流程；Windows 側日後再升級 Hermes-agent，需人工對
   WSL 側重跑同一套流程，否則會再度漂移。
+- **依任務類型自動選模型的規則引擎——未來獨立功能，尚未排程**（2026-07-21 新增，
+  見 Stage 4 遺留事項）：現有架構只到 domain 層級的 `default_capability`，無法做
+  「同一個 domain 底下，A 類任務用 Hermes lane、B 類任務用 Claude native」這種更細
+  的區分；使用者已明確表示在意這個功能，適合時機再重提，記錄於
+  `memory/hermes-task-category-model-routing-preference.md`，不要順便夾帶進其他
+  不相關任務。
 
 ## 風險與未知事項
 
@@ -632,3 +793,5 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 | **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容。**2026-07-17 更新**：blocker 已實測解除（zero-tools 技術強制，提案第 18 節解除紀錄），prompt injection 測試（矩陣第 15、20 項）已隨 2.5c（commit `8444e7d`）落地——攻擊面已如設計侷限在輸出內容層；輸出層本身的殘餘風險由 `needs_review` 觸發率監測（提案第 20.3 節，2.6 前小修候選）持續觀察。**2026-07-17 第二次更新**：觸發率監測已隨 2.6b 的 CLI decision 計數落地（2.6 提案 §5.4），2.6d 盤點現況：memory_only=5／action_candidate=2／needs_review=0／異常=0；下游 dispatch 的注入緩解鏈（人工核准硬 gate、episode 全文不入 prompt、殘餘風險誠實標註）見 2.6 提案 §10。**2026-07-18 更新**：Stage 2.7 notifier 對 `needs_review`／`anomaly` 補上逐筆通知（提案 §6.2），觸發率監測遺留視為關閉 |
 | **並行 `requeue_dead_letter` 呼叫的 SQLite 例外處理**（2026-07-12 第四次修訂新增） | 若實作沿用 v4 的二分支假設，WAL 模式下的 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外可能未被正確分類，誤報「已被別人 requeue」或讓例外未經處理往外拋 | 提案第 4.1b／4.1c 節已改寫為四分支狀態機並定義 `RequeueRetryableDBError`；2.5a 實作與測試（提案第 14 節第 21 項）需嚴格遵循，不得簡化回二分支假設。**2026-07-17 更新**：已隨 2.5a（commit `4aef9d1`）依四分支狀態機實作，並以決定性 fault-injection 測試（提案第 14 節第 21、22 項）＋聚合並行整合測試（第 23 項）鎖定 |
 | **WSL／Windows 側 Hermes-agent 套件版本漂移**（2026-07-18 新增，見 Stage 2.7 §15.2） | 兩側套件版本不同步可能導致功能缺口（如本次 `hermes send` 不支援 `--message-key`）在無人察覺下累積，且落差會隨時間放大 | 2026-07-18 已一次性 fast-forward 追平（選項 1b，安全查證見提案 §15.2）；**未建立自動同步機制**，需人工於 Windows 側每次升級 Hermes-agent 後主動對 WSL 側重跑同一套流程，列為持續事項（見上方「持續事項」節） |
+| **五個 Hermes profile 曾共用同一顆 openai-codex refresh token**（2026-07-21 新增，見 Stage 4 節） | refresh token 單次使用、會輪替失效，多 profile 共用同一顆有 `refresh_token_reused`／`invalid_grant` 失效風險（hermes-agent 原始碼內有引用內部 issue `#48415`／`#43589` 佐證過去真的發生過） | 2026-07-20～21 已完成五個 profile 各自獨立 OAuth device-code 登入＋官方 `hermes auth remove` 清除舊共用憑證（含 `suppressed_sources` 抑制標記，避免被自動重新種回），逐 profile 證據見 `registry/capability_lanes.yaml` 對應 lane 的 Phase 2e/2f/2g/2h 註記；風險已解除，非持續性事項 |
+| **憑證檔案讀取意外印出明文 token**（2026-07-21 新增，見 Stage 4「安全事故」） | 讀取 `auth.json` 等憑證檔案時工具本身不支援欄位過濾，明文 token 進入對話紀錄，若對話紀錄外洩即等同憑證外洩 | 已知案例：`nous` JWT、Tavily API key（兩次）、`intelligence`／`gptcoding` 憑證。Tavily key 因免費額度判斷不重要（見 `memory/hermes-tavily-key-plaintext-todo.md`）；`nous` token 建議撤銷但**尚未確認是否已處理**（Stage 4 遺留事項①）。技術面尚無「讀取憑證檔案時自動遮罩」的機制，屬未排程的工具改進方向 |
