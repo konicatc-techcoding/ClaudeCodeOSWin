@@ -97,6 +97,19 @@ systemd 的 `Persistent=true` 才會觸發 catch-up 補跑一次錯過的排程�
 已 enable、每天 08:05 觸發」不代表這台機器天天都有人在 08:05 那個時間點真的
 跑過 scan——多數情況下是之後某次手動喚醒 WSL 時補跑的。
 
+**2026-07-20（Model Router 移除 OpenRouter 路由；上方 07-04 記錄的 capability 對照已過期）**：
+`OPENROUTER_API_KEY` 自系統建成以來從未真正設定過（無 `.env`、無 shell 環境變數），
+三條 OpenRouter 路由（`complex_coding`／`google_ecosystem`／`bulk_research`）實務上
+從未打通；使用者拍板全部移除。`engineering`／`intelligence` 的 `default_capability`
+改回 `claude_native`，跟 `automation`／`knowledge`／`planning` 一致——**五個領域現在
+全部是 `claude_native`**。`complex_coding`／`bulk_research` 這兩個 capability key
+保留在 `registry/model_router.yaml`（`via: native`），因為 `hermes-nemocoding`／
+`hermes-gptcoding`／`hermes-financialresearch`／`hermes-intelligence` 四條 active
+Hermes lane 仍引用其名稱做 capability 分類，只是不再對外呼叫；`google_ecosystem`
+key 因無任何殘留參照而完全移除。上方 2026-07-04 那條記錄的「intelligence→
+bulk_research（nemotron）、engineering→complex_coding（GPT-5.5）」對照自此日起
+已不成立，見 commit `b910312`。
+
 尚未動工：
 - Model Router 的 MCP server 版本（目前 script adapter 夠用）
 - Dashboard 要不要開放 Telegram 以外的投遞管道
