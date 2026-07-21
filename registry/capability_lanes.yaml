@@ -132,6 +132,35 @@ lanes:
                                     # usage.cost_status 回報 "estimated"，與既有
                                     # free 判定一致，維持不變；status 隨此次真實
                                     # smoke test 通過由 reference 轉 active。
+                                    # Phase 2h（2026-07-21）：延續 hermes-gptcoding
+                                    # Phase 2g 同一批清理，nemocoding 本地
+                                    # credential_pool.openai-codex 原本也有兩筆——
+                                    # id 62a425（與 default/gptcoding/
+                                    # financialresearch 共用的舊裝置授權，同一顆
+                                    # 跨 profile 共用，有 refresh_token_reused/
+                                    # invalid_grant 風險）與 id 73d8d8（label
+                                    # openai-codex-oauth-2，這次任務新做的
+                                    # nemocoding 專屬獨立 OAuth 裝置授權登入，
+                                    # 觸發 log 確認出現 "Added openai-codex OAuth
+                                    # credential #2"）。先在 pool 仍是兩筆時跑一次
+                                    # 真實呼叫（usage envelope：provider:
+                                    # openrouter、completed: true）確認 profile
+                                    # 整體打通，再用官方 `hermes --profile
+                                    # nemocoding auth remove openai-codex 62a425`
+                                    # 指令移除舊憑證（該指令自動寫入
+                                    # suppressed_sources，避免下次 load_pool()
+                                    # 重新種回共用憑證）。移除後以白名單欄位
+                                    # （id/priority/last_status/last_refresh/
+                                    # provider/source/label，不印出 token 明文）
+                                    # 確認 pool 只剩 73d8d8 一筆，再做一次真實
+                                    # 呼叫（provider: openrouter、completed:
+                                    # true）確認呼叫後 pool 依然穩定只有一筆。
+                                    # 補充：nemocoding 的主要功能實際是走
+                                    # openrouter（見本欄前段 Phase 2a/2d 稽核），
+                                    # 這次 openai-codex 憑證清理純粹是跨 profile
+                                    # 一致性整理，不影響 nemocoding 平常實際使用
+                                    # 的 lane 邏輯；cost_tier（free）與 risk_tier
+                                    # 皆維持不變。
     risk_tier: medium
     allowed_agents: [engineering]
     intended_use: Hermes 側的 Nemotron coding profile；session 產出經 Stage 2 bridge／to-inbox 才進入本系統
@@ -166,6 +195,43 @@ lanes:
                                     # 臆測，unknown 因此解除，改記 included；status
                                     # 隨此次真實 smoke test 通過由 reference 轉
                                     # active。
+                                    # Phase 2g（2026-07-21）：延續 hermes-intelligence
+                                    # Phase 2e／hermes-financialresearch Phase 2f
+                                    # 同一批清理，gptcoding 本地
+                                    # credential_pool.openai-codex 原本也有兩筆——
+                                    # id 62a425（與 default/nemocoding/
+                                    # financialresearch 共用的舊裝置授權，單次使用、
+                                    # 會輪替失效，多 profile 共用同一顆有
+                                    # refresh_token_reused/invalid_grant 風險）與
+                                    # id a3ca26（label openai-codex-oauth-2，這個
+                                    # profile 先前已補做的專屬獨立 OAuth 登入，
+                                    # 移除前尚未經真實呼叫驗證，last_status: None）。
+                                    # 先在 pool 仍是兩筆的狀態下跑一次真實呼叫確認
+                                    # 整體打通（usage envelope：provider:
+                                    # openai-codex、model: gpt-5.6-sol、
+                                    # completed: true、cost_status: "included"），
+                                    # 再用官方 `hermes --profile gptcoding auth
+                                    # remove openai-codex 62a425` 指令移除舊憑證——
+                                    # 該指令會自動寫入
+                                    # suppressed_sources.openai-codex:
+                                    # ["device_code"] 抑制標記，阻止
+                                    # _seed_from_singletons() 在下次 load_pool()
+                                    # 時從 global-root 重新種回同一顆共用憑證。
+                                    # 移除後以白名單欄位（id/priority/last_status/
+                                    # last_refresh/provider，不印出 token 明文）
+                                    # 確認 pool 只剩 a3ca26（label
+                                    # openai-codex-oauth-2）一筆；接著再做一次真實
+                                    # 呼叫，usage envelope 回報 provider:
+                                    # openai-codex、model: gpt-5.6-sol、
+                                    # completed: true、cost_status: "included"，
+                                    # 證實單靠這筆專屬憑證即可正常運作；呼叫後複查
+                                    # pool 仍穩定只有一筆，未被重新種回。結論：
+                                    # gptcoding 現在也是靠自己獨立擁有的憑證運作，
+                                    # 不再共用 default/nemocoding/financialresearch
+                                    # 的裝置授權，共用憑證風險已解除。cost_tier
+                                    # （included）與 risk_tier 皆維持不變——這次
+                                    # 變動只影響憑證來源，不影響已由 Phase 2d 真實
+                                    # smoke test 確認過的 provider/model/成本判斷。
     risk_tier: medium
     allowed_agents: [engineering]
     intended_use: Hermes 側的 GPT coding profile；同上，產出經 bridge／to-inbox 才進入本系統
@@ -229,6 +295,48 @@ lanes:
                                      # 成功並回報成本狀態）。cost_tier 由 unknown 改記
                                      # included；status 隨此次真實 smoke test 通過由
                                      # reference 轉 active。
+                                     # Phase 2f（2026-07-20，同日再稍晚）：延續
+                                     # hermes-intelligence Phase 2e 同一批清理，
+                                     # financialresearch 本地 credential_pool.
+                                     # openai-codex 原本也有兩筆——id 62a425（與
+                                     # default/gptcoding/nemocoding 共用的舊裝置
+                                     # 授權，即上方複查一／複查二提到的那顆）與
+                                     # id f16502（label openai-codex-oauth-2，這個
+                                     # profile 先前已補做的專屬獨立 OAuth 登入）。
+                                     # 共用 refresh token 屬單次使用、會輪替失效，
+                                     # 多 profile 共用同一顆有 refresh_token_reused/
+                                     # invalid_grant 風險，因此移除 62a425、只留
+                                     # f16502。這次直接用官方
+                                     # `hermes --profile financialresearch auth
+                                     # remove openai-codex 62a425` 指令（而非手動
+                                     # 編輯 JSON）完成——該指令內部
+                                     # （credential_sources.py
+                                     # _remove_codex_device_code）本就會清空
+                                     # profile 本地 auth store 的 openai-codex 區塊，
+                                     # 並自動寫入 suppressed_sources.openai-codex:
+                                     # ["device_code"] 抑制標記，阻止
+                                     # _seed_from_singletons() 在下次 load_pool()
+                                     # 時從 global-root 重新種回同一顆共用憑證——
+                                     # 與 Phase 2e 為 intelligence 手動補寫的效果
+                                     # 相同，這次不必再手動編輯。移除後以白名單
+                                     # 欄位（id/priority/last_status/last_refresh/
+                                     # provider/source/label，不印出 token 明文）
+                                     # 確認 pool 只剩 f16502；接著用
+                                     # `hermes --profile financialresearch -z ...
+                                     # --usage-file` 做了一次真實呼叫，usage
+                                     # envelope 回報 provider: openai-codex、
+                                     # model: gpt-5.6-luna、completed: true、
+                                     # cost_status: "included"，證實單靠 f16502
+                                     # 這筆專屬憑證即可正常運作；呼叫後再次以
+                                     # 白名單欄位複查，pool 仍穩定只有 f16502 一筆，
+                                     # 未被重新種回。結論：financialresearch 現在
+                                     # 也是靠自己獨立擁有的憑證運作，不再共用
+                                     # default/gptcoding/nemocoding 的裝置授權，
+                                     # 上方複查一／複查二／Phase 2d 遺留的共用憑證
+                                     # 風險已解除。cost_tier（included）與
+                                     # risk_tier 皆維持不變——這次變動只影響憑證
+                                     # 來源，不影響已由 Phase 2d 真實 smoke test
+                                     # 確認過的 provider/model/成本判斷。
     risk_tier: high
     allowed_agents: [intelligence]
     intended_use: Hermes 側的財務研究 profile；產出常含財務個資訊號，落地判斷從嚴
@@ -300,6 +408,37 @@ lanes:
                                      # 轉 active。rotation 風險本身未解除（憑證仍是
                                      # 借用 root 而非獨立補齊），沿用既有 guardrails
                                      # 繼續留意。
+                                     # Phase 2e（2026-07-20，同日再稍晚）：intelligence
+                                     # profile 已完成專屬獨立 OAuth 登入，本地
+                                     # credential_pool.openai-codex 新增一筆真正屬於
+                                     # 自己的 entry（id 065d66，priority 1），並經真實
+                                     # 呼叫驗證可用。使用者拍板移除本地那筆借用 root
+                                     # 的舊共用裝置授權（原 id 62a425）。移除方式：先
+                                     # 單純刪除該筆 entry 才發現 hermes-agent
+                                     # credential_pool.py 的 _seed_from_singletons()
+                                     # 會在下次 load_pool() 時自動從 global-root
+                                     # auth.json 重新種回同一顆共用裝置授權（新 id，
+                                     # 同一 source: device_code）——這正是
+                                     # hermes_cli/auth.py 裡 `hermes auth remove` command
+                                     # 會額外寫入 suppressed_sources.openai-codex 內含
+                                     # "device_code" 的原因（沒有這個抑制標記，移除會被
+                                     # 下一次 load_pool() 悄悄復原）。改用同等效果的
+                                     # 方式補上 suppressed_sources 標記後重新驗證：移除
+                                     # 後的第二次真實呼叫（usage envelope 顯示
+                                     # provider: openai-codex、completed: true）證實
+                                     # pool 裡穩定只剩 065d66 一筆，不再被重新種回。
+                                     # 結論：intelligence 現在是靠自己獨立擁有的憑證
+                                     # 運作，不再依賴 root 共用裝置授權的唯讀 fallback；
+                                     # 上面提到的「rotation 風險」（intelligence 若
+                                     # rotate 借來的憑證、因缺少 openai-codex 的
+                                     # write-through 機制導致與 gptcoding／nemocoding／
+                                     # default 共享的 refresh token 失效）已隨共用憑證
+                                     # 移除而解除。risk_tier 維持 medium 不變——這個值
+                                     # 反映的是 hermes_profile 執行通道本身的一般風險
+                                     # （sticky profile、Hermes 側寫入邊界等，見下方
+                                     # guardrails 與 hermes-gptcoding／hermes-nemocoding
+                                     # 同級 lane 的先例），不是專屬於本次已解除的
+                                     # rotation 風險。
     risk_tier: medium
     allowed_agents: [intelligence]
     intended_use: Hermes 側的情報蒐集 profile；產出經 bridge／to-inbox 才進入本系統
