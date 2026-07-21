@@ -269,8 +269,16 @@ def select_lane(lanes_doc: dict, router_doc: dict, owner: str, capability: str,
 
 def run_subprocess(argv, cwd, timeout) -> subprocess.CompletedProcess:
     # 明確 argv list，shell=False（預設）——不得改成 shell=True。
+    # 明確指定 encoding="utf-8"，不要用 text=True 依賴系統 locale：Windows
+    # 中文環境（例如這台機器的 cp950）下，子行程（hermes -z）stdout/stderr
+    # 若含繁體中文內容，用系統預設 codepage 解碼會直接 UnicodeDecodeError
+    # 把子行程崩潰（本檔開頭「編碼慣例」註記講的是呼叫端怎麼呼叫這支腳本，
+    # 這裡是同一條原則套用在這支腳本自己怎麼呼叫它的子行程）。errors="replace"
+    # 是最後防線：就算真的混進非法位元組，也要 fail-visible 地把可讀部分
+    # 傳回來，而不是整個 subprocess 呼叫直接拋例外、把已完成的執行結果弄丟。
     return subprocess.run(
-        argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, shell=False
+        argv, cwd=cwd, capture_output=True, encoding="utf-8", errors="replace",
+        timeout=timeout, shell=False,
     )
 
 
@@ -615,7 +623,14 @@ def main():
     parser.add_argument("--execution-id", required=True, help="這次執行的唯一識別，用於 log／usage 檔命名")
     parser.add_argument("--capability", default=None, help="覆蓋 owner 的 default_capability")
     parser.add_argument("--lane", default=None, help="明確指定 capability_lanes.yaml 的 lane id"
-                                                       "（含 status=reference 的 lane，例如 Hermes profile）")
+                                                       "（含 status=reference 的 lane，例如 Hermes profile）。"
+                                                       "例如搭配 --capability complex_coding 使用 "
+                                                       "--lane hermes-gptcoding，明確指定走 Hermes 的 "
+                                                       "gptcoding profile：.venv/Scripts/python.exe "
+                                                       "scripts/dispatch_domain.py --owner engineering "
+                                                       "--category code_change --capability complex_coding "
+                                                       "--lane hermes-gptcoding --prompt-file <path> "
+                                                       "--execution-id <id>")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--hermes-bin", default=None,
                          help="覆蓋 hermes 呼叫命令（預設從 PATH 找 'hermes'）；"

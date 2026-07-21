@@ -42,6 +42,12 @@ ROOT = dispatch_domain.ROOT
 #   financialresearch → usage-file 內容損壞（exit 0，但 --usage-file 寫出非法 JSON）
 #   intelligence      → 空輸出（比照 hermes -z 真實行為：exit 1 +固定錯字串）
 #   codereviewer      → 逾時（sleep 超過測試給的 timeout）
+#   unicodecheck      → stdout 直接寫原始 UTF-8 位元組（繞過 print()，見下方
+#                       說明）——回歸測試真實事故：呼叫 hermes -z 拿回繁體中文
+#                       研究內容時，子行程 stdout 若不明確用 encoding="utf-8"
+#                       解碼，Windows 中文環境（本機預設 cp950）下會直接
+#                       UnicodeDecodeError，把已完成的研究結果弄丟
+#                       （2026-07-21 real-call incident）。
 _FAKE_HERMES_SRC = textwrap.dedent(r"""
     import argparse, json, os, sys, time
     from pathlib import Path
@@ -84,6 +90,16 @@ _FAKE_HERMES_SRC = textwrap.dedent(r"""
         sys.exit(1)
     elif args.profile == "codereviewer":
         time.sleep(30)
+        sys.exit(0)
+    elif args.profile == "unicodecheck":
+        write_usage({"model": "fake-nemo-model", "provider": "fake-hermes-backend",
+                      "estimated_cost_usd": 0.01, "completed": True, "failed": False})
+        # 刻意繞過 print()：print() 的輸出編碼會受這個子行程自己的
+        # sys.stdout.encoding 影響，那可能剛好跟父行程的 locale 一致，測不出
+        # 問題。真實的 hermes CLI 是獨立執行檔，一律輸出 UTF-8，不受父行程
+        # locale 影響——用 os.write 直接寫原始 UTF-8 位元組到 stdout fd，
+        # 才是忠實模擬。內容特意選繁體中文＋常見會撞上 cp950 非法序列的字元。
+        os.write(1, "研究結論：台股大盤觀察，關鍵字包含「風險」與「機會」。".encode("utf-8"))
         sys.exit(0)
     else:
         sys.stderr.write(f"fake hermes: unrecognized profile '{args.profile}'\n")
@@ -261,6 +277,27 @@ class ResolveHermesBinTests(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_status, "hermes_not_found")
 
 
+class RunSubprocessEncodingTests(unittest.TestCase):
+    """回歸測試 2026-07-21 real-call incident 的根因本身：run_subprocess() 呼叫
+    subprocess.run() 時必須明確帶 encoding="utf-8"，不能用 text=True（會退回
+    系統 locale，Windows 中文環境常見 cp950/cp936，繁體中文子行程輸出會直接
+    UnicodeDecodeError）。這裡直接斷言呼叫參數，不依賴當下機器的 locale 是
+    什麼，也不依賴子行程真的輸出非 ASCII 內容——即使日後測試機換成 UTF-8
+    locale、原本的「非 ASCII 輸出會不會崩潰」整合測試測不出regression，這裡
+    仍然會抓到。"""
+
+    def test_run_subprocess_pins_utf8_encoding_not_locale_dependent_text_mode(self):
+        with mock.patch("subprocess.run") as mock_run:
+            fake_completed = mock.Mock()
+            mock_run.return_value = fake_completed
+            result = dispatch_domain.run_subprocess(["echo", "hi"], cwd=ROOT, timeout=30)
+        self.assertIs(result, fake_completed)
+        _, kwargs = mock_run.call_args
+        self.assertEqual(kwargs.get("encoding"), "utf-8")
+        self.assertNotIn("text", kwargs, "不應再用 text=True 依賴系統 locale 解碼子行程輸出")
+        self.assertFalse(kwargs.get("universal_newlines"), "不應透過 universal_newlines 間接退回 locale 解碼")
+
+
 class NativeExecutionTests(unittest.TestCase):
     """真的呼叫 route_model.py，不 mock——native 本來就不對外呼叫，offline、
     deterministic，沒有理由 mock。（2026-07-20：原本這裡還有一個 OpenRouter
@@ -340,6 +377,22 @@ class HermesProfileExecutionTests(FakeHermesFixture):
             lane, "do the thing", "exec-5", 1, self.hermes_argv_prefix, self.log_dir
         )
         self.assertEqual(result.exit_status, "timeout")
+
+    def test_non_ascii_stdout_is_decoded_without_crashing(self):
+        # 回歸測試 2026-07-21 real-call incident：hermes -z 回傳的繁體中文
+        # 研究內容過去會在 subprocess 讀取階段因為 UnicodeDecodeError 而整個
+        # 崩潰（result 被弄丟、exit_status 誤判成 empty_output）。這裡驗證
+        # execute_hermes_profile 現在能正確解碼、原樣帶回中文內容。
+        lane = {"provider": "hermes", "hermes_profile": "unicodecheck"}
+        result = dispatch_domain.execute_hermes_profile(
+            lane, "do the thing", "exec-unicode", 30, self.hermes_argv_prefix, self.log_dir
+        )
+        self.assertEqual(result.exit_status, "success")
+        self.assertEqual(
+            result.result_text,
+            "研究結論：台股大盤觀察，關鍵字包含「風險」與「機會」。",
+        )
+        self.assertEqual(result.usage["model"], "fake-nemo-model")
 
     def test_prompt_too_long_fails_before_any_subprocess_call(self):
         lane = {"provider": "hermes", "hermes_profile": "nemocoding"}
