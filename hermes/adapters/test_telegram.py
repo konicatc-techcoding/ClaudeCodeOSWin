@@ -166,6 +166,61 @@ class TelegramAdapterTests(unittest.TestCase):
         telegram.save_offset(123)
         self.assertEqual(telegram.load_offset(), 123)
 
+    # --- push_message（獨立推播進入點，不經過 job queue） ---
+
+    def test_push_message_uses_default_chat_id_from_config(self):
+        config = {"bot_token": "fake-token", "allowed_chat_ids": [111, 222]}
+        with patch("telegram.send_message") as mock_send:
+            result = telegram.push_message(config, "hello there")
+        mock_send.assert_called_once_with("fake-token", 111, "hello there")
+        self.assertEqual(result, {"chat_id": 111, "text": "hello there"})
+
+    def test_push_message_uses_explicit_chat_id(self):
+        config = {"bot_token": "fake-token", "allowed_chat_ids": [111, 222]}
+        with patch("telegram.send_message") as mock_send:
+            result = telegram.push_message(config, "hi", chat_id=999)
+        mock_send.assert_called_once_with("fake-token", 999, "hi")
+        self.assertEqual(result, {"chat_id": 999, "text": "hi"})
+
+    def test_push_message_no_allowed_chat_ids_raises(self):
+        config = {"bot_token": "fake-token", "allowed_chat_ids": []}
+        with patch("telegram.send_message") as mock_send:
+            with self.assertRaises(ValueError):
+                telegram.push_message(config, "hi")
+        mock_send.assert_not_called()
+
+    def test_push_message_does_not_touch_job_queue(self):
+        config = {"bot_token": "fake-token", "allowed_chat_ids": [111]}
+        with patch("telegram.send_message") as mock_send:
+            telegram.push_message(config, "hi")
+        mock_send.assert_called_once()
+        self.assertEqual(len(db.list_jobs()), 0)  # 不經過 enqueue
+
+    # --- push_cli ---
+
+    def test_push_cli_calls_push_message_with_parsed_args(self):
+        with patch("telegram.load_config", return_value={
+            "bot_token": "fake-token", "allowed_chat_ids": [111],
+        }), patch("telegram.push_message") as mock_push:
+            mock_push.return_value = {"chat_id": 111, "text": "hi there"}
+            exit_code = telegram.push_cli(["hi there"])
+        mock_push.assert_called_once_with(
+            {"bot_token": "fake-token", "allowed_chat_ids": [111]},
+            "hi there", chat_id=None,
+        )
+        self.assertEqual(exit_code, 0)
+
+    def test_push_cli_passes_explicit_chat_id(self):
+        with patch("telegram.load_config", return_value={
+            "bot_token": "fake-token", "allowed_chat_ids": [111],
+        }), patch("telegram.push_message") as mock_push:
+            mock_push.return_value = {"chat_id": 999, "text": "hi"}
+            telegram.push_cli(["hi", "--chat-id", "999"])
+        mock_push.assert_called_once_with(
+            {"bot_token": "fake-token", "allowed_chat_ids": [111]},
+            "hi", chat_id=999,
+        )
+
     # --- config loading ---
 
     def test_load_config_missing_file_exits(self):

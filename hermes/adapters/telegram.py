@@ -13,6 +13,16 @@ hermes/README.md。
 用法：
     python3 hermes/adapters/telegram.py            # 常駐模式
     python3 hermes/adapters/telegram.py --once      # 跑一輪就結束（手動測試用）
+
+另外提供一個獨立的推播進入點（比照 hermes/bridge_notifier.py 對 Slack 的
+做法：不經過 job enqueue → mark_completed → 輪詢投遞的完整流程，直接呼叫
+send_message()）。用途是 CoS 互動觸發的主動通知（例如背景任務完成、
+dispatch 候選待人工核准），不是給 cron/排程用的：
+
+    python3 hermes/adapters/telegram.py push "<text>"
+    python3 hermes/adapters/telegram.py push "<text>" --chat-id 123456789
+
+chat_id 預設讀 hermes/config/telegram.json 的 allowed_chat_ids[0]。
 """
 import argparse
 import json
@@ -201,6 +211,48 @@ def run_forever(config: dict):
             last_delivery_check = now
 
 
+def push_message(config: dict, text: str, chat_id: int | None = None) -> dict:
+    """獨立推播進入點（不經過 job queue）：直接呼叫既有的 send_message()。
+
+    比照 hermes/bridge_notifier.py 對 Slack 的模式——給 CoS 互動觸發的主動
+    通知用（例如背景任務完成、dispatch 候選待人工核准），不經過
+    enqueue→mark_completed→輪詢投遞的完整流程，不是給 cron/排程用的。
+
+    chat_id 未指定時，預設用 config 的 allowed_chat_ids[0]（目前只有一筆，
+    不做多 chat_id 選擇邏輯）。回傳 {"chat_id":..., "text":...} 供呼叫端記錄。
+    """
+    if chat_id is None:
+        allowed = config.get("allowed_chat_ids") or []
+        if not allowed:
+            raise ValueError("config 裡沒有 allowed_chat_ids，無法決定推播目標 chat_id")
+        chat_id = allowed[0]
+    send_message(config["bot_token"], chat_id, text)
+    return {"chat_id": chat_id, "text": text}
+
+
+def push_cli(argv=None) -> int:
+    """`telegram.py push "<text>"` 的 CLI 進入點。獨立於 main()/--once/常駐
+    輪詢邏輯，純新增，不影響既有行為。"""
+    parser = argparse.ArgumentParser(
+        prog="telegram.py push",
+        description="獨立推播進入點：直接送一則訊息到 Telegram，不經過 job "
+                    "queue（比照 hermes/bridge_notifier.py 對 Slack 的模式）",
+    )
+    parser.add_argument("text", help="要送出的訊息內容")
+    parser.add_argument(
+        "--chat-id", type=int, default=None,
+        help="目標 chat_id（預設用 config 的 allowed_chat_ids[0]）",
+    )
+    args = parser.parse_args(argv)
+
+    setup_logging()
+    config = load_config()
+    result = push_message(config, args.text, chat_id=args.chat_id)
+    logger.info(f"push 訊息已送出 chat_id={result['chat_id']}")
+    print(f"已推播到 chat_id={result['chat_id']}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="跑一輪就結束（手動測試用）")
@@ -218,4 +270,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "push":
+        sys.exit(push_cli(sys.argv[2:]))
+    else:
+        main()
