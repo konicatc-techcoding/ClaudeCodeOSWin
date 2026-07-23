@@ -75,6 +75,53 @@ test("localhost-only:vite 設定 host 寫死 127.0.0.1", async () => {
   assert.ok(!/host:\s*true/.test(config), "不得 host: true(等同對外)");
 });
 
+// ---- P3:ClaudeCode CLI(PTY)UI 靜態檢核(提案 §7/§8 DoD 8) ----
+
+test("P3 nav:ClaudeCode CLI 位於「總覽」與「Jobs」之間", async () => {
+  const app = await readFile(join(root, "src", "App.tsx"), "utf8");
+  const overviewIdx = app.indexOf('{ id: "overview"');
+  const terminalIdx = app.indexOf('{ id: "terminal"');
+  const jobsIdx = app.indexOf('{ id: "jobs"');
+  assert.ok(overviewIdx >= 0 && terminalIdx >= 0 && jobsIdx >= 0);
+  assert.ok(overviewIdx < terminalIdx && terminalIdx < jobsIdx, "nav 順序必須是 總覽 → ClaudeCode CLI → Jobs");
+  assert.ok(app.includes('title: "ClaudeCode CLI"'));
+});
+
+test("P3 警語:不可移除(無條件渲染、無關閉控制)、關鍵語句存在", async () => {
+  const terminal = await readFile(join(root, "src", "views", "Terminal.tsx"), "utf8");
+  assert.ok(terminal.includes("TERMINAL_PAGE_WARNING"), "警語常數必須存在");
+  assert.ok(terminal.includes("與本機終端機同權"), "警語須聲明與本機終端機同權");
+  assert.ok(terminal.includes("唯一能寫入 memory 正本"), "警語須聲明 memory 正本寫入入口性質");
+  assert.ok(terminal.includes("未經 redact 掃描"), "警語須聲明終端輸出未經 redact 掃描");
+  // 警語為無條件渲染:該 JSX 行不得掛任何條件(&& / 三元)
+  const warningLine = terminal.split("\n").find((l) => l.includes('className="terminal-warning"'));
+  assert.ok(warningLine, "警語元素必須存在");
+  assert.ok(!warningLine.includes("&&") && !warningLine.includes("?"), "警語不得條件渲染");
+  assert.ok(!terminal.includes("dismiss") && !terminal.includes("關閉警語"), "不得有警語關閉控制");
+});
+
+test("P3 localhost-only:PTY 端點寫死 127.0.0.1:8801;ws:// URL 僅本機", async () => {
+  const terminal = await readFile(join(root, "src", "views", "Terminal.tsx"), "utf8");
+  assert.match(terminal, /PTY_HEALTH_URL = "http:\/\/127\.0\.0\.1:8801\/health"/);
+  assert.match(terminal, /PTY_WS_URL = "ws:\/\/127\.0\.0\.1:8801"/);
+  for (const file of await collectSrcFiles()) {
+    const content = await readFile(file, "utf8");
+    for (const match of content.matchAll(/wss?:\/\/([A-Za-z0-9.-]+)/g)) {
+      const host = match[1];
+      assert.ok(host === "127.0.0.1" || host === "localhost", `${file} 含非本機 WS host: ${host}`);
+    }
+  }
+});
+
+test("P3 無假介面:服務未啟動顯示啟動指引;進 view 不自動 spawn", async () => {
+  const terminal = await readFile(join(root, "src", "views", "Terminal.tsx"), "utf8");
+  assert.ok(terminal.includes("npm run local"), "須含啟動指引指令");
+  assert.ok(terminal.includes("未啟動或無法連線"), "須有明確的服務未啟動狀態");
+  // 連線(spawn)只由使用者按鈕觸發,不在 effect 內自動連線
+  assert.ok(!/useEffect\([^)]*connect\(/s.test(terminal), "不得在 effect 內自動連線");
+  assert.match(terminal, /onClick=\{\(\) => connect\(false\)\}/, "啟動 session 必須是明確的使用者動作");
+});
+
 test("託管假設殘留 grep 清零(OpenAI/Cloudflare 設定痕跡)", async () => {
   const files = await collectSourceFiles(root);
   // pattern 動態組字,避免本測試檔自身被 DoD 的 grep 驗收命中

@@ -15,8 +15,14 @@ P2 完整安全檢查功能完成後由正式版本取代(§4.3 DoD 第 5 項)�
   7. 敏感資料暴露            — 原始碼與設定無疑似真實憑證/密鑰
   8. audit log              — start/stop/reload 每次操作寫入 logs/
 
+P3 追加(2026-07-24,docs/webui-pty-terminal-proposal.md;只追加、不放寬
+既有 1–8 項的任何判準):
+  9. PTY server 安全        — localhost-only bind、Origin 白名單凍結、
+     constant-time token 比對、token 不落磁碟、spawn 目標/引數/cwd 寫死、
+     訊息面僅 stdin/resize、audit 只記事件不落 transcript、與唯讀側物理隔離
+
 用法: python scripts/webui_security_check.py
-結束碼: 0=八項全過, 1=任一項失敗
+結束碼: 0=全部通過, 1=任一項失敗
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ WEBUI = REPO_ROOT / "webui"
 BRIDGE = WEBUI / "scripts" / "bridge.mjs"
 LAUNCHER = WEBUI / "scripts" / "agentos-local.mjs"
 VITE_CONFIG = WEBUI / "vite.config.ts"
+PTY_SERVER = WEBUI / "scripts" / "pty-server.mjs"
 
 EXCLUDED_DIRS = {"node_modules", "dist", ".git"}
 SOURCE_SUFFIXES = {".ts", ".tsx", ".mjs", ".js", ".json", ".html", ".css", ".md"}
@@ -56,18 +63,19 @@ class Report:
 
     def render(self) -> bool:
         print("=" * 72)
-        print("Web UI 過渡期安全檢查報告(P0)")
+        print("Web UI 過渡期安全檢查報告(P0;P3 追加第 9 項 PTY 檢查)")
         print(f"檢查標的: {WEBUI}")
         print("=" * 72)
         all_pass = True
+        total = len(self.results)
         for index, (name, passed, details) in enumerate(self.results, 1):
             status = "PASS" if passed else "FAIL"
             all_pass = all_pass and passed
-            print(f"\n[{index}/8] {status} — {name}")
+            print(f"\n[{index}/{total}] {status} — {name}")
             for line in details:
                 print(f"    - {line}")
         print("\n" + "=" * 72)
-        print("總結: " + ("八項全部通過" if all_pass else "有檢查未通過,詳見上方 FAIL 項"))
+        print("總結: " + (f"{total} 項全部通過" if all_pass else "有檢查未通過,詳見上方 FAIL 項"))
         print("=" * 72)
         return all_pass
 
@@ -327,13 +335,117 @@ def check_audit_log(bridge: str) -> tuple[bool, list[str]]:
     return ok, details
 
 
+def check_pty_server(pty: str, launcher: str, bridge: str) -> tuple[bool, list[str]]:
+    """P3 追加:PTY server(pty-server.mjs)安全檢查——只追加,不影響 1–8 項。"""
+    details: list[str] = []
+    ok = True
+
+    # (a) localhost-only:bind 寫死 127.0.0.1
+    if re.search(r'PTY_HOST\s*=\s*"127\.0\.0\.1"', pty) and re.search(
+        r"server\.listen\(\s*port\s*,\s*PTY_HOST", pty
+    ):
+        details.append('PTY_HOST 常數寫死 "127.0.0.1",listen() 綁定該常數(無 host 參數化入口)')
+    else:
+        ok = False
+        details.append("PTY server 未寫死 bind 127.0.0.1")
+
+    # (b) Origin 白名單:凍結、精確兩個 5173 origin(比 bridge regex 更緊)
+    if re.search(
+        r'ALLOWED_ORIGINS\s*=\s*Object\.freeze\(\[\s*"http://127\.0\.0\.1:5173",\s*"http://localhost:5173",?\s*\]\)',
+        pty,
+    ) and "ALLOWED_ORIGINS.includes(origin)" in pty:
+        details.append("Origin 白名單凍結且僅兩個本機 UI origin,upgrade 前強制比對")
+    else:
+        ok = False
+        details.append("Origin 白名單常數或比對邏輯與預期不符")
+
+    # (c) token:constant-time 比對;經環境變數注入;不落磁碟
+    if "timingSafeEqual" in pty and re.search(r'createHash\("sha256"\)', pty):
+        details.append("token 比對:sha256 等長化 + timingSafeEqual(constant-time)")
+    else:
+        ok = False
+        details.append("token 比對非 constant-time 實作")
+    if re.search(r'TOKEN_ENV\s*=\s*"AGENTOS_PTY_TOKEN"', pty) and "randomBytes(32)" in launcher:
+        details.append("token 為 launcher per-boot randomBytes(32),經環境變數注入")
+    else:
+        ok = False
+        details.append("token 產生/注入機制與預期不符")
+    if re.search(r"writeFile|createWriteStream", launcher):
+        ok = False
+        details.append("launcher 出現檔案寫入呼叫(token 不得落磁碟)")
+    else:
+        details.append("launcher 無任何檔案寫入呼叫(token 不落磁碟)")
+
+    # (d) spawn 邊界:目標寫死 claude、引數凍結為空、cwd 寫死 repo 根、單一 spawn 入口
+    if re.search(r'SPAWN_BIN_NAME\s*=\s*"claude"', pty) and re.search(
+        r"SPAWN_ARGS\s*=\s*Object\.freeze\(\[\]\)", pty
+    ) and re.search(r'SPAWN_CWD\s*=\s*resolve\(webuiRoot,\s*"\.\."\)', pty):
+        details.append("spawn 目標寫死 claude、引數凍結為空(零使用者可控參數)、cwd 寫死 repo 根")
+    else:
+        ok = False
+        details.append("spawn 邊界常數與預期不符")
+    pty_spawn_calls = re.findall(r"pty\.spawn\(([^,]+),", pty)
+    if pty_spawn_calls == ["command.bin"]:
+        details.append("pty.spawn 僅一處、目標為啟動時鎖定的 command.bin")
+    else:
+        ok = False
+        details.append(f"pty.spawn 呼叫與預期不符: {pty_spawn_calls}")
+
+    # (e) 訊息面最小化:client→server 僅 stdin/resize
+    # 排除 typeof message.type === "string" 這類型別檢查,只抓協定分支
+    accepted_types = re.findall(r'(?<!typeof )message\.type === "(\w+)"', pty)
+    if set(accepted_types) == {"stdin", "resize"}:
+        details.append("WS 協定僅接受 stdin/resize 兩種 client 訊息,未知類型拒絕+audit")
+    else:
+        ok = False
+        details.append(f"WS 訊息面與預期不符: {accepted_types}")
+
+    # (f) audit:獨立 log 檔;只記事件、不落 transcript(唯一寫入點在 audit())
+    if re.search(r'AUDIT_LOG_NAME\s*=\s*"webui_pty_audit\.log"', pty) and re.search(
+        r'DEFAULT_LOG_DIR\s*=\s*join\(webuiRoot,\s*"\.\.",\s*"logs"\)', pty
+    ):
+        details.append("audit log 落點: <repo>/logs/webui_pty_audit.log")
+    else:
+        ok = False
+        details.append("audit log 落點常數與預期不符")
+    append_calls = len(re.findall(r"appendFileSync\(", pty))
+    write_apis = re.findall(r"writeFileSync\(|createWriteStream\(|fs\.write", pty)
+    if append_calls == 1 and not write_apis:
+        details.append("檔案寫入僅 audit() 內一處 appendFileSync——技術上不存在 transcript 落地路徑")
+    else:
+        ok = False
+        details.append(f"發現 audit 以外的寫入路徑: appendFileSync×{append_calls}, 其他 {write_apis}")
+
+    # (g) 物理隔離:PTY server 不 import bridge/唯讀資料層;唯讀側不 import PTY
+    pty_imports = re.findall(r'from\s+"([^"]+)"', pty)
+    bad_imports = [s for s in pty_imports if not (s.startswith("node:") or s in {"ws", "node-pty"})]
+    if bad_imports:
+        ok = False
+        details.append(f"PTY server import 了非白名單模組: {bad_imports}")
+    else:
+        details.append("PTY server import 僅 node 內建 + ws + node-pty(不碰 bridge/唯讀資料層)")
+    if "pty-server" in bridge:
+        ok = False
+        details.append("bridge.mjs 引用了 pty-server(違反物理隔離)")
+    else:
+        details.append("bridge.mjs 零引用 pty-server")
+    readonly_side = [REPO_ROOT / "dashboard" / "api.py", REPO_ROOT / "dashboard" / "data.py"]
+    leaks = [p.name for p in readonly_side if p.exists() and ("8801" in read(p) or "pty" in read(p).lower())]
+    if leaks:
+        ok = False
+        details.append(f"唯讀側出現 PTY 引用: {leaks}")
+    else:
+        details.append("唯讀 API/data 層零 PTY 引用(8801/pty 字樣不存在)")
+    return ok, details
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
 
-    missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG) if not p.exists()]
+    missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG, PTY_SERVER) if not p.exists()]
     if missing:
         print(f"FAIL — 檢查標的不存在: {missing}")
         return 1
@@ -341,6 +453,7 @@ def main() -> int:
     bridge = read(BRIDGE)
     launcher = read(LAUNCHER)
     vite = read(VITE_CONFIG)
+    pty = read(PTY_SERVER)
 
     report = Report()
     report.add("localhost-only(bind 寫死 127.0.0.1)", *_two(check_localhost_only(bridge, vite)))
@@ -351,6 +464,7 @@ def main() -> int:
     report.add("CORS(本機 origin 白名單、403 攔截)", *_two(check_cors(bridge)))
     report.add("敏感資料暴露(無真實憑證/密鑰/.env)", *_two(check_sensitive_data(bridge)))
     report.add("audit log(操作記錄落 logs/)", *_two(check_audit_log(bridge)))
+    report.add("PTY server 安全(P3:隔離/授權/spawn 邊界/audit 不落 transcript)", *_two(check_pty_server(pty, launcher, bridge)))
 
     return 0 if report.render() else 1
 

@@ -1,4 +1,4 @@
-# AgentOS Web UI(P0+P1)
+# AgentOS Web UI(P0+P1+P2+P3)
 
 以 AgentOSUI 範本為雛形的新 Web UI,依 `docs/webui-migration-proposal.md`(v2)
 交付:純 Vite + React SPA(已剝離範本的 Next/vinext/wrangler/Cloudflare
@@ -26,7 +26,8 @@ Logs,與既有 Streamlit dashboard(`dashboard/app.py`)功能對等,全部經
 ```bash
 cd webui
 npm install     # 第一次
-npm run local   # 一鍵啟動 Local Bridge(127.0.0.1:8787)+ UI(http://127.0.0.1:5173)
+npm run local   # 一鍵啟動 Local Bridge(127.0.0.1:8787)+ PTY server(127.0.0.1:8801)
+                # + UI(http://127.0.0.1:5173);PTY per-boot token 亦在此產生
 
 # 另開一個終端啟動唯讀 API(五個資料 view 的資料來源;不啟動時 UI 會
 # 顯示連線錯誤與這行指令,不顯示假資料):
@@ -144,6 +145,92 @@ npm test                                                # UI 渲染層(tests/sta
 過渡期八項安全檢查:`python scripts/webui_security_check.py`(repo 根,
 純唯讀、輸出報告)。
 
+## P3:ClaudeCode CLI(PTY 真終端機,2026-07-24)
+
+設計正本與核准紀錄:`docs/webui-pty-terminal-proposal.md`(v2,含 §3.2
+殘餘風險知情確認)。**這是整個 Web UI 中唯一的寫入型 view**——xterm.js
+連上獨立 PTY server,spawn 一個完整的前台 `claude` session。
+
+### 能力聲明(提案 §3.2 殘餘風險,使用者已知情確認)
+
+- 本 view 開的是**前台互動 session**(不帶 `-p`),與本機終端機**同權**:
+  可經使用者在 session 內核准執行指令、讀寫檔案、**編輯 memory 正本**。
+  「只能 spawn claude」收斂的是入口,不是能力——能力邊界在 Claude Code
+  的 permission 系統(人在迴路),不在 PTY 層。
+- 終端輸出是**未經** `dashboard/redact.py` 掃描的原始流:在 session 裡讀
+  憑證檔會把明文直接印在畫面上,PTY 層無技術手段攔截(教訓一適用)。
+  安全替代管道:憑證/Lane 狀態頁(P2)。
+- token 擋得住不知道 token 的網頁(cross-site WS hijacking/DNS rebinding),
+  擋不住同使用者權限的本機惡意程式——後者本來就能直接跑 `claude`,威脅
+  模型未擴大。
+
+### 架構與安全機制
+
+- **獨立 process、獨立 port**:`scripts/pty-server.mjs`,bind 寫死
+  `127.0.0.1:8801`(常數,無參數化入口),與 bridge(8787)/唯讀 API
+  (8799)零共用程式碼路徑;pty-server 的 import 僅 node 內建+`ws`+
+  `node-pty`(不碰 bridge/唯讀資料層,有測試+安全檢查鎖定)。
+- **雙層連線授權**(WS upgrade 時逐層驗證,缺一不可):
+  1. Origin 白名單:僅 `http://127.0.0.1:5173` 與 `http://localhost:5173`
+     (凍結常數、精確全字串比對;缺 Origin 一律拒絕)。
+  2. per-boot token:launcher 每次啟動 `randomBytes(32).toString("hex")`,
+     經環境變數注入 PTY server(`AGENTOS_PTY_TOKEN`)與 Vite
+     (`VITE_AGENTOS_PTY_TOKEN`),**不落磁碟**;比對走 sha256 等長化+
+     `timingSafeEqual`(constant-time)。拒絕回應不洩漏差在哪,audit 記
+     精確原因。缺 token 時 PTY server 拒絕啟動(無「無授權模式」)。
+  - 配套:Vite dev/preview `cors: false`(SPA 同源不需要 CORS;避免其他
+    origin 讀取含 token 的轉譯模組——收緊,不影響既有判準)。
+- **spawn 邊界**:目標=啟動時解析一次並鎖定的 `claude` 絕對路徑(PATH+
+  PATHEXT 解析,實測本機為 `C:\Users\razer\.local\bin\claude.exe`,非
+  .cmd shim);引數=凍結空陣列(v1 零參數);cwd=repo 根(寫死)。
+  client 唯二能送的訊息是 `stdin` 與 `resize`——未知訊息類型→audit+
+  斷線。claude process 結束=session 終止,**不掉回任何 shell**。
+- **生命週期**(提案 §5 拍板值):同時最多 1 個 session(第二個連線
+  409);idle 30 分鐘無 stdin → 終端提示,再 5 分鐘無 stdin **且輸出
+  靜默** → 終止(只計輸入;長任務輸出中不誤殺——終止前檢查近期輸出,
+  輸出未靜默則延後);WS 斷線 60 秒 grace 內同 token 可重連接回(無
+  server 端 buffer,斷線期間輸出丟棄;不做跨啟動 reattach,續對話用
+  claude 官方 `--resume` 在新 session 內自行操作);launcher 關閉以
+  taskkill 樹殺 PTY server,ConPTY 底下的 claude 一併結束,不留孤兒。
+- **audit log**:`<repo>/logs/webui_pty_audit.log`,每事件一行(時間|
+  事件|PID|結果):server-start/stop、connect-reject(含原因)、spawn、
+  disconnect/reconnect/grace-expired、idle-warning/idle-timeout、
+  protocol-violation、exit、terminate。**絕不記 stdin/stdout 內容**
+  (不落 transcript,教訓一;有假密鑰斷言測試+靜態檢查「唯一寫入點
+  在 audit()」)。
+- **UI**:nav 在「總覽」與「Jobs」之間,label「ClaudeCode CLI」;頁面
+  頂部警語不可移除(無條件渲染,有靜態測試);PTY server 未啟動/缺
+  token 時顯示明確狀態與啟動指引,不做假介面;進 view 只做 GET /health
+  探測,**不自動 spawn**——「啟動 session」按鈕才是那個明確的使用者動作。
+
+### Windows/ConPTY 實測(2026-07-24,Node v22.23.1)
+
+- `node-pty@1.1.0` 安裝走 **prebuilt binary**(`prebuilds/win32-x64`,
+  含 conpty.node+pty.node),**未觸發 node-gyp 現地編譯**——本機毋須
+  VS Build Tools。升級 node-pty 或 Node 大版本後需重驗 prebuilt 是否
+  仍命中(`install` script fallback 是 `node-gyp rebuild`)。
+- ConPTY 可用(Windows 10 19045):`pty.spawn` 真實 claude 與 node
+  fixture 皆正常;輸出含 ANSI/VT 序列,resize 經 `pty.resize()` 轉發。
+- node-pty 的 ConPTY handle 會讓 node process 事件迴圈不退出:測試
+  runner 因此加 `--test-force-exit`(`npm test`;斷言失敗仍正確回傳
+  非零 exit code,已驗證);對已結束 process 呼叫 `kill()` 會噴
+  AttachConsole 噪音,server 端已先以 `process.kill(pid,0)` 探活避開。
+- **TUI 渲染**:協定層實測通過(真實 claude 的 ANSI 流經 WS 到達
+  client;E2E 見下)。xterm.js 瀏覽器端的視覺呈現(顏色/中文寬字元/
+  resize 重排)屬人工目視項,待使用者實際開頁確認;若有排版問題依
+  提案「不可用時誠實回報再議」處理。
+
+### E2E 紀錄(2026-07-24,真實環境)
+
+`node tests/fixtures/e2e-pty-client.mjs`(需 `npm run local` 在跑;
+一次性驗證 client,不屬於 `npm test` 套件):Vite 200 → token 經 Vite
+注入前端模組(與瀏覽器同途徑取得)→ 非白名單 Origin 403 / 錯誤 token
+403 → 正確雙證連上、spawn 真實 claude(TUI 輸出+ANSI 到達)→ `/exit`
+→ 收到 exit 訊息、health 回報 session 清空。另實測:斷線 60 秒 grace
+到期自動終止真實 claude(audit 三行:disconnect/grace-expired/terminate);
+launcher 樹殺後 claude child 同步結束、8801/8787/5173 全部釋放,零殘留。
+E2E 過程未在 claude session 內執行任何實質指令。
+
 ## 實測數據(2026-07-23,Windows 10,hermes v0.18.2)
 
 - **`hermes dashboard` 冷啟動**:spawn 到 HTTP 可回應 **34.7 秒**
@@ -172,3 +259,15 @@ next/vinext/wrangler/drizzle/tailwind/eslint-config-next 全數移除
 一併移除)。`npm audit`(2026-07-23):vite 8.0.13 有 1 個 high
 (GHSA-fx2h-pf6j-xcff `server.fs.deny` Windows bypass、GHSA-v6wh-96g9-6wx3
 launch-editor NTLMv2)→ 已升級 `vite@8.1.5`,audit **0 vulnerabilities**。
+
+P3 增量(2026-07-24,提案 §4.2 核准的四項,鎖定精確版本、除此不新增):
+
+| 依賴 | 版本 | 端 | 理由 |
+|---|---|---|---|
+| `@xterm/xterm` | 6.0.0 | 前端 | 終端渲染;純前端、VS Code 同源,無 native code |
+| `@xterm/addon-fit` | 0.11.0 | 前端 | 終端尺寸自適應 content 區,體積小 |
+| `node-pty` | 1.1.0 | PTY server | ConPTY 偽終端;**原生模組=供應鏈風險重心**,本機命中官方 prebuilt(win32-x64),升級需重驗 |
+| `ws` | 8.21.1 | PTY server | WebSocket server;純 JS、零 runtime 依賴 |
+
+`npm audit`(2026-07-24,四項安裝後):**0 vulnerabilities**。
+token/upgrade 驗證用 Node 內建 `crypto`/`http` 實作,無額外依賴。

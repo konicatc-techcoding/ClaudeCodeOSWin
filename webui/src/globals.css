@@ -12,6 +12,7 @@
   --muted-2: #626a7a;
   --violet: #7668f6;
   --violet-soft: #292548;
+  --claude-orange: #d97757; /* Claude 品牌橘(深色底上對比約 5.4:1);P3 ClaudeCode CLI view 用 */
   --green: #3dd49b;
   --blue: #5aa7ff;
   --orange: #f0a24b;
@@ -154,3 +155,18 @@ button { color: inherit; }
   .cron-list article { grid-template-columns: 35px 1fr 60px 20px; }.cron-list article > span:nth-child(4) { display: none; }.section-heading { align-items: flex-start; }.section-heading p { display: none; }
   .hermes-page:not(.is-online) { padding: 16px; }.hermes-launch-card { padding: 17px; }.compact-launch-card { grid-template-columns: 1fr; }.compact-launch-card .launch-actions { margin-top: 14px; }.compact-launch-card .launch-note { grid-column: auto; }.hermes-launch-copy { align-items: flex-start; }.command-preview { grid-template-columns: 32px 1fr; }.command-preview button { display: none; }.launch-actions { flex-direction: column; }.preview-body { grid-template-columns: 1fr; }.preview-body > aside { display: none; }.preview-metrics { grid-template-columns: 1fr 1fr 1fr; }
 }
+
+/* ---- P3:ClaudeCode CLI(PTY 真終端機)view ---- */
+/* 不可移除警語:警示色+深色終端視覺區隔(提案 §7),無關閉/摺疊控制 */
+.terminal-warning { margin: 0 0 14px; padding: 12px 14px; border: 1px solid #5c3a1e; border-left: 4px solid #e0973f; border-radius: 11px; color: #f2b56d; background: #251d14; font-size: 13px; line-height: 1.6; }
+.terminal-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+/* 啟動/重連按鈕:底色沿用既有 surface 色調,文字用 Claude 橘;
+   hover/focus 提高可見性,與上方警語區塊(amber 邊框段落)明確區隔。
+   純樣式——行為仍是明確點擊才 connect/spawn。 */
+.terminal-start { padding: 10px 16px; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 9px; color: var(--claude-orange); background: var(--surface-2); font-size: 13px; font-weight: 800; cursor: pointer; transition: .2s ease; }
+.terminal-start span { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: var(--claude-orange); background: rgba(217,119,87,.14); font-size: 11px; }
+.terminal-start:hover { border-color: var(--claude-orange); background: var(--surface-3); }
+.terminal-start:focus-visible { outline: 2px solid var(--claude-orange); outline-offset: 2px; }
+.terminal-notice { margin: 0; color: var(--muted); font-size: 13px; }
+.terminal-host { border: 1px solid #3a3323; border-radius: 12px; background: #0d1017; padding: 10px; height: calc(100vh - 320px); min-height: 320px; overflow: hidden; }
+.terminal-host .xterm { height: 100%; }
