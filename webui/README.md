@@ -1,12 +1,19 @@
-# AgentOS Web UI(P0)
+# AgentOS Web UI(P0+P1)
 
 以 AgentOSUI 範本為雛形的新 Web UI,依 `docs/webui-migration-proposal.md`(v2)
-P0 交付:純 Vite + React SPA(已剝離範本的 Next/vinext/wrangler/Cloudflare
+交付:純 Vite + React SPA(已剝離範本的 Next/vinext/wrangler/Cloudflare
 Worker/D1/R2/drizzle/OpenAI 託管假設),加上 Local Bridge 最小寫入例外。
 
-**P0 範圍**:只有「Hermes Dashboard」一個 view(經 Bridge 啟動並以 iframe
-內嵌)。範本原有的 Chat/Monitor view 全部是硬編假資料,依 P0 DoD 第 4 條
-已整塊移除——未接線的區塊不呈現,P1 接上唯讀 API 後才逐步加回。
+**P0 範圍**:「Hermes Dashboard」view(經 Bridge 啟動並以 iframe 內嵌)。
+範本原有的 Chat/Monitor view 全部是硬編假資料,依 P0 DoD 第 4 條已整塊
+移除——未接線的區塊不呈現。
+
+**P1 範圍(既有功能對等)**:新增五個資料 view——總覽/Jobs/成本/Memory/
+Logs,與既有 Streamlit dashboard(`dashboard/app.py`)功能對等,全部經
+**唯讀 API**(`dashboard/api.py`,`http://127.0.0.1:8799`)取數。UI 層零
+檔案/資料庫直接存取(§3.3 獨立資料層)——取數只有 `src/api.ts` 的 fetch
+一條路,畫面上零硬編資料。既有 Streamlit dashboard 維持可用、零改動,
+與新 UI 並存(退役時點依提案 §4.3 DoD 第 4 項,在 P2 後才進入觀察期)。
 
 ## 啟動方式
 
@@ -14,11 +21,16 @@ Worker/D1/R2/drizzle/OpenAI 託管假設),加上 Local Bridge 最小寫入例外
 
 - Node.js `>=22.13.0`(實測環境 v22.23.1)
 - `hermes` 指令可在 PATH 直接執行(實測 hermes v0.18.2)
+- Python venv(repo 根 `.venv`,唯讀 API 使用;零額外套件——stdlib only)
 
 ```bash
 cd webui
 npm install     # 第一次
 npm run local   # 一鍵啟動 Local Bridge(127.0.0.1:8787)+ UI(http://127.0.0.1:5173)
+
+# 另開一個終端啟動唯讀 API(五個資料 view 的資料來源;不啟動時 UI 會
+# 顯示連線錯誤與這行指令,不顯示假資料):
+cd .. && .venv/Scripts/python.exe dashboard/api.py   # http://127.0.0.1:8799
 ```
 
 其他指令:`npm run dev`(只起 UI)、`npm run build`、`npm test`、
@@ -29,6 +41,34 @@ npm run local   # 一鍵啟動 Local Bridge(127.0.0.1:8787)+ UI(http://127.0.0.1
 - Vite dev/preview server host 寫死 `127.0.0.1`(`vite.config.ts`,無參數化入口)。
 - Bridge bind 寫死 `127.0.0.1`(`scripts/bridge.mjs` 的 `BRIDGE_HOST` 常數)。
 - Bridge CORS 只允許 `^http://(localhost|127.0.0.1):<port>$` 的 origin,其餘 403。
+- 唯讀 API bind 寫死 `127.0.0.1`(`dashboard/api.py` 的 `API_HOST` 常數,
+  `create_server()` 無 host 參數、CLI 無 host 選項);CORS 同上白名單,
+  非白名單 origin 403;HTTP 層全域攔非 GET → 405(`dashboard/test_api.py`
+  逐條測試)。
+
+## 唯讀 API(P1,`dashboard/api.py`)
+
+三鐵律技術強制見 `dashboard/api.py` docstring 與提案 §3;endpoint 一對一
+對應 `dashboard/data.py` 既有函式(全部 GET、回 JSON):
+
+| Endpoint | data.py 函式 |
+|---|---|
+| `/api/health` | `jobs_db_exists()`(+ ok/readonly 標記) |
+| `/api/status-counts` | `get_status_counts()` |
+| `/api/jobs?limit&status&source` | `get_recent_jobs()` |
+| `/api/jobs/<id>` | `get_job()` |
+| `/api/cost-summary` | `get_cost_summary()` |
+| `/api/systemd-status` | `get_systemd_status()` |
+| `/api/memory/inbox-counts` | `get_memory_inbox_counts()` |
+| `/api/memory/files` | `get_memory_files()` |
+| `/api/domains` | `get_domain_status()` |
+| `/api/adapter-config` | `get_adapter_config_status()` |
+| `/api/logs/<name>?lines` | `tail_log()`(檔名嚴格白名單 regex,擋 traversal) |
+
+每個回應在序列化前統一過 `dashboard/redact.py` 的遞迴憑證掃描(§3.4
+第三道防線,P1 先立防線給 P2 用)。測試:
+`.venv/Scripts/python.exe dashboard/test_api.py`(31 條:CORS/403、405、
+import guard AST 白名單、bind 檢核、bot_token 不外洩、endpoint 行為)。
 
 ## Local Bridge 安全規格(2026-07-23 使用者核准的最小寫入例外)
 

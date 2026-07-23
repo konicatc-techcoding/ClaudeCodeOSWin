@@ -43,6 +43,13 @@
   5. **未被推翻的預設照舊**：Streamlit 退役採並行觀察期；P3 各功能 gate
      （Chat 派工／Job Retry／Session 管理）留待日後，未核准前零程式碼。
   6. §9 由「待拍板項清單」改為「拍板結果記錄」。
+- **v2 後註記（2026-07-23 稍後）**：**P3 的 Chat gate 已由使用者解除**，
+  形態拍板為 **PTY 真終端機**（取代 §5.3(1) 評估的 headless enqueue
+  形態），設計正本與核准紀錄見
+  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)（v2
+  已核准，含 §3.2 殘餘風險知情確認；開工排 P2 完成後）。Job Retry／
+  Session 管理兩項 gate 仍留待日後。相關節（§0.3／§4.4／§5）已同步
+  加註，其餘內容不變。
 - **v1**（2026-07-23 稍早）＝第一個正式版本（草案）。來源：使用者就「是否以
   AgentOSUI 範本為雛形開發 dashboard」的評估拍板了三點（見 §0.1），v1 是該
   拍板之下的具體遷移設計，含 §9 待拍板項——現已全數有答案（見上方 v2 變更
@@ -99,9 +106,11 @@
   ＋新 UI 達成與既有 Streamlit dashboard 的功能對等（§4.2）。
 - **P2**：Stage 3 三項功能依 v2 設計正本搬入新 UI（§4.3），順序沿用 v2
   拍板：功能二 → 功能三 → 功能一；完成後以正式安全檢查取代過渡期 script。
-- **P3**：寫入型功能（Chat 派工／Job Retry／Session 管理）的安全邊界設計
-  與獨立核准 gate（§5）——**gate 已拍板留待日後**；bridge process 控制
-  已提前核准並移入 P0 實作（§5.4）。
+- **P3**：寫入型功能的安全邊界設計與獨立核准 gate（§5）——現況
+  （2026-07-23 稍後更新）：**Chat gate 已解除，形態為 PTY 真終端機**
+  （正本 [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)，
+  排 P2 完成後開工）；Job Retry／Session 管理 gate 留待日後；bridge
+  process 控制已提前核准並移入 P0 實作（§5.4）。
 
 ### 0.4 明確排除範圍（不論哪個 phase，一律不做）
 
@@ -112,13 +121,14 @@
   剝離，不保留「未來上雲」的殘留設定。
 - **一鍵自動對齊漂移 job 到新模型**（沿用 v2 §4.7）：繞過花費保護
   （#44585），不做；漂移旗標維持只偵測、只標示。
-- **未核准的 P3 功能（Chat 派工／Job Retry／Session 管理）在各自 gate
-  核准前的任何程式碼**：評估≠核准，gate 前連「先把按鈕做出來但 disabled」
-  都不做——UI 上不出現未核准功能的入口。（bridge process 控制不在此列
-  ——它已於 2026-07-23 核准，見 §5.4。）
+- **未核准的 P3 功能（Job Retry／Session 管理）在各自 gate 核准前的任何
+  程式碼**：評估≠核准，gate 前連「先把按鈕做出來但 disabled」都不做——
+  UI 上不出現未核准功能的入口。（bridge process 控制與 Chat／PTY 不在
+  此列——前者已核准入 P0，後者已核准排 P3 開工，見 §5.4 與 §5.3(1)。）
 - **任意 shell command API**：bridge 即使已核准為寫入例外，也**不得**提供
   任意 shell command API（使用者親定規格，§5.4）——白名單以外的任何
-  process 操作都不存在技術入口。
+  process 操作都不存在技術入口。（PTY 終端機的對應邊界——spawn 目標
+  寫死 `claude`、零使用者可控參數——見 PTY 提案 §3.1。）
 - **憑證值顯示**：`access_token`／`refresh_token`／任何 token/key/secret
   欄位值在任何 phase、任何層（API 回應、UI 渲染、log）都絕對不出現——
   這條在新架構下的技術強制見 §3.4。
@@ -216,8 +226,9 @@
        │            與停止「由 AgentOS 啟動的」process；audit log；§5.4）
        └─ iframe → Hermes 原生 dashboard（127.0.0.1:9119）
 
-（P3 若日後核准）其他寫入 API：獨立 process、獨立 port，與唯讀 API
-物理分離（§5.2）——目前 gate 留待日後，零程式碼。
+（P3，已核准排 P2 後開工）PTY 終端機：獨立 process、獨立 port，與唯讀
+API 物理分離——設計正本見 webui-pty-terminal-proposal.md（§5.2 隔離
+原則適用）。其餘寫入功能 gate 留待日後，零程式碼。
 ```
 
 ### 2.2 資料層架構決策 — ✅ 已拍板（2026-07-23）：選項 A
@@ -446,12 +457,18 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
    （P0 的八項檢查每一項都能對應到正式測試/檢查的具體條目），取代動作
    （退役或併入）明確記錄。
 
-### 4.4 P3 — 寫入型功能（gate 已拍板留待日後，見 §5）
+### 4.4 P3 — 寫入型功能（現況：Chat／PTY 已核准，其餘留待日後）
 
-本 phase 在本提案內只交付 §5 的評估與邊界設計。**2026-07-23 拍板：三項
-功能（Chat 派工／Job Retry／Session 管理）的 gate 全部留待日後**——
-未核准前零程式碼、UI 不出現入口。bridge process 控制已提前核准並移入
-P0 實作（§5.4）。
+**（2026-07-23 稍後更新）**本 phase 現況：
+
+- **Chat gate 已解除，形態拍板為 PTY 真終端機**——設計與安全邊界正本、
+  拍板紀錄（§10 五項均採建議預設＋§3.2 殘餘風險知情確認）見
+  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)（v2
+  已核准）。**開工時點：P2 完成後**（排序拍板：P2 先做，Chat 排 P3）。
+  原 §5.3(1) 的 headless enqueue 形態不採用。
+- **Job Retry／Session 管理 gate 留待日後**——未核准前零程式碼、UI 不
+  出現入口；評估與邊界設計保留於 §5.3(2)(3)。
+- bridge process 控制已提前核准並移入 P0 實作（§5.4）。
 
 ---
 
@@ -460,9 +477,11 @@ P0 實作（§5.4）。
 ### 5.1 總則
 
 - **評估 ≠ 核准**：本節存在的目的是把安全邊界先想清楚，不是預告一定會做。
-- **每項功能一個獨立 gate**：2026-07-23 拍板現況——**(4) bridge process
-  控制已核准**（最小寫入例外，移入 P0）；**(1)(2)(3) 三項 gate 留待日後**，
-  未核准前零程式碼。
+- **每項功能一個獨立 gate**：現況（2026-07-23 稍後更新）——**(4) bridge
+  process 控制已核准**（最小寫入例外，移入 P0）；**(1) Chat 已核准，
+  形態改為 PTY 真終端機**（正本另見
+  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)，排
+  P2 完成後開工）；**(2)(3) 兩項 gate 留待日後**，未核准前零程式碼。
 - **共同原則**：寫入能力與唯讀層物理隔離（§5.2）；每個寫入動作留
   audit 記錄；寫入面最小化（只做白名單動作，不做泛用操作台）。
 
@@ -477,22 +496,27 @@ P0 實作（§5.4）。
 - 寫入側同樣 bind `127.0.0.1`＋CORS 白名單；每次寫入動作寫一筆
   audit log（時間、動作、參數、結果）到 `logs/`。
 
-### 5.3 各功能評估（gate 留待日後的三項）
+### 5.3 各功能評估
 
-**(1) Chat 派工（UI 直接對 CoS 交辦任務）——gate 留待日後**
+**(1) Chat 派工——✅ gate 已解除（2026-07-23），形態改為 PTY 真終端機**
 
-- **寫入本質**：等價於新增一個「web」來源的 job 進 `hermes/jobs.db`
-  （經 `enqueue()`），由既有 worker/headless CoS 流程消化——**不是**
-  UI 直接呼叫 `claude`。這樣寫入面收斂為一個既有、已驗證的入口，
-  且天然獲得 job 生命週期/重試/成本記錄。
+> **（v2 後註記）**使用者拍板 Chat 形態為 **PTY 真終端機**（完整前台
+> `claude` session 嵌入瀏覽器），**不採用**本節下方評估的 headless
+> enqueue 形態；設計正本、威脅模型、殘餘風險知情確認見
+> [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)（v2
+> 已核准，排 P2 完成後開工）。以下原評估內容保留作歷史對照與未來
+> 「排程式丟任務」需求的參考，不是現行方案。
+
+- **寫入本質**（原 enqueue 形態評估）：等價於新增一個「web」來源的 job
+  進 `hermes/jobs.db`（經 `enqueue()`），由既有 worker/headless CoS 流程
+  消化——**不是** UI 直接呼叫 `claude`。這樣寫入面收斂為一個既有、已驗證
+  的入口，且天然獲得 job 生命週期/重試/成本記錄。
 - **邊界設計**：寫入 API 只提供 `POST /api/chat/enqueue`（payload：
   純文字 prompt）；回覆呈現走唯讀 API 的既有 job detail 端點輪詢。
   不提供任意指令執行、不提供檔案上傳。與 ARCHITECTURE.md 既有決策
   相容性佳（背景 job 只能寫 inbox 的既有規則自動適用）。
 - **風險焦點**：本機瀏覽器任何頁面若繞過 CORS（例如非瀏覽器 client）
   即可派工——但這與本機任何人可直接跑 CLI 等價，威脅模型未實質擴大。
-- **gate 判斷建議**：三項中風險最低、價值最高的一項；若日後只核准
-  一項，建議是這項。
 
 **(2) Job Retry(對 failed/dead_letter job 重新入列）——gate 留待日後**
 
@@ -514,9 +538,9 @@ P0 實作（§5.4）。
   API 執行管理動作（如同 bridge 對 dashboard 的做法：固定指令白名單）；
   若 Hermes 無對應官方指令，該動作就不做——不重演「官方指令看似無效
   就繞過用內部函式」的教訓四。
-- **gate 判斷建議**：**三項中唯一建議暫緩**——觀測價值已由 P2 功能一
-  （唯讀 session 列表）覆蓋大半，寫入風險最高、依賴外部專案 schema，
-  建議等真實需求出現且確認官方指令存在後再議。
+- **gate 判斷建議**：**建議暫緩**——觀測價值已由 P2 功能一（唯讀
+  session 列表）覆蓋大半，寫入風險最高、依賴外部專案 schema，建議等
+  真實需求出現且確認官方指令存在後再議。
 
 ### 5.4 Bridge process 控制 — ✅ 已核准（2026-07-23，最小寫入例外）
 
@@ -581,6 +605,7 @@ P0 實作（§5.4）。
 | 3 | `dashboard/README.md`：P1 起註記新 UI 並存狀態；P2 後標 deprecated 與並行觀察期 | engineering（隨對應 phase） | ⏳ 待對應 phase |
 | 4 | 新增 `webui/README.md`（啟動方式、Node 版本、安全邊界、bridge 安全規格與 audit log 位置——比照 `dashboard/README.md` 安全邊界節的寫法） | engineering（P0） | ⏳ 待 P0 |
 | 5 | 本次「推翻 §0.1」決策、bridge 最小寫入例外核准、範本來源（OpenAI starter 改造、其 ARCHITECTURE.md 為過期複本）記入 memory | CoS 經 `knowledge` | ⏳ 待辦 |
+| 6 | （v2 後註記新增）PTY 終端機提案（[webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)）已產出並核准；roadmap Stage 5 節若需補 P3 現況一行註記，隨下次 roadmap 更新一併處理 | planning（下次 roadmap 更新時） | ⏳ 待辦 |
 
 ---
 
@@ -599,7 +624,8 @@ P0 實作（§5.4）。
 | Stage 3 凍結期間憑證觀測缺口持續 | P1–P2 期間 | v2 功能二回應的真實安全事故缺口延後補上 | 已拍板過渡處置：P0 先交付最小安全檢查 script（唯讀＋報告）；P2 順序維持功能二最先；P2 後由正式版本取代 |
 | 雙 runtime（Python＋Node）長期維護面 | 全部 | 單人專案維護成本上升 | 資料層單一真相留在 Python（已拍板選項 A）；UI 層縮到純 SPA（已拍板選項 b）；Streamlit 並行觀察期後退役，Python 側僅剩 data.py+api.py |
 | `auth.json`／`jobs.json` schema 與 v2 理解有落差 | P2 | 白名單對不上、漂移判定失準 | 沿用 v2 既有緩解：engineering 以安全方式（只印 key 名稱）先驗證 schema |
-| 未核准的 P3 功能被夾帶進 P0–P2 | 全部 | 唯讀邊界被稀釋 | §0.4 明確禁止（含 disabled 按鈕都不做）；P2 DoD 第 3 條驗收檢核；bridge 例外範圍以 §5.4 規格封死 |
+| 未核准的 P3 功能被夾帶進 P0–P2 | 全部 | 唯讀邊界被稀釋 | §0.4 明確禁止（含 disabled 按鈕都不做）；P2 DoD 第 3 條驗收檢核；bridge 例外範圍以 §5.4 規格封死；PTY 雖已核准仍不得早於 P3 開工（排序拍板） |
+| PTY 終端機（P3）的完整前台能力面 | P3 | 系統至今風險最高功能 | 獨立提案獨立 gate（已核准，含殘餘風險知情確認）——威脅模型、雙層連線授權、audit 設計見 [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md) |
 | 範本 `ARCHITECTURE.md` 過期複本被誤當現況 | 全部 | 依過期假設實作 | §1.1 明確標註；文件連動待辦 5 記入 memory |
 
 ---
@@ -628,6 +654,12 @@ P0 實作（§5.4）。
    CORS、敏感資料暴露、audit log）。排入 **P0 第 8 項**（其驗證標的多為
    bridge 性質，需 bridge 入 repo 後才有標的）；**P2 完整安全檢查功能
    完成後由正式版本取代**（§4.3 DoD 第 5 項）。
-6. **P3 各功能 gate**：✅ 已拍板——**三項全部留待日後**（Chat 派工／
-   Job Retry／Session 管理均未核准），未核准前零程式碼、UI 不出現入口；
-   評估與邊界設計保留於 §5.3，日後核准任一項時據此出實作細案。
+6. **P3 各功能 gate**：拍板結果分兩段——
+   - **本次（v2 定稿時）**：三項全部留待日後，未核准前零程式碼、UI 不
+     出現入口。
+   - **（v2 後註記，2026-07-23 稍後）Chat gate 已解除**：形態拍板為
+     **PTY 真終端機**（取代 §5.3(1) 的 enqueue 形態），設計正本與核准
+     紀錄（含 §3.2 殘餘風險知情確認）見
+     [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)
+     （v2 已核准），**排 P2 完成後開工**。Job Retry／Session 管理維持
+     留待日後。

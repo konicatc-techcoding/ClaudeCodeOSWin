@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "readonly-api",
+      "runtimeExecutable": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "dashboard.api"],
+      "port": 8799
+    },
+    {
       "name": "dashboard",
       "runtimeExecutable": "${workspaceFolder}/.venv/Scripts/python.exe",
       "runtimeArgs": [

@@ -76,6 +76,48 @@ button { color: inherit; }
 .hermes-frame { display: block; width: 100%; height: 100%; min-height: 0; border: 0; background: #0d0f14; }.preview-placeholder.standalone { min-height: 520px; margin: 0; border: 0; border-radius: 0; }
 .preview-body { min-height: 385px; display: grid; grid-template-columns: 170px 1fr; }.preview-body > aside { padding: 20px 13px; display: grid; align-content: start; gap: 6px; border-right: 1px solid var(--line-soft); background: #101217; }.preview-body > aside b { padding: 0 9px 14px; color: #8b82e9; font-size: 12px; }.preview-body > aside span { padding: 8px 9px; border-radius: 7px; color: #606878; font-size: 9px; }.preview-body > aside span.active { color: #bbb5ff; background: #24213a; }.preview-body > main { padding: 21px; background: #13161c; }.preview-title { display: flex; align-items: center; justify-content: space-between; }.preview-title small,.preview-title b { display: block; }.preview-title small { color: #6860b7; font-size: 7px; font-weight: 800; letter-spacing: .15em; }.preview-title b { margin-top: 5px; font-size: 14px; }.preview-title em { color: #676e7c; font-size: 8px; font-style: normal; }.preview-metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 9px; margin-top: 18px; }.preview-metrics > span { min-height: 70px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: #171a21; }.preview-metrics small,.preview-metrics b { display: block; }.preview-metrics small { color: #646c7a; font-size: 8px; }.preview-metrics b { margin-top: 10px; color: #555d6a; font-size: 18px; }.preview-placeholder { min-height: 190px; margin-top: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed #303542; border-radius: 11px; background: #111319; }.preview-placeholder > span { width: 39px; height: 39px; display: grid; place-items: center; border-radius: 11px; color: #8178d6; background: #24213b; font-weight: 800; }.preview-placeholder b { margin-top: 13px; color: #858c99; font-size: 11px; }.preview-placeholder p { margin: 6px 0 0; color: #555d6c; font-size: 8px; }
 
+/* --- P1 資料 view(總覽/Jobs/成本/Memory/Logs;資料來自唯讀 API)--- */
+.data-page { max-width: 1450px; margin: 0 auto; display: grid; gap: 15px; }
+.page-toolbar { display: flex; justify-content: flex-end; }
+.refresh-button { padding: 8px 12px; border: 1px solid #343944; border-radius: 8px; color: #aab0bd; background: #1a1d24; font-size: 10px; font-weight: 800; cursor: pointer; }
+.refresh-button:hover { color: #d8dbe4; border-color: #4a5060; }
+.refresh-button:disabled { opacity: .6; cursor: wait; }
+.panel { border: 1px solid var(--line); border-radius: 14px; background: rgba(21,24,31,.94); overflow: hidden; }
+.panel-head { padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--line-soft); }
+.panel-head h2 { margin: 0; font-size: 14px; }
+.panel-head p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+.panel-body { padding: 16px 18px; display: grid; gap: 14px; }
+.metric-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.metric { flex: 1; min-width: 140px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.metric > span { display: block; color: var(--muted); font-size: 10px; }
+.metric > b { display: block; margin-top: 8px; font-size: 21px; letter-spacing: -.02em; }
+.metric > small { display: block; margin-top: 6px; color: var(--muted-2); font-size: 9px; }
+.table-scroll { overflow-x: auto; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.data-table th { padding: 8px 10px; text-align: left; color: var(--muted-2); background: #111319; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); color: #d8dbe3; white-space: nowrap; }
+.data-table tr:last-child td { border-bottom: 0; }
+.form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.form-field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 9px; }
+.form-field input, .form-field select { padding: 8px 10px; border: 1px solid #343944; border-radius: 8px; color: var(--text); background: #101218; font-size: 11px; }
+.form-field input[type="range"] { padding: 0; min-width: 200px; accent-color: var(--violet); }
+.form-field.grow { flex: 1; min-width: 240px; }
+.form-field.grow input { width: 100%; }
+.code-block { margin: 0; padding: 14px; border: 1px solid #303540; border-radius: 10px; color: #c9cdd7; background: #0b0d11; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; line-height: 1.6; overflow: auto; max-height: 420px; white-space: pre-wrap; word-break: break-all; }
+.log-block { max-height: 560px; }
+.sub-heading { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.error-notice { margin: 0; padding: 12px 14px; border: 1px solid #4a2b31; border-radius: 11px; color: #df8a94; background: #28191d; font-size: 11px; }
+.warn-notice { margin: 0; padding: 12px 14px; border: 1px solid #4d3923; border-radius: 11px; color: #f2b56d; background: #251d14; font-size: 11px; }
+.info-notice { margin: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; color: var(--muted); background: var(--surface-2); font-size: 11px; }
+.bar-chart { display: grid; gap: 8px; }
+.bar-row { display: grid; grid-template-columns: 110px 1fr 90px; gap: 10px; align-items: center; font-size: 11px; color: var(--muted); }
+.bar-track { height: 10px; border-radius: 5px; background: #2c303a; overflow: hidden; }
+.bar-fill { height: 100%; background: linear-gradient(90deg, var(--violet), #a395ff); }
+.bar-row em { font-style: normal; color: #d8dbe3; text-align: right; }
+.file-list { margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.file-list li { padding: 8px 4px; border-bottom: 1px solid var(--line-soft); color: #d8dbe3; }
+.file-list li:last-child { border-bottom: 0; }
+
 @media (max-width: 1100px) {
   .metric-grid { grid-template-columns: repeat(2,1fr); }
   .chat-page { grid-template-columns: 1fr; }.chat-status-panel { display: grid; grid-template-columns: repeat(2,1fr); gap: 0 15px; }.panel-title,.usage-block,.notice-card { grid-column: 1 / -1; }
