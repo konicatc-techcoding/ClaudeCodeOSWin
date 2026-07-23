@@ -52,7 +52,7 @@ bridge 是設計上單向唯讀。要反向讓 CoS 產出進 Hermes 記憶，只
 ## Roadmap
 
 1. **拍板本決策並落檔**（本次，2026-07-23）。
-2. **完成 Hermes→CCOS bridge 部署**（scanner／importer episode 化 + 目前未部署的 timer）＝真正能動的記憶整合，排 **recall-first 之後第一位**。
+2. **完成 Hermes→CCOS bridge 部署**（scanner／importer episode 化 + 目前未部署的 timer）＝真正能動的記憶整合，排 **recall-first 之後第一位**。——**已完成（2026-07-23）**：episode 化 2026-07-12 已啟用，排程權移交 Windows Task Scheduler，見 [[project_bridge-windows-scheduler-deployment]]。
 3. **lane 維持 opt-in**。
 4. **不追反向橋、不強制路由**。
 5. 先前提的「Hermes oneshot 留不留可捕捉 session」spike **可不做**——lane 結果已能經 envelope 進 inbox，不需要靠留 session 來回收 lane 產出。

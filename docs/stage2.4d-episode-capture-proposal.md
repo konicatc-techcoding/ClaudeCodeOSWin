@@ -1,10 +1,11 @@
 # Stage 2.4d — Desktop 長壽 session 的 Episode Capture（設計提案）
 
-日期：2026-07-11　狀態：**設計已核准**——2.4d-1（schema＋repository）**已完成**；
+日期：2026-07-11　狀態：**已完成並部署**——2.4d-1（schema＋repository）／
 2.4d-2（scanner episode 偵測）／2.4d-3（importer episode 化＋recovery）／
-2.4d-4（部署 migration＋驗證）**尚未開始**。本文件現為**已核准的規格正本**
-（不再是待核准提案），後續實作階段的異動仍以本文件對應章節為準；rollout 與
-migration runbook 見第 8 節。
+2.4d-4（部署 migration＋驗證）**全部完成**，episode capture 已於 2026-07-12
+啟用（`episodes.enabled: true`、cutover `2026-07-12T06:36:18Z`）。本文件為
+**已核准的規格正本**，後續異動仍以本文件對應章節為準；rollout 與 migration
+runbook 見第 8 節；部署後現況（含 2026-07-23 排程權移交 Windows）見第 10 節。
 負責領域：`engineering`
 修訂：2026-07-11 第二版——方向已獲使用者核准（暫不開工），依指示補齊三個
 blocker：(1) cursor DB 重建的誠實修正＋recovery 流程（§3.2）；(2) schema v2
@@ -747,8 +748,9 @@ Stage 2.4d 只連結回本節，不重複維護第二份順序。必須依序執
 > 「v1 對齊測試會失敗、但又沒有 migrate 工具可用」的中間態——這比停留在
 > v1 更糟。2.4d-1 必須等到至少 `migrate` CLI、recovery 流程都準備好，且本
 > 節完整 rollout 順序確定後，才能跟 2.4d-2／2.4d-3／2.4d-4 一起、依本節順序
-> 一次下發。**目前 2.4d-1 只存在於 Windows 開發正本與 git 歷史，尚未 sync
-> 到 WSL 部署側**（見第 10 節現況）。
+> 一次下發。**（已解除：2026-07-12 已依本節順序一次下發——已 sync 到 WSL
+> 部署側、部署側 `bridge_state.db` 已跑 `migrate`、`episodes.enabled` 已翻
+> true 啟用**，見第 10 節現況。本警告保留作為 runbook 歷史依據。）
 
 **全程維持「不啟用 importer 排程、不啟用 headless CoS」的方式**：
 
@@ -795,21 +797,25 @@ Stage 2.4d 只連結回本節，不重複維護第二份順序。必須依序執
 
 ---
 
-## 10. 現況（2026-07-12 修訂，取代原「本提案未動的東西」）
+## 10. 現況（2026-07-23 修訂：已部署＋排程權移交 Windows）
 
-本節原為提案階段「未動任何檔案」的宣告；設計核准後 2.4d-1 已實作並 commit，
-以下改為據實記錄目前真正已動／未動的邊界：
+本節原為提案階段「未動任何檔案」的宣告，後改為 2.4d-1 完成時的邊界記錄；
+現依 2026-07-12 部署與 2026-07-23 排程權移交後的實況改寫：
 
-- **已動**：`registry/bridge_state_schema.yaml`（v2，22 欄＋`bridge_cursors`）、
-  `hermes/bridge_state.py`（加欄 DDL、`create_episode`、`migrate` CLI、content
-  hash 純函式等，2.4d-1 範圍）、`hermes/session_adapter/adapter.py`（snapshot
-  一致性補強：fingerprint＋retry＋`quick_check`，前置任務 1）、對應測試檔案。
-  全部已 commit（見文首第四版修訂記錄的 commit hash）。
-- **未動**：`hermes/bridge_scanner.py`、`hermes/bridge_importer.py`（episode
-  相關邏輯尚未實作，2.4d-2/3 範圍）、`hermes/config/bridge.yaml`（尚未新增
-  `episodes` 區塊）、任何 systemd units（不需新增/修改，見第 8 節）。
-- **未新增／啟用任何排程；未接 headless CoS**——這是 Stage 2 既有邊界，
-  2.4d 全程不變（第 8 節「全程維持」小節）。
-- **部署側 `bridge_state.db` 的 3 筆既有記錄原樣未碰**：`migrate` 尚未對
-  部署側執行，這 3 筆記錄仍是 2.4c 當時寫入的原樣（17 欄語義下的內容），
-  尚未補上 v2 五個新欄——`migrate` 執行與部署驗證是 2.4d-4 的工作。
+- **2.4d 全階段（1～4）已完成並部署（2026-07-12）**：`hermes/bridge_scanner.py`
+  ／`hermes/bridge_importer.py` 的 episode 化已實作，`hermes/config/bridge.yaml`
+  已新增 `episodes` 區塊並啟用（`episodes.enabled: true`、cutover
+  `2026-07-12T06:36:18Z`）；部署側 `bridge_state.db` 已依第 8 節 runbook 跑
+  `migrate` 完成 v2 遷移。`memory/inbox/.processed/` 已有真實 episode 落地檔，
+  相關測試（222 測試）全綠。
+- **排程現況（2026-07-23 起）**：bridge 三個 WSL timer
+  （`hermes-bridge-scanner/pipeline/notifier.timer`）已 `disable + mask`
+  （`.service` 保留），排程權移交 Windows Task Scheduler 的 `HermesBridgeDaily`
+  task（每日 08:05，錯過補跑），由 always-on 的 Windows 喚醒 WSL 依序觸發三個
+  `.service`。冷啟實測通過（distro Stopped → 自動 boot → 三 service 各恰好跑
+  一次 → exit 0、零 failed units、masked timer 不雙跑）。第 8 節「timer 必須
+  disabled」的 migration 前置條件，在此排程模型下常態成立。細節見
+  `hermes/systemd/README.md`。
+- **2026-07-23 同日維運記錄**：`reconcile` 對帳 15 筆完成；scanner watermark
+  從卡住的 07-19 推進到 07-23（backlog 約 1471 筆 cron session 清畢，多為
+  too_short 被 importer 排除，0 筆落 inbox、0 Slack 送出）。

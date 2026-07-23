@@ -1,4 +1,6 @@
 # hermes/systemd/hermes-bridge-scanner.timer — Stage 2.4b
+# 2026-07-23 起本 timer 已 disable+mask，排程改由 Windows Task Scheduler
+# `HermesBridgeDaily`（見 hermes/systemd/README.md）。
 # 每天 08:05 觸發一次 scan。時間選擇：落在既有早上批次的空檔——
 #   08:00 hermes-cron-daily-memory-check（inbox 整併）
 #   08:05 hermes-bridge-scanner（本 timer；偵測新完結 session → discovered）

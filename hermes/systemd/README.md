@@ -42,11 +42,42 @@ wsl --shutdown
 - `hermes-telegram.service` — 常駐 telegram 輪詢（等效 `hermes-telegram.plist`）
 - `hermes-rss.service` + `hermes-rss.timer` — 每 30 分鐘觸發一次（等效 `hermes-rss.plist` 的 `StartInterval:1800`）
 - `hermes-cron-daily-memory-check.service` + `.timer` — 每天 08:00 觸發一次（等效同名 plist 的 `StartCalendarInterval`）
-- `hermes-bridge.service` + `.timer` — 每天 08:10 觸發一次（等效 `hermes-bridge.plist`）
-- `hermes-bridge-scanner.service` + `.timer` — 每天 08:05 觸發一次 `bridge_scanner.py scan`（Stage 2.4b 新增，無 launchd 前身）。**只排程 scan**：ExecStart 無參數，走 2.4a 安全預設（effective since ＝ max(config cutover, watermark)），排程一律不帶 `--since`；`reconcile` 是回填/對帳工具，人工或未來 2.4c 串接時才用，**刻意不進排程**。失敗（如 config 缺失）→ unit failed 可觀測，不設 Restart——失敗不推進 watermark，下次觸發從同一下界重掃，不會跳漏
-- `hermes-bridge-pipeline.service` + `.timer` — 每天 08:15 觸發一次（Stage 2.7b 新增，尚未 enable／部署，見 docs/stage2.7-notification-scheduling-proposal.md §9 2.7b）。單一 oneshot service 依序執行 `bridge_importer.py import --limit 10` → `bridge_triage_enqueuer.py enqueue --max-new 5`；任一步驟失敗，後續步驟不執行、unit failed 可觀測（多行 `ExecStart=` 的既有 systemd 語義，不需另寫 wrapper）。旗標固定，排程一律不加其他範圍／dry-run 參數
-- `hermes-bridge-notifier.service` + `.timer` — 每天 08:25 觸發一次 `bridge_notifier.py notify`（Stage 2.7b 新增，尚未 enable／部署）。走預設頻道（`bridge_notifier.py` 的 `DEFAULT_CHANNEL`＝正式頻道 `#agentos`）與預設 send-cli；2.7c 部署驗收時人工帶 `--channel` 覆寫成測試頻道先行驗證，通過後才回到本檔預設。notifier 對 jobs.db 唯讀，失敗（含 `hermes` CLI 不可用）→ fail loud、unit failed，不落 `notification_log`，下輪補送
+- `hermes-bridge.service` + `.timer` — 每天 08:10 觸發一次（等效 `hermes-bridge.plist`；skill-sync，**維持 WSL systemd 管理，不在 2026-07-23 排程權移交範圍內**）
+- `hermes-bridge-scanner.service` + `.timer` — `bridge_scanner.py scan`（Stage 2.4b 新增，無 launchd 前身；**timer 已於 2026-07-23 disable+mask，排程權在 Windows Task Scheduler，見下方「bridge 三件組的排程模型」**）。**只排程 scan**：ExecStart 無參數，走 2.4a 安全預設（effective since ＝ max(config cutover, watermark)），排程一律不帶 `--since`；`reconcile` 是回填/對帳工具，人工才用，**刻意不進排程**。失敗（如 config 缺失）→ unit failed 可觀測，不設 Restart——失敗不推進 watermark，下次觸發從同一下界重掃，不會跳漏
+- `hermes-bridge-pipeline.service` + `.timer` — bridge pipeline（Stage 2.7b 新增，見 docs/stage2.7-notification-scheduling-proposal.md §9 2.7b；**timer 已 disable+mask，排程權在 Windows Task Scheduler，見下**）。單一 oneshot service 依序執行 `bridge_importer.py import --limit 10` → `bridge_triage_enqueuer.py enqueue --max-new 5`；任一步驟失敗，後續步驟不執行、unit failed 可觀測（多行 `ExecStart=` 的既有 systemd 語義，不需另寫 wrapper）。旗標固定，排程一律不加其他範圍／dry-run 參數
+- `hermes-bridge-notifier.service` + `.timer` — `bridge_notifier.py notify`（Stage 2.7b 新增；**timer 已 disable+mask，排程權在 Windows Task Scheduler，見下**）。走預設頻道（`bridge_notifier.py` 的 `DEFAULT_CHANNEL`＝正式頻道 `#agentos`）與預設 send-cli。notifier 對 jobs.db 唯讀，失敗（含 `hermes` CLI 不可用）→ fail loud、unit failed，不落 `notification_log`，下輪補送
 - `install.sh` / `uninstall.sh` — 安裝/移除腳本，用法跟原本 `hermes/launchd/install.sh` 一致，只是底層換成 `systemctl --user`
+
+## bridge 三件組的排程模型（2026-07-23 起）
+
+**排程權已移交 Windows Task Scheduler**：`hermes-bridge-scanner/pipeline/notifier`
+三個 `.timer` 已 `systemctl --user disable` + `mask`（**`.service` 保留**，供
+Windows 觸發或人工 `systemctl --user start` 啟動）。排程本體是 Windows Task
+Scheduler 的 **`HermesBridgeDaily`** task：
+
+- 每日 08:05 觸發；`StartWhenAvailable`（錯過時刻補跑）、
+  `MultipleInstances IgnoreNew`（不重疊）、30 分鐘執行上限
+- 動作：`wsl.exe -d Ubuntu -- bash -lc 'systemctl --user start
+  hermes-bridge-scanner.service ; systemctl --user start
+  hermes-bridge-pipeline.service ; systemctl --user start
+  hermes-bridge-notifier.service'`——由 always-on 的 Windows 喚醒 WSL
+  （distro Stopped 也會自動 boot），三個 service 依序執行
+
+理由：WSL 是 on-demand、不是 always-on，WSL timer 的排定時刻常因 distro
+睡眠被跳過；Windows 才是這台機器真正 always-on 的排程層。冷啟實測已通過
+（distro Stopped → task 觸發 → 自動 boot → 三 service 嚴格序列各恰好跑一次
+→ exit 0、零 failed units）。
+
+**去重三道保險**：(1) timer disable 後不在 `timers.target`，喚醒 distro 不會
+Persistent catch-up；(2) mask 為第二道保險；(3) idempotency（scanner
+watermark／enqueue_once／notification_log）為第三道。
+
+**維運要點**：要改 bridge 排程，去 Windows Task Scheduler 改 `HermesBridgeDaily`
+（不是改 WSL timer）；其他 timer（`hermes-bridge.timer` skill-sync、rss、
+cron-daily-memory-check）**維持 WSL systemd 管理不變**。timer 已 mask 也代表
+「schema migration 前 timer 必須 disabled」的 runbook 前置條件常態成立（見
+docs/stage2.4d-episode-capture-proposal.md §8）。驗證入口：`journalctl --user
+-u hermes-bridge-*` 與 `systemctl --user list-units --failed`。
 
 ## 安裝 / 移除
 
@@ -56,9 +87,9 @@ hermes/systemd/install.sh hermes-telegram                    # 安裝 telegram�
 hermes/systemd/install.sh hermes-rss                          # 安裝 rss（service+timer，每 30 分鐘）
 hermes/systemd/install.sh hermes-cron-daily-memory-check      # 安裝 cron（service+timer，每天 08:00）
 hermes/systemd/install.sh hermes-bridge                       # 安裝 hermes bridge（service+timer，每天 08:10）
-hermes/systemd/install.sh hermes-bridge-scanner               # 安裝 bridge scanner（service+timer，每天 08:05）
-hermes/systemd/install.sh hermes-bridge-pipeline              # 安裝 bridge pipeline（service+timer，每天 08:15，Stage 2.7b，尚未部署）
-hermes/systemd/install.sh hermes-bridge-notifier              # 安裝 bridge notifier（service+timer，每天 08:25，Stage 2.7b，尚未部署）
+hermes/systemd/install.sh hermes-bridge-scanner               # 安裝 bridge scanner（注意：timer 已 mask，排程權在 Windows Task Scheduler，見上節）
+hermes/systemd/install.sh hermes-bridge-pipeline              # 安裝 bridge pipeline（同上：timer 已 mask，勿重新 enable）
+hermes/systemd/install.sh hermes-bridge-notifier              # 安裝 bridge notifier（同上：timer 已 mask，勿重新 enable）
 
 hermes/systemd/uninstall.sh                                   # 預設移除 worker
 hermes/systemd/uninstall.sh hermes-telegram                   # 移除 telegram

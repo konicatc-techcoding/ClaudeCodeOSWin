@@ -1,4 +1,6 @@
 # hermes/systemd/hermes-bridge-notifier.timer — Stage 2.7b
+# 2026-07-23 起本 timer 已 disable+mask，排程改由 Windows Task Scheduler
+# `HermesBridgeDaily`（見 hermes/systemd/README.md）。
 # 每天 08:25 觸發一次 notify。時間選擇：pipeline（08:15）之後 10 分鐘，
 # 讓「當日新候選在同一個早上批次內完成產生→通知」（提案 §4.2）。
 #

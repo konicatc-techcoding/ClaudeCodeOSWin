@@ -1,4 +1,6 @@
 # hermes/systemd/hermes-bridge-pipeline.timer — Stage 2.7b
+# 2026-07-23 起本 timer 已 disable+mask，排程改由 Windows Task Scheduler
+# `HermesBridgeDaily`（見 hermes/systemd/README.md）。
 # 每天 08:15 觸發一次 pipeline（import → enqueue）。時間選擇：scanner
 # （08:05）之後 10 分鐘，沿用既有「相鄰 timer 至少隔 5 分鐘」慣例並留
 # 餘裕（提案 §4.1）。scanner 與本 timer 之間刻意不做 systemd 依賴鏈——

@@ -3,13 +3,14 @@
 **版本**：v0.1
 **里程碑**：`v0.1-alpha`（2026-07-04，穩定基線）— 詳細範圍與下一步見 [ROADMAP.md](ROADMAP.md)
 **狀態**：介面設計已定案，實作涵蓋 v0.1-alpha 範圍（見文末「v0.1 實作範圍」）
-**最後更新**：2026-07-21
+**最後更新**：2026-07-23
 
 > **部署環境註記（2026-07-09）**：目標環境是 **Windows/WSL2**。常駐服務（worker、
 > Telegram、RSS、cron timer）跑在 WSL2 側的 `systemd --user`（`hermes/systemd/`）；
 > 文末「v0.1 實作範圍」提到的 launchd 部署是 v0.1-alpha 當時 macOS 環境的驗證記錄，
-> `hermes/launchd/` 僅保留為 legacy/reference。Windows 側 bridge／Task Scheduler
-> 是未來選項（Stage 2 設計決策），尚未實作。見 [WINDOWS_WSL_SETUP.md](WINDOWS_WSL_SETUP.md)。
+> `hermes/launchd/` 僅保留為 legacy/reference。2026-07-23 起 bridge 三個 timer 的
+> 排程權已移交 Windows Task Scheduler（`HermesBridgeDaily`，見 4.2 節），其餘
+> 常駐服務與 timer 仍由 WSL2 systemd 管理。見 [WINDOWS_WSL_SETUP.md](WINDOWS_WSL_SETUP.md)。
 
 ## 總覽
 
@@ -119,8 +120,11 @@ Hermes（Desktop／CLI／TUI）的 session 是**可長期復用的上下文容�
 各自獨立、互不追溯）；`ended_at`、閒置門檻、使用者手動 archive 都只是「該不該
 切一刀」的 trigger，跟「session 有沒有結束」解耦。這條管線目前落在
 `hermes/bridge_state.py`（repository 層，`claudecodeos.bridge_state.v2`）與
-`hermes/bridge_scanner.py`／`hermes/bridge_importer.py`（偵測與落地）；schema
-與 repository 層已完成，scanner／importer 的 episode 化與部署仍在進行中。細節
+`hermes/bridge_scanner.py`／`hermes/bridge_importer.py`（偵測與落地）；schema、
+repository 層與 scanner／importer 的 episode 化**均已完成並部署**（2026-07-12
+episode capture 啟用：`hermes/config/bridge.yaml` `episodes.enabled: true`、
+cutover `2026-07-12T06:36:18Z`，`memory/inbox/.processed/` 已有真實 episode
+落地檔）。細節
 見 [docs/memory-bridge-state.md](docs/memory-bridge-state.md) 與
 [docs/stage2.4d-episode-capture-proposal.md](docs/stage2.4d-episode-capture-proposal.md)
 （已核准設計正本），本節只作概念摘要、不重複維護欄位定義。
@@ -130,11 +134,21 @@ Hermes（Desktop／CLI／TUI）的 session 是**可長期復用的上下文容�
 Windows Hermes（`%LOCALAPPDATA%\hermes\state.db`）是唯一 Source of Truth；bridge
 本身（scanner/importer/repository）跑在 **WSL 部署側**，經 snapshot／唯讀路徑讀取，
 絕不寫回 Hermes 原始資料（見 [docs/hermes-shared-storage-bootstrap.md](docs/hermes-shared-storage-bootstrap.md)）。
-`hermes-bridge-scanner.timer` 已部署為 WSL2 systemd 常駐 timer（每日 08:05）；但
-**目前的 WSL 開發環境是 on-demand，不是 always-on production**——互動 session
-手動用 `wsl.exe` 喚醒才會執行，distro 不常駐開機。這與 timer 的
-`Persistent=true` 行為要分開理解：排定時刻若 distro 睡眠會被跳過，等下次手動
-喚醒時才 catch-up 補跑一次，不代表每天固定時刻真的有人在跑。細節見
+**排程模型（2026-07-23 起）**：bridge 三個 WSL timer
+（`hermes-bridge-scanner/pipeline/notifier.timer`）已 `disable + mask`
+（`.service` 保留），排程權移交 **Windows Task Scheduler** 的
+`HermesBridgeDaily` task（每日 08:05，`StartWhenAvailable` 錯過補跑、
+`MultipleInstances IgnoreNew`、30 分鐘上限）——由 always-on 的 Windows 用
+`wsl.exe -d Ubuntu -- bash -lc 'systemctl --user start …scanner ; …pipeline ;
+…notifier'` 喚醒 WSL、依序觸發三個 `.service`（冷啟實測通過：distro Stopped
+→ task 觸發 → 自動 boot → 三 service 嚴格序列各恰好跑一次 → exit 0、零
+failed units）。這解決了先前「WSL 是 on-demand、不是 always-on production，
+排定時刻 distro 睡眠會被跳過、只能靠下次手動喚醒 catch-up」的結構性缺口。
+去重三道保險：timer disable 後不在 timers.target（喚醒 distro 不會
+Persistent catch-up）、mask 為第二道、idempotency（watermark／enqueue_once／
+notification_log）為第三道。**其他 timer（skill-sync 的 `hermes-bridge.timer`、
+rss、cron-daily-memory-check）維持 WSL systemd 管理不變**——只移交 bridge
+三個。細節見
 [hermes/README.md](hermes/README.md) 與
 [memory/project_v0_1_status.md](memory/project_v0_1_status.md) 最新一條記錄。
 
