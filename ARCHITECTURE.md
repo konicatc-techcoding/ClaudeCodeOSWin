@@ -145,6 +145,19 @@ Execution Router，見下方 5.1 節），兩者角色不對稱（一個是資�
 執行後端），不要混為同一條管線。完整背景與完工紀錄見
 [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md) Stage 4 節。
 
+**分工定調（2026-07-23 拍板）**：承上不對稱性，這裡明確 Hermes 相對 ClaudeCodeOS（CCOS）
+的角色——**Hermes 是記憶的「來源之一」（唯讀、單向 Hermes→CCOS）＋ opt-in 執行後端
+（經 profile 憑證存取非 Claude 模型，見 5.1），不是記憶正本**；**記憶正本與 recall 都在
+CCOS**（`memory/*.md` + `MEMORY.md`，只有互動式 session／consolidation 能寫，見第 4 節開頭）。
+四條寫入路徑——互動 CoS 產出（直接寫正本）、headless CoS 產出（→ `inbox/`）、
+**lane 執行結果（經回傳 JSON envelope → `inbox/`，不必碰 Hermes 記憶）**、Hermes session
+（唯讀 bridge → `inbox/`）——最終全經 consolidation 併入同一份 CCOS 正本，由 recall 檢索
+（recall 只查 CCOS 正本，不查 Hermes 側 FTS5）。**不建反向橋（CCOS→Hermes 記憶）**：反向
+要嘛寫 Hermes 第三方 DB（違反「絕不直寫、絕不建第二份」）、要嘛全走留 `ended_at` 的 Hermes
+session（吃成本且抓不到 CoS 自己的推理），故資料流維持單向。治理結論見
+[docs/memory-taxonomy.md](docs/memory-taxonomy.md) §7.2，完整決策見
+[memory/project_cos-hermes-division-of-labor.md](memory/project_cos-hermes-division-of-labor.md)。
+
 ## 5. Agent Registry 與 Model Router
 
 **Agent Registry** = Claude Code 原生 subagents（`.claude/agents/*.md`），`registry/agents.yaml` 是加在上面的中繼資料，供 CoS／Hermes 查詢路由對象與狀態。CoS 的工作只是查表、挑 `subagent_type`、呼叫 `Agent` 工具。
@@ -160,6 +173,8 @@ Execution Router，見下方 5.1 節），兩者角色不對稱（一個是資�
 `route_model.py` 只解析 `model_router.yaml` 的 `via`（目前全部是 `native`），本身不會呼叫 Hermes。`scripts/dispatch_domain.py`（Phase 1，Phase 2d 起四條 `hermes-*` lane 皆 `status: active`）是另一條、subagent 可自行選用的執行通道：查 `registry/capability_lanes.yaml`，可用 `--capability` 自動選路（只挑 `status: active` 的 lane）或 `--lane` 明確指定 Hermes profile，執行後回傳單一 JSON envelope。這是**可選手段**，不是新的預設行為——`engineering`／`intelligence` 的 `default_capability` 仍是 `claude_native`，是否使用、何時使用仍由 subagent 當下判斷（比照它們既有對 `route_model.py` 的判斷方式）。目前只有 `.claude/agents/engineering.md`（`complex_coding` → `hermes-nemocoding`／`hermes-gptcoding`）與 `.claude/agents/intelligence.md`（`bulk_research` → `hermes-financialresearch`／`hermes-intelligence`）的 `allowed_agents` 接得到現有 lane；`automation`／`knowledge`／`planning` 目前不在任何 `hermes-*` lane 的 `allowed_agents` 內，沒有東西好接。
 
 五個 Hermes profile（`default`／`gptcoding`／`nemocoding`／`financialresearch`／`intelligence`）2026-07-20～21 已完成各自獨立的 openai-codex OAuth 憑證登入，不再共用同一顆會輪替失效的 refresh token；「依任務類型（而非整個 domain）自動選 lane」的規則引擎目前不存在，屬未排程的未來功能（見 `memory/hermes-task-category-model-routing-preference.md`）。完整完工紀錄、關鍵決策與安全事故記錄見 [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md) Stage 4 節。
+
+**執行分工定調（2026-07-23）**：預設執行＝CoS native（Claude Code loop）；Hermes lane 是 **opt-in**，只在任務**確實需要非 Claude 模型**時才用，**不強制路由、不為沒有「非 Claude 模型理由」的領域建 lane**——Hermes 真正差異化的執行價值就是「經 profile 憑證存取非 Claude 模型」。這與上段「是否使用、何時使用由 subagent 當下判斷」一致，另見 4.2.1 分工定調與 [memory/project_cos-hermes-division-of-labor.md](memory/project_cos-hermes-division-of-labor.md)。
 
 ---
 
