@@ -48,6 +48,79 @@ export const LOG_FILES = [
   "rss_adapter.log",
 ] as const;
 
+// --- P2:Stage 3 三項觀測功能(dashboard/data_stage3.py,全部唯讀)---
+
+// capability_lanes.yaml 已 commit 進 git,全部欄位皆公開治理資料
+export type CapabilityLane = {
+  id?: string;
+  capability?: string;
+  execution?: string;
+  provider?: string;
+  model?: string | null;
+  hermes_profile?: string;
+  status?: string;
+  cost_tier?: string;
+  risk_tier?: string;
+  allowed_agents?: string[];
+  intended_use?: string;
+  guardrails?: unknown;
+  // 實際生效模型(資料層由 profile/全域 config.yaml 的 model 白名單值標注;
+  // registry 的 model 欄位刻意為 null,不是生效值)
+  effective_model?: string;
+  effective_model_source?: "native" | "profile" | "global" | "unknown";
+  effective_provider?: string | null;
+} & Record<string, unknown>;
+
+// 憑證 entry:只會有資料層白名單的六個欄位(stage3 提案 §3.2)
+export type CredentialEntry = {
+  id: string | null;
+  priority: number | null;
+  last_status: string | null;
+  last_refresh: string | null;
+  source: string | null;
+  label: string | null;
+};
+
+export type CredentialProfile = {
+  auth_json_exists: boolean;
+  error?: string;
+  mtime?: string | null;
+  providers?: string[];
+  credential_pool?: Record<string, { entry_count: number; entries: CredentialEntry[] }>;
+};
+
+export type CredentialStatus = {
+  available: boolean;
+  reason?: string;
+  profiles: Record<string, CredentialProfile>;
+};
+
+export type ScheduleRow = {
+  source: "systemd" | "hermes-native";
+  job_name: string;
+  schedule_expr: string;
+  deployed: boolean | string;
+  timer_active: string;
+  last_result: string;
+  next_trigger: string;
+  last_trigger: string;
+  model_drift: "aligned" | "DRIFTED" | "n/a";
+  drift_cost_direction: string | null;
+};
+
+export type HermesSession = {
+  session_id: string;
+  session_source: string;
+  title: string | null;
+  model: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  message_count: number | null;
+};
+
+// 與 HermesSessionAdapter 的 session_source 值域一致
+export const SESSION_SOURCES = ["cli", "tui", "telegram", "cron"] as const;
+
 export class ApiError extends Error {
   constructor(
     public status: number,

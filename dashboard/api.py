@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""dashboard/api.py — P1 唯讀 API(提案 docs/webui-migration-proposal.md §2.2 選項 A)。
+"""dashboard/api.py — P1+P2 唯讀 API(提案 docs/webui-migration-proposal.md §2.2 選項 A)。
 
 把既有 dashboard/data.py 的唯讀函式群包成 localhost-only 的 HTTP JSON API,
-給 webui/(純 Vite + React SPA)取數。三鐵律的技術強制(提案 §3.1–§3.4):
+給 webui/(純 Vite + React SPA)取數。P2 起額外曝露 dashboard/data_stage3.py
+的 Stage 3 三項唯讀函式(capability-lanes/credential-status/schedule-table/
+hermes/sessions)。三鐵律的技術強制(提案 §3.1–§3.4):
 
 - **localhost-only(§3.1)**:bind 寫死 `API_HOST = "127.0.0.1"`——
   `create_server()` 沒有 host 參數,CLI 也沒有 host 選項;不是「預設
@@ -11,7 +13,8 @@
 - **技術強制 read-only(§3.2)**:HTTP 層全域攔截——只有 `do_GET` 存在,
   其他任何 method(POST/PUT/DELETE/PATCH/OPTIONS/…)經 `__getattr__`
   一律回 405,不是逐 endpoint 記得擋。模組層只 import stdlib 與
-  dashboard/data.py、dashboard/redact.py,**不 import** hermes/db.py、
+  dashboard/data.py、dashboard/data_stage3.py、dashboard/redact.py,
+  **不 import** hermes/db.py、
   hermes/bridge_dispatch.py、cron.jobs 等任何含寫入函式的模組
   (test_api.py 有 import guard 測試以 AST 白名單鎖定)。SQLite 層沿用
   data.py 的 mode=ro。
@@ -38,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import data  # noqa: E402
+import data_stage3  # noqa: E402(P2:Stage 3 三項唯讀函式,見 data_stage3.py)
 import redact  # noqa: E402
 
 API_HOST = "127.0.0.1"  # 鐵律:寫死,無參數化入口(提案 §3.1)
@@ -168,6 +172,21 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
             return 200, data.get_domain_status()
         if path == "/api/adapter-config":
             return 200, data.get_adapter_config_status()
+        # --- P2:Stage 3 三項觀測功能(data_stage3.py,全部唯讀)---
+        if path == "/api/capability-lanes":
+            return 200, data_stage3.get_capability_lane_status()
+        if path == "/api/credential-status":
+            # 白名單+輸出前掃描在 data_stage3 內完成;_send_json 的第三道
+            # 掃描(§3.4)仍照常套用——縱深防禦,不互相取代。
+            return 200, data_stage3.get_hermes_credential_status()
+        if path == "/api/schedule-table":
+            return 200, data_stage3.get_cron_schedule_table()
+        if path == "/api/hermes/sessions":
+            limit = _query_int(query, "limit", 200, 1, 1000)
+            source = query.get("source", [None])[0]
+            if source is not None and not _SOURCE_RE.match(source):
+                raise ApiError(400, "source 格式不正確")
+            return 200, data_stage3.get_hermes_sessions(source=source, limit=limit)
         if path.startswith("/api/logs/"):
             name = path[len("/api/logs/"):]
             if ".." in name or not _LOG_NAME_RE.match(name):

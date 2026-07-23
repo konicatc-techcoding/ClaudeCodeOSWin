@@ -1,6 +1,8 @@
-# Dashboard — v0.1
+# Dashboard — v0.1(**deprecated,並行觀察期中**)
 
-> **P1 並存狀態(2026-07-23,見 `docs/webui-migration-proposal.md`)**:新 Web UI(`webui/`)已達成與本 dashboard 的功能對等,經唯讀 API `dashboard/api.py`(bind `127.0.0.1:8799`、只有 GET、序列化前過 `redact.py` 憑證掃描;測試 `test_api.py`)取數。本 Streamlit dashboard **維持現狀可用、零改動**,退役時點依提案 §4.3 DoD 第 4 項(P2 驗收後才標 deprecated 並進入並行觀察期)。
+> **P2 完成,本 dashboard 標記 deprecated(2026-07-23,見 `docs/webui-migration-proposal.md` §4.3 DoD 第 4 項)**:新 Web UI(`webui/`)已完成 P1 功能對等+P2 Stage 3 三項觀測功能(憑證/Lane 狀態、統一排程健康表+模型漂移旗標、Hermes session 列表,資料層見 `dashboard/data_stage3.py`,經唯讀 API `dashboard/api.py` 曝露)。本 Streamlit dashboard 進入**並行觀察期**:並行一個自然使用週期、期間零維護只讀,觀察期滿後再實際移除。日常使用請改用 `webui/`(啟動方式見 `webui/README.md`)。
+>
+> **P1 並存紀錄(2026-07-23)**:新 Web UI 經唯讀 API `dashboard/api.py`(bind `127.0.0.1:8799`、只有 GET、序列化前過 `redact.py` 憑證掃描;測試 `test_api.py`)取數,達成與本 dashboard 的功能對等。
 
 Localhost-only、read-only 的系統狀態檢視。不提供任何修改/刪除/重跑 job 的操作——這是刻意的範圍限制。手動啟動，不是常駐服務（沒有裝進 `hermes/systemd/`，也不曾裝進舊環境的 launchd）。
 

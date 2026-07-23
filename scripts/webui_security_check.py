@@ -268,7 +268,14 @@ def check_sensitive_data(_: str) -> tuple[bool, list[str]]:
         (r"sk-[A-Za-z0-9]{20,}", "疑似 OpenAI key"),
         (r"xox[bap]-[A-Za-z0-9-]{10,}", "疑似 Slack token"),
         (r"AKIA[0-9A-Z]{16}", "疑似 AWS key"),
-        (r"auth\.json", "引用真實憑證檔"),
+        # P2 更新(2026-07-23):功能二「憑證/Lane 狀態」上線後,webui 的
+        # 說明文字/註解會合法「提及」auth.json(UI 本身零檔案存取,取數只有
+        # fetch 唯讀 API 一條路,§3.3 鐵律)。因此本項判準從「出現字樣」收斂
+        # 為「同一行出現檔案系統存取呼叫」——原意(webui 不得實際讀取憑證檔)
+        # 不變,涵蓋面不縮水。
+        (r"(?:readFile|readFileSync|createReadStream|fs\.[A-Za-z]+|open)\([^)\n]*auth\.json"
+         r"|auth\.json[^\n]*(?:readFile|readFileSync|createReadStream)",
+         "檔案系統存取真實憑證檔"),
     ]
     findings: list[str] = []
     for path in iter_source_files():

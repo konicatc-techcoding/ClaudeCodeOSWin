@@ -10,6 +10,7 @@ import {
   type SystemdStatus,
 } from "../api";
 import { ErrorNotice, InfoNotice, Metric, Panel, RefreshButton, useApiData, WarnNotice } from "./common";
+import SchedulePanel from "./Schedule";
 
 // 與 dashboard/app.py 的 SYSTEMD_LABELS 一致
 const SYSTEMD_LABELS: ReadonlyArray<readonly [string, string]> = [
@@ -72,6 +73,11 @@ export default function Overview() {
               })}
             </div>
           </Panel>
+
+          {/* P2 功能三:統一排程健康表(stage3 提案 §4.3——併入總覽,
+              與上方 SYSTEMD_LABELS 摘要卡片互補,不取代)。獨立取數:
+              排程表 API 失敗不影響本頁其他區塊(兩路徑獨立退化精神)。 */}
+          <SchedulePanel />
 
           <Panel
             title="Adapter 設定狀態"

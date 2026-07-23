@@ -67,8 +67,49 @@ cd .. && .venv/Scripts/python.exe dashboard/api.py   # http://127.0.0.1:8799
 
 每個回應在序列化前統一過 `dashboard/redact.py` 的遞迴憑證掃描(§3.4
 第三道防線,P1 先立防線給 P2 用)。測試:
-`.venv/Scripts/python.exe dashboard/test_api.py`(31 條:CORS/403、405、
+`.venv/Scripts/python.exe dashboard/test_api.py`(CORS/403、405、
 import guard AST 白名單、bind 檢核、bot_token 不外洩、endpoint 行為)。
+
+## P2:Stage 3 三項觀測功能(2026-07-23,設計正本 stage3 提案 v2 §2–§4)
+
+資料層在 **`dashboard/data_stage3.py`**(新模組;`data.py`/`app.py` 零改動,
+路徑 A 複用 `data.get_systemd_status()`),endpoint:
+
+| Endpoint | data_stage3.py 函式 | view |
+|---|---|---|
+| `/api/capability-lanes` | `get_capability_lane_status()` | 憑證/Lane 狀態 |
+| `/api/credential-status` | `get_hermes_credential_status()` | 憑證/Lane 狀態 |
+| `/api/schedule-table` | `get_cron_schedule_table()` | 總覽(排程表區塊) |
+| `/api/hermes/sessions?source&limit` | `get_hermes_sessions()` | Hermes Sessions |
+
+**安全邊界(P2 新增的外部讀取路徑與唯讀邊界)**:
+
+- 新增唯讀讀取路徑:`%LOCALAPPDATA%\hermes\state.db`(經
+  `HermesSessionAdapter(snapshot=True)`,mode=ro + `PRAGMA query_only`)、
+  各 profile `auth.json`(**白名單欄位抽取**,見下)、
+  `%LOCALAPPDATA%\hermes\cron\jobs.json` 與各 profile cron store
+  (純檔案讀取,不 import 任何 cron 寫入函式)、全域與各 profile 的
+  `config.yaml`(**只抽 `model.default`/`model.provider` 兩個非敏感
+  設定值**——供漂移比對與 lane 表「實際生效模型」欄;其他區塊一律
+  不外流)。
+- **憑證頁絕不顯示憑證值**:entry 只抽
+  `id/priority/last_status/last_refresh/source/label` 六個白名單欄位
+  (組新 dict,原始 dict 不出函式作用域);頂層 `providers` 只取名稱清單;
+  `suppressed_sources` 不讀取。三道防線:資料層白名單+輸出前掃描
+  (`redact.py` 共用正本)→ API 序列化前掃描 → UI 欄位白名單
+  (禁止泛型 JSON dump)+不可移除警語。
+- **模型漂移旗標只偵測、只標示**(aligned/DRIFTED/n/a+花費方向):
+  絕無任何 pin/對齊/修復的寫入入口(花費保護 #44585 不被繞過)。
+- **session 列表不含訊息內容**:回傳結構遞迴不含 `content`,也不含
+  metadata 的 `session_key`/`chat_id`;不做「點進去看對話全文」。
+
+三層假密鑰斷言測試(fixture 一律 `FAKE_`/`TEST_` 前綴+tempfile 隔離):
+
+```bash
+.venv/Scripts/python.exe dashboard/test_data_stage3.py  # 資料層(白名單/掃描/退化/漂移三情境)
+.venv/Scripts/python.exe dashboard/test_api.py          # API 回應全文層
+npm test                                                # UI 渲染層(tests/stage3-render.test.mjs,rolldown+react-dom/server)
+```
 
 ## Local Bridge 安全規格(2026-07-23 使用者核准的最小寫入例外)
 

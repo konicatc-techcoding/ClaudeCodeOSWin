@@ -22,6 +22,7 @@ fixture 說明:跟 test_data.py 同款——用暫存目錄與 hermes/db.py 建�
 import ast
 import inspect
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -34,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hermes"))
 import api  # noqa: E402
 import data  # noqa: E402
+import data_stage3  # noqa: E402
 import db  # noqa: E402
 import redact  # noqa: E402
 
@@ -41,6 +43,8 @@ DASHBOARD_DIR = Path(__file__).resolve().parent
 
 # 假密鑰 fixture:一律 FAKE_ 前綴,絕不使用真實值(提案 §3.4)
 FAKE_BOT_TOKEN = "FAKE_1234567890_AbCdEfGhIjKlMnOpQrStUvWxYz_TEST_ONLY"
+FAKE_P2_ACCESS_TOKEN = "FAKE_SECRET_api_access_abc123456"
+FAKE_P2_REFRESH_TOKEN = "FAKE_SECRET_api_refresh_zyx98765"
 
 
 class ApiServerTestCase(unittest.TestCase):
@@ -173,7 +177,7 @@ class ImportGuardTests(unittest.TestCase):
     # 想加東西?先想清楚它有沒有寫入能力,再來改這份白名單。
     ALLOWED_IMPORTS = {
         "argparse", "json", "re", "sys", "urllib.parse",
-        "http.server", "pathlib", "data", "redact",
+        "http.server", "pathlib", "data", "data_stage3", "redact",
     }
     # 已知寫入模組(防守性斷言;白名單本來就擋掉它們,雙保險)
     FORBIDDEN = {
@@ -380,6 +384,174 @@ class EndpointBehaviorTests(ApiServerTestCase):
         self.assertEqual(status, 404)
         status, _, _ = self._request("/")
         self.assertEqual(status, 404)
+
+
+class Stage3EndpointTests(ApiServerTestCase):
+    """P2:Stage 3 四個新 endpoint(webui-migration §4.3)。
+
+    三層假密鑰斷言的「API 回應全文」層在這裡——data 層在
+    test_data_stage3.py、UI 渲染層在 webui/tests/stage3-render.test.mjs。
+    fixture 全部 FAKE_/TEST_ 前綴+tempfile 隔離,不觸碰真實
+    %LOCALAPPDATA%\\hermes\\。"""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_stage3 = {
+            "hermes_home": data_stage3.HERMES_HOME,
+            "lanes": data_stage3.CAPABILITY_LANES_PATH,
+            "systemd_dir": data_stage3.SYSTEMD_UNIT_DIR,
+            "state_db": data_stage3.HERMES_STATE_DB,
+        }
+        self.hermes_home = self._tmpdir / "fake_hermes_home"
+        self.hermes_home.mkdir()
+        data_stage3.HERMES_HOME = self.hermes_home
+        data_stage3.CAPABILITY_LANES_PATH = self._tmpdir / "capability_lanes.yaml"
+        data_stage3.SYSTEMD_UNIT_DIR = self._tmpdir / "systemd_units"
+        data_stage3.HERMES_STATE_DB = self._tmpdir / "state.db"
+
+    def tearDown(self):
+        data_stage3.HERMES_HOME = self._orig_stage3["hermes_home"]
+        data_stage3.CAPABILITY_LANES_PATH = self._orig_stage3["lanes"]
+        data_stage3.SYSTEMD_UNIT_DIR = self._orig_stage3["systemd_dir"]
+        data_stage3.HERMES_STATE_DB = self._orig_stage3["state_db"]
+        super().tearDown()
+
+    def _write_fake_auth(self):
+        (self.hermes_home / "auth.json").write_text(json.dumps({
+            "version": 1,
+            "providers": {"fake-provider": {"access_token": FAKE_P2_ACCESS_TOKEN}},
+            "credential_pool": {"fake-provider": [{
+                "id": "FAKE-entry-1", "label": "TEST_label", "priority": 1,
+                "source": "TEST_source", "last_status": "ok",
+                "last_refresh": "2026-07-23T00:00:00Z",
+                "access_token": FAKE_P2_ACCESS_TOKEN,
+                "refresh_token": FAKE_P2_REFRESH_TOKEN,
+            }]},
+        }), encoding="utf-8")
+
+    def test_capability_lanes_endpoint(self):
+        data_stage3.CAPABILITY_LANES_PATH.write_text(
+            "lanes:\n  - id: test-lane\n    capability: c\n    status: active\n",
+            encoding="utf-8",
+        )
+        payload = self._get_json("/api/capability-lanes")
+        # registry 欄位原樣+資料層標注的實際生效模型欄位(無 hermes_profile → native)
+        self.assertEqual(payload, [{
+            "id": "test-lane", "capability": "c", "status": "active",
+            "effective_model": "(native session)",
+            "effective_model_source": "native",
+            "effective_provider": None,
+        }])
+
+    def test_capability_lanes_effective_model_from_profile_config(self):
+        data_stage3.CAPABILITY_LANES_PATH.write_text(
+            "lanes:\n  - id: lane-p\n    capability: c\n    model: null\n"
+            "    hermes_profile: fakeprof\n",
+            encoding="utf-8",
+        )
+        config_path = self.hermes_home / "profiles" / "fakeprof" / "config.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            "model:\n  default: FAKE-model-api\n  provider: FAKE-prov\n"
+            "slack:\n  bot_token: FAKE_SECRET_cfg_token_111222\n",
+            encoding="utf-8",
+        )
+        status, _, body = self._request("/api/capability-lanes")
+        self.assertEqual(status, 200)
+        self.assertNotIn("FAKE_SECRET_cfg_token_111222", body)  # 回應全文不含非白名單值
+        payload = json.loads(body)
+        self.assertEqual(payload[0]["effective_model"], "FAKE-model-api")
+        self.assertEqual(payload[0]["effective_model_source"], "profile")
+
+    def test_credential_status_full_response_never_contains_fake_secrets(self):
+        """功能二 DoD 第 2 項的 API 層版本:回應「全文」不含假秘密值子字串。"""
+        self._write_fake_auth()
+        status, _, body = self._request("/api/credential-status")
+        self.assertEqual(status, 200)
+        self.assertNotIn(FAKE_P2_ACCESS_TOKEN, body)
+        self.assertNotIn(FAKE_P2_REFRESH_TOKEN, body)
+        payload = json.loads(body)
+        self.assertTrue(payload["available"])
+        entry = payload["profiles"]["(global-root)"]["credential_pool"]["fake-provider"]["entries"][0]
+        self.assertEqual(entry["label"], "TEST_label")
+        self.assertNotIn("access_token", entry)
+
+    def test_schedule_table_endpoint(self):
+        data_stage3.SYSTEMD_UNIT_DIR.mkdir()
+        (data_stage3.SYSTEMD_UNIT_DIR / "hermes-test.timer").write_text(
+            "[Timer]\nOnCalendar=*-*-* 08:10:00\nUnit=hermes-test.service\n",
+            encoding="utf-8",
+        )
+        (self.hermes_home / "cron").mkdir()
+        (self.hermes_home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{
+            "id": "FAKE-j1", "name": "TEST_job", "no_agent": False,
+            "model": None, "model_snapshot": None, "enabled": True,
+            "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+            "prompt": "FAKE_PROMPT_MUST_NOT_LEAK",
+        }]}), encoding="utf-8")
+        status, _, body = self._request("/api/schedule-table")
+        self.assertEqual(status, 200)
+        self.assertNotIn("FAKE_PROMPT_MUST_NOT_LEAK", body)
+        rows = json.loads(body)
+        sources = {row["source"] for row in rows}
+        self.assertEqual(sources, {"systemd", "hermes-native"})
+        for row in rows:
+            for field in ["job_name", "schedule_expr", "deployed", "timer_active",
+                          "last_result", "next_trigger", "last_trigger",
+                          "model_drift", "drift_cost_direction"]:
+                self.assertIn(field, row)
+
+    def test_hermes_sessions_endpoint_no_content_leak(self):
+        """功能一:API 回應全文不含訊息內容/路由中繼資料。"""
+        conn = sqlite3.connect(data_stage3.HERMES_STATE_DB)
+        try:
+            conn.executescript(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL,"
+                " user_id TEXT, model TEXT, started_at REAL NOT NULL, ended_at REAL,"
+                " end_reason TEXT, message_count INTEGER DEFAULT 0, title TEXT,"
+                " session_key TEXT, chat_id TEXT, chat_type TEXT, thread_id TEXT,"
+                " parent_session_id TEXT, archived INTEGER NOT NULL DEFAULT 0);"
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,"
+                " tool_call_id TEXT, tool_calls TEXT, tool_name TEXT,"
+                " timestamp REAL NOT NULL, finish_reason TEXT, token_count INTEGER,"
+                " active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0);"
+            )
+            conn.execute(
+                "INSERT INTO sessions (id, source, started_at, message_count, title,"
+                " session_key, chat_id) VALUES ('TEST_s1', 'cli', 1783500000.0, 1,"
+                " 'TEST 標題', 'FAKE_skey_1', 'FAKE_chat_1')")
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES"
+                " ('TEST_s1', 'user', 'FAKE_MESSAGE_BODY_MUST_NOT_LEAK', 1783500001.0)")
+            conn.commit()
+        finally:
+            conn.close()
+        status, _, body = self._request("/api/hermes/sessions")
+        self.assertEqual(status, 200)
+        self.assertNotIn("FAKE_MESSAGE_BODY_MUST_NOT_LEAK", body)
+        self.assertNotIn("FAKE_skey_1", body)
+        self.assertNotIn("FAKE_chat_1", body)
+        sessions = json.loads(body)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["session_id"], "TEST_s1")
+        self.assertEqual(sessions[0]["title"], "TEST 標題")
+        # source 篩選與參數驗證
+        self.assertEqual(self._get_json("/api/hermes/sessions?source=telegram"), [])
+        status, _, _ = self._request("/api/hermes/sessions?source=a%20b")
+        self.assertEqual(status, 400)
+        status, _, _ = self._request("/api/hermes/sessions?limit=0")
+        self.assertEqual(status, 400)
+
+    def test_hermes_sessions_missing_db_returns_empty(self):
+        data_stage3.HERMES_STATE_DB = self._tmpdir / "missing" / "state.db"
+        self.assertEqual(self._get_json("/api/hermes/sessions"), [])
+
+    def test_stage3_endpoints_reject_non_get(self):
+        for path in ["/api/capability-lanes", "/api/credential-status",
+                     "/api/schedule-table", "/api/hermes/sessions"]:
+            status, _, _ = self._request(path, method="POST")
+            self.assertEqual(status, 405, path)
 
 
 if __name__ == "__main__":
