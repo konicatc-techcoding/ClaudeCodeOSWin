@@ -66,6 +66,15 @@ CoS → 主動呼叫出去執行 Hermes」），故獨立列階，不掛在 Stag
 **排列順序提醒**：Stage 4 依使用者裁示排在文件順序中 Stage 3 之後，但 Stage 4
 實際完成時間點在 Stage 3 開工之前——這純屬文件排列順序（配合「反方向」的
 分類理由），不代表 Stage 4 依賴 Stage 3、也不代表兩者有時間先後關係。
+**更新（2026-07-23）**：新增 **Stage 5 — Web UI 遷移（Dashboard 全面轉移）**
+——使用者拍板推翻 stage3 提案 v2 §0.1「不另開新入口」，dashboard 觀測功能
+全面轉移到以 AgentOSUI 範本為雛形的新 Web UI（規劃提案
+[webui-migration-proposal.md](webui-migration-proposal.md) 同日 v1→v2 收斂，
+§9 六項拍板後核准可開工，含 bridge 最小寫入例外的使用者親定安全規格）；
+**Stage 3 三項功能凍結於 Streamlit 載體**，設計正本仍為
+[stage3-dashboard-observability-proposal.md](stage3-dashboard-observability-proposal.md)
+v2 §2–4，實作載體改為 Stage 5 的 P2（見 Stage 3 節註記與下方新增的
+Stage 5 節）。
 
 這份文件是 **Hermes 整合軌**（Hermes ↔ ClaudeCodeOS 資料與記憶管線）的階段性里程碑，接續
 [docs/hermes-shared-storage-bootstrap.md](hermes-shared-storage-bootstrap.md)（Stage 0 報告）。
@@ -570,6 +579,16 @@ worker execution routing 是不同層級的概念，見上方定位段落。
 
 ## Stage 3 — Dashboard Hermes Session 檢視頁
 
+> **載體變更（2026-07-23）**：使用者拍板**方案 B——全面轉移新 Web UI**
+> （見 [webui-migration-proposal.md](webui-migration-proposal.md) 與下方
+> 新增的 Stage 5 節），推翻 stage3 提案 v2 §0.1「不另開新入口」拍板——
+> **本 stage 三項功能（session 列表／憑證與 Lane 檢視／統一排程健康表）
+> 凍結、不在 Streamlit 開工**；設計正本仍為
+> [stage3-dashboard-observability-proposal.md](stage3-dashboard-observability-proposal.md)
+> v2 §2–4，實作載體改為新 Web UI，搬遷排入 **Stage 5 的 P2**（順序沿用
+> 既拍板的功能二→三→一）。以下原文（含 DoD 四條）保留——DoD 內容仍被
+> stage3 提案 v2 功能一逐字沿用，只是落地載體改變。
+
 **目標**：在既有 Streamlit dashboard 加一頁 Hermes session 檢視（用 adapter 的
 `list_sessions()`），維持 dashboard 的既有鐵律：localhost-only、read-only（技術上強制，
 不靠自律）、獨立資料層。
@@ -726,7 +745,53 @@ bridge，且評估當時 WSL 側五個 profile 有四個根本不存在。
 
 ---
 
-## 建議優先順序（總結，2026-07-21 更新）
+## Stage 5 — Web UI 遷移（Dashboard 全面轉移）🚧 已核准、待開工（2026-07-23）
+
+**規劃提案正本：[webui-migration-proposal.md](webui-migration-proposal.md)**
+（同日 v1 草案 → §9 六項拍板 → **v2 定稿，已核准可開工**）。
+
+**方向與定位**：使用者 2026-07-23 拍板**方案 B**——推翻 stage3 提案 v2
+§0.1「不另開新入口」拍板，dashboard 觀測功能全面轉移到以 AgentOSUI 範本
+（OpenAI site-creator starter 改造版，本機參考目錄
+`AgentOSUI-ClaudeCode-Reference-2026-07-23`）為雛形的新 Web UI。架構拍板：
+UI 層降級為**純 Vite + React SPA**（剝掉 vinext/wrangler/Cloudflare 託管
+假設）；資料層採 **Python 唯讀 API 包既有 `dashboard/data.py`**（三鐵律
+的技術強制留在 Python 端單一真相）。**Stage 3 三項功能凍結於 Streamlit
+載體**、設計正本仍為 stage3 提案 v2 §2–4，實作載體改為本 stage 的 P2
+（見 Stage 3 節註記）。
+
+**四個 phase**（各自可獨立驗收，詳細設計與各 phase DoD 見提案 §4）：
+
+- **P0**：範本剝離託管假設（移除 Cloudflare/OpenAI 設定、框架降級、清除
+  全部 mock 假資料）＋ Windows 落地驗證（spawn shim、`hermes dashboard`
+  慢啟動實測 vs bridge 90 秒 timeout）＋ **bridge 最小寫入例外實作**
+  （使用者親定安全規格為硬性 DoD：僅固定白名單操作〔啟動 Hermes
+  Dashboard／health／重新載入與停止「由 AgentOS 啟動的」process〕、
+  不得提供任意 shell command API、PID/process ownership 驗證＋重複啟動
+  防護＋localhost-only＋audit log 必備、其他設定寫入維持唯讀後續個別
+  審核）＋**過渡期最小安全檢查 script**（唯讀檢查＋報告、八項驗證，
+  P2 完整安全檢查功能完成後由正式版本取代）。
+- **P1**：Python 唯讀 API（拍板選項 A）＋三鐵律技術強制重建（bind
+  `127.0.0.1` 寫死、GET-only 全域 405、import guard 測試、CORS 白名單）
+  ＋新 UI 與既有 Streamlit 五區塊功能對等。
+- **P2**：Stage 3 三項功能依 stage3 提案 v2 §2–4 設計正本搬入新 UI
+  （順序沿用既拍板：功能二→功能三→功能一；憑證白名單＋雙重防護原樣
+  移植並加 API 序列化前第三道掃描）；完成後 Streamlit 標 deprecated
+  進入**並行觀察期**（已拍板）、過渡期 script 由正式安全檢查取代。
+- **P3**：寫入型功能（Chat 派工／Job Retry／Session 管理）——**gate 已
+  拍板留待日後**，未核准前零程式碼、UI 不出現入口；評估與邊界設計見
+  提案 §5。
+
+**負責領域**：`engineering`（P0–P2 全部程式碼與測試）；`automation` 在
+P0–P2 角色為零；`planning` 已完成提案定稿。
+
+**與既有鐵律的關係**：localhost-only、技術強制 read-only、獨立資料層
+三鐵律在新架構**逐條重建技術強制**（提案 §3）；唯一核准例外為 bridge
+的四種白名單 process 操作（提案 §5.4，2026-07-23 使用者親定規格核准）。
+
+---
+
+## 建議優先順序（總結，2026-07-23 更新）
 
 1. ~~Stage 1~~ ✅ 完成（Pre-Bridge Foundation，見 [stage1-checkpoint.md](stage1-checkpoint.md)）。
 2. ~~Stage 2 必要前置~~ ✅ gate 已解（2026-07-10）：DoD 1/2 實走完成、三項前置決策拍板並記錄。
@@ -750,10 +815,14 @@ bridge，且評估當時 WSL 側五個 profile 有四個根本不存在。
    排列順序放在 Stage 3 之後（見文首「更新（2026-07-21）」）。遺留：`nous`
    token 撤銷待確認、「依任務類型自動選模型」規則引擎未排程（見上方 Stage 4
    遺留事項）。
-8. **Stage 3**：觀測性收尾，**目前仍待開工**。下一階段為 Stage 3，或視需要
-   另開新規劃（例如把 Stage 2.7 §15.4 遺留的「Hermes-agent 版本同步機制」
-   收斂為獨立提案，或把 Stage 4 遺留的「依任務類型自動選模型」規則引擎收斂
-   為獨立提案）。
+8. **Stage 3**：觀測性收尾——**2026-07-23 起凍結於 Streamlit 載體**（使用者
+   拍板方案 B，見 Stage 3 節註記與 Stage 5 節）：三項功能設計正本仍為
+   stage3 提案 v2 §2–4，實作載體改為新 Web UI（Stage 5 的 P2），不在
+   Streamlit 開工。
+9. **Stage 5 — Web UI 遷移**：**已核准、待開工（2026-07-23）**——下一個
+   開工項為 **P0**（範本剝離＋Windows 落地驗證＋bridge 最小寫入例外＋
+   過渡期安全檢查 script），見
+   [webui-migration-proposal.md](webui-migration-proposal.md) §4.1。
 
 ## 持續事項（不設 stage，跨階段有效）
 
@@ -793,5 +862,5 @@ bridge，且評估當時 WSL 側五個 profile 有四個根本不存在。
 | **Stage 2.5 的「輸出層混淆」風險**（2026-07-12 新增，見提案第 10 節） | episode 內容中嵌入的指令可能操縱 triage handler 的 `decision`/`summary`輸出 | Prompt 結構性隔離＋重申權限限制＋測試矩陣明確驗證（提案第 14 節第 15 項）；**這條緩解的實際強度目前繫於提案第 18 節唯一的 start blocker（no-tools 技術可行性）**，尚未技術驗證前不應假設攻擊面已完全侷限在輸出內容。**2026-07-17 更新**：blocker 已實測解除（zero-tools 技術強制，提案第 18 節解除紀錄），prompt injection 測試（矩陣第 15、20 項）已隨 2.5c（commit `8444e7d`）落地——攻擊面已如設計侷限在輸出內容層；輸出層本身的殘餘風險由 `needs_review` 觸發率監測（提案第 20.3 節，2.6 前小修候選）持續觀察。**2026-07-17 第二次更新**：觸發率監測已隨 2.6b 的 CLI decision 計數落地（2.6 提案 §5.4），2.6d 盤點現況：memory_only=5／action_candidate=2／needs_review=0／異常=0；下游 dispatch 的注入緩解鏈（人工核准硬 gate、episode 全文不入 prompt、殘餘風險誠實標註）見 2.6 提案 §10。**2026-07-18 更新**：Stage 2.7 notifier 對 `needs_review`／`anomaly` 補上逐筆通知（提案 §6.2），觸發率監測遺留視為關閉 |
 | **並行 `requeue_dead_letter` 呼叫的 SQLite 例外處理**（2026-07-12 第四次修訂新增） | 若實作沿用 v4 的二分支假設，WAL 模式下的 `SQLITE_BUSY`／`SQLITE_BUSY_SNAPSHOT` 例外可能未被正確分類，誤報「已被別人 requeue」或讓例外未經處理往外拋 | 提案第 4.1b／4.1c 節已改寫為四分支狀態機並定義 `RequeueRetryableDBError`；2.5a 實作與測試（提案第 14 節第 21 項）需嚴格遵循，不得簡化回二分支假設。**2026-07-17 更新**：已隨 2.5a（commit `4aef9d1`）依四分支狀態機實作，並以決定性 fault-injection 測試（提案第 14 節第 21、22 項）＋聚合並行整合測試（第 23 項）鎖定 |
 | **WSL／Windows 側 Hermes-agent 套件版本漂移**（2026-07-18 新增，見 Stage 2.7 §15.2） | 兩側套件版本不同步可能導致功能缺口（如本次 `hermes send` 不支援 `--message-key`）在無人察覺下累積，且落差會隨時間放大 | 2026-07-18 已一次性 fast-forward 追平（選項 1b，安全查證見提案 §15.2）；**未建立自動同步機制**，需人工於 Windows 側每次升級 Hermes-agent 後主動對 WSL 側重跑同一套流程，列為持續事項（見上方「持續事項」節） |
-| **五個 Hermes profile 曾共用同一顆 openai-codex refresh token**（2026-07-21 新增，見 Stage 4 節） | refresh token 單次使用、會輪替失效，多 profile 共用同一顆有 `refresh_token_reused`／`invalid_grant` 失效風險（hermes-agent 原始碼內有引用內部 issue `#48415`／`#43589` 佐證過去真的發生過） | 2026-07-20～21 已完成五個 profile 各自獨立 OAuth device-code 登入＋官方 `hermes auth remove` 清除舊共用憑證（含 `suppressed_sources` 抑制標記，避免被自動重新種回），逐 profile 證據見 `registry/capability_lanes.yaml` 對應 lane 的 Phase 2e/2f/2g/2h 註記；風險已解除，非持續性事項 |
-| **憑證檔案讀取意外印出明文 token**（2026-07-21 新增，見 Stage 4「安全事故」） | 讀取 `auth.json` 等憑證檔案時工具本身不支援欄位過濾，明文 token 進入對話紀錄，若對話紀錄外洩即等同憑證外洩 | 已知案例：`nous` JWT、Tavily API key（兩次）、`intelligence`／`gptcoding` 憑證。Tavily key 因免費額度判斷不重要（見 `memory/hermes-tavily-key-plaintext-todo.md`）；`nous` token 建議撤銷但**尚未確認是否已處理**（Stage 4 遺留事項①）。技術面尚無「讀取憑證檔案時自動遮罩」的機制，屬未排程的工具改進方向 |
+| **五個 Hermes profile 曾共用同一顆 openai-codex refresh token**（2026-07-21 新增，見 Stage 4 節） | refresh token 單次使用、會輪替失效，多 profile 共用同一顆有 `refresh_token_reused`／`invalid_grant` 失效風險（hermes-agent 原始碼內有引用內部 issue `#48415`／`#43589` 佐證過去真的發生過） | 2026-07-20～21 已完成五個 profile 各自獨立 OAuth device-code 登入＋官方 `hermes auth remove` 指令清除舊共用憑證（含 `suppressed_sources` 抑制標記，避免被自動重新種回），逐 profile 證據見 `registry/capability_lanes.yaml` 對應 lane 的 Phase 2e/2f/2g/2h 註記；風險已解除，非持續性事項 |
+| **憑證檔案讀取意外印出明文 token**（2026-07-21 新增，見 Stage 4「安全事故」） | 讀取 `auth.json` 等憑證檔案時工具本身不支援欄位過濾，明文 token 進入對話紀錄，若對話紀錄外洩即等同憑證外洩 | 已知案例：`nous` JWT、Tavily API key（兩次）、`intelligence`／`gptcoding` 憑證。Tavily key 因免費額度判斷不重要（見 `memory/hermes-tavily-key-plaintext-todo.md`）；`nous` token 建議撤銷但**尚未確認是否已處理**（Stage 4 遺留事項①）。技術面尚無「讀取憑證檔案時自動遮罩」的機制，屬未排程的工具改進方向。**2026-07-23 補充**：Stage 5 P0 的過渡期最小安全檢查 script 與 P2 的憑證唯讀檢視（stage3 提案 v2 功能二設計）是對此風險的結構性補口，見 Stage 5 節 |

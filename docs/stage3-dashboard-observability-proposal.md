@@ -1,6 +1,18 @@
 # Stage 3 — Dashboard 觀測性擴充：Session 列表／憑證與 Lane 唯讀檢視／Cron 排程表（設計提案 v2）
 
 日期：2026-07-22（v2；v1 為 2026-07-21）　狀態：**v2——使用者已拍板首發決策，可開工**
+
+> **載體變更註記（2026-07-23，由 [webui-migration-proposal.md](webui-migration-proposal.md) 連動加註）**：
+> 本提案 **§0.1「擴充既有 Streamlit dashboard，不另開新入口」之拍板已於
+> 2026-07-23 被使用者推翻**（方案 B——dashboard 觀測功能全面轉移到以
+> AgentOSUI 範本為雛形的新 Web UI，決策與遷移設計正本見
+> [webui-migration-proposal.md](webui-migration-proposal.md)）；
+> **本提案 §2–§4 的功能與安全設計仍有效，為搬遷時的設計正本**。
+> 三項功能凍結、不在 Streamlit 開工，實作載體改為新 Web UI（搬遷排入
+> 該提案 P2）。除本註記外，本文件其他內容維持 v2 原狀不動；上方狀態列
+> 「可開工」指的是 v2 當時語境（Streamlit 載體），現行開工載體與 phase
+> 順序以 webui-migration-proposal.md 為準。
+
 負責規劃：`planning` domain
 負責領域（實作階段）：`engineering`（全部程式碼、`dashboard/data.py`／`dashboard/app.py` 擴充、測試）。
 本提案全部三項功能都是唯讀資料呈現，不新增、不修改任何排程頻率或觸發邏輯——
