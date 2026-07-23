@@ -88,3 +88,10 @@ inbox_frontmatter:
   fields: [schema, source, session_id, event_id_range, created_at,
            usefulness, usefulness_reason, sensitivity]
   # consolidation 狀態刻意不設欄位：由目錄位置（inbox/ | .processed/ | .failed/）表達
+
+skill_promotion:
+  # Semantic → Procedural 升級的量化訊號之一（見 ../docs/memory-taxonomy.md §3、§7.1）。
+  # recall-first 召回並複用達此次數的解法/程序，knowledge 在 consolidation
+  # 回報中列為 SKILL.md 候補（升級不自動發生，人在迴路，skill 實作分派 engineering）。
+  min_recall_reuse: 3
+  # MVP 階段複用次數由 knowledge 在 consolidation 時人工盤點，無自動計數器。

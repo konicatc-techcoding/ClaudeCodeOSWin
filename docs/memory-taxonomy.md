@@ -204,3 +204,29 @@ sensitivity: none             # none | masked | blocked-partial
   `knowledge`）；`daily-memory-check` 的 N-gate 判斷屬 orientation read。
 - hermes-integration-roadmap.md：本文件即 Stage 1 DoD 3 的政策定稿；
   Stage 2 bridge 的「雜訊控制」與「headless 依政策略過」直接引用 4.2／4.3。
+
+## 7. Recall-first：consolidation 的讀側對應
+
+§3／§4 定義的是**寫側**——事件怎麼從 Episodic 蒸餾進 Semantic、再標出 Procedural 候補。**recall-first 是對應的讀側**：CoS 收到任務、動手或分派之前，先主動檢索既有記憶與 skill，有相似就複用、沒有才從頭來。兩者互補、方向相反，共用同一批 artifact，**不新增任何寫入路徑**（recall 只讀）。
+
+- **檢索哪幾層（依「一次命中省下多少重想」排序）**：Procedural（`.claude/skills/**/SKILL.md`、`CLAUDE.md`、registry policies）優先——命中代表「有現成程序可直接執行」；其次 Semantic（`memory/*.md` + `MEMORY.md` 索引）——「有可複用的既有決策/事實」；Episodic（`inbox/.processed`、logs、state.db 唯讀）最後且多半不需要，因為它通常已被 consolidation 蒸餾進 Semantic。MVP 只查 Procedural + Semantic。
+- **對 consolidation 的要求**：recall 越有用，consolidation 產出品質越關鍵（垃圾進→召回無用）。因此 `consolidate-memory` 的「索引同步」步驟應維護 **recall-友善的 MEMORY.md 索引**（每條帶關鍵字 + 一句「這條回答什麼問題」）。這是對既有步驟的補充，不是新機制。
+- 決策程序面的強制/可稽核規則見 [delegation_policy.md](../delegation_policy.md)「決策程序」步驟 1.5；機器可讀參數見 [registry/delegation_policy.yaml](../registry/delegation_policy.yaml) 的 `recall` 區塊。
+
+### 7.1 recall 複用 → skill 升級判準
+
+§3「Semantic → Procedural 升級」已定義升級管線（consolidation 時列 Procedural 候補、人在迴路、skill 實作分派 `engineering`）。recall-first 在既有升級訊號（如「同類糾正累積 3 次」）之外，新增一個訊號：
+
+- **某個解法/程序被 recall 召回並複用達 N 次（預設 3，見 `registry/consolidation_policy.yaml` 的 `skill_promotion.min_recall_reuse`）** → `knowledge` 在 consolidation 回報中列為 SKILL.md 候補。反覆被召回複用，正是「照做不用重想」該沉澱成 skill 的訊號。
+- 升級仍不自動發生：CoS 確認後，skill 撰寫分派 `engineering`，走 git + delegation（與 §3 一致）。
+- **複用次數怎麼算**：MVP 階段無自動計數器，由 `knowledge` 在 consolidation 時從 inbox／回報中人工盤點「這解法最近被當答案端出幾次」即可；未來若上 recall 腳本再談自動計數（非 MVP 範圍）。
+
+### 7.2 記憶正本歸屬：CCOS 是正本、Hermes 是來源之一（2026-07-23 分工定調）
+
+§7／§7.1 講的是讀側「怎麼檢索」；本節補的是讀側**檢索誰**這個更前置的歸屬問題——**記憶正本與 recall 的家在 ClaudeCodeOS（CCOS），不在 Hermes**。這是 2026-07-23 使用者拍板的 CoS↔Hermes 架構分工定調（完整理由見 [memory/project_cos-hermes-division-of-labor.md](../memory/project_cos-hermes-division-of-labor.md)），此處只把跟本 taxonomy 相關的治理結論明文化：
+
+- **記憶正本＝CCOS**：`memory/*.md` + `MEMORY.md` 索引（Semantic 層，§1）是唯一正本；recall（§7）只查這裡。
+- **Hermes＝來源之一，不是正本**：Hermes 的 session（`state.db`，Episodic 層）只是**餵進 CCOS 記憶的來源之一**，經唯讀 bridge → `inbox/` → consolidation 進正本（§3 已有的 Episodic→Semantic 路徑）。它與其他三條來源地位對等，不享有正本地位。
+- **CoS recall 只查 CCOS 正本，不查 Hermes 的 FTS5**：Hermes 側的全文檢索留給 Hermes 自己用；CCOS 的 recall 面只有一個真相來源（§7 檢索的 Procedural + Semantic 都在 CCOS）。這與 §7 MVP「只查 Procedural + Semantic、Episodic 多半不需要」的立場一致。
+- **四來源匯一正本**：互動 CoS 產出（直接寫正本）、headless CoS 產出（→inbox）、**lane 執行結果（經回傳 JSON envelope→inbox，不必碰 Hermes 記憶）**、Hermes 自己的 session（唯讀 bridge→inbox）——四者全經 consolidation（§4）併入**同一份 CCOS 正本**。§3 資料流圖的兩條既有入 inbox 路徑，在此明確擴充為涵蓋 lane envelope 這條。
+- **不建反向橋（CCOS→Hermes 記憶）**：反向要嘛寫 Hermes 第三方 DB（違反第 2 節第 3／4 條「絕不直寫、絕不建第二份」）、要嘛全走留 `ended_at` 的 Hermes session（吃成本且抓不到 CoS 自己的推理），兩條都補不起來。故資料流維持單向 Hermes→CCOS，與 ARCHITECTURE.md §4.2.1 的「資料流不對稱」呼應。

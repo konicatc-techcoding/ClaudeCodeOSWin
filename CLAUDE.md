@@ -6,7 +6,7 @@
 
 完整規則與理由見 [delegation_policy.md](delegation_policy.md) 跟 `registry/delegation_policy.yaml`。核心程序：
 
-1. 讀取 `memory/MEMORY.md` 取得長期記憶／專案脈絡（如果有相關內容）。
+1. **Recall-first（動手／分派前先查）**：讀取 `memory/MEMORY.md` 取得長期記憶／專案脈絡，並依 [delegation_policy.md](delegation_policy.md) 決策程序**步驟 1.5** 做一次明確檢索——查有沒有可直接執行的 skill、或可複用的既有決策／事實，且**必須講出 recall 結果那一行**（`Recall: 命中 skill … ｜ 命中 memory … ｜ 查無相似`）。命中就複用（並先確認相關性、脈絡可能過期者標「相似但需確認」），查無才從頭規劃。
 2. 對照 `registry/delegation_policy.yaml`，把任務分類成 `direct_categories`（你自己處理）或 `delegated_categories`（分派出去）。
 3. 若分類結果是 delegated：查 `registry/agents.yaml` 找到 owner 的 `status`。
    - `active` → 用 `Agent` 工具、指定對應的 `subagent_type` 分派。**任務大小不是判斷依據**——即使是「檢查一行語法」這種小事，只要分類結果是 delegated，就一定要分派，不能自己動手做掉。

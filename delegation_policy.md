@@ -15,6 +15,21 @@ v0.1 測試時發現：CoS 收到「檢查一個檔案的語法」這種小任�
 CoS 收到任何任務時，依序執行：
 
 1. **分類（Classify）**：對照 `registry/delegation_policy.yaml` 裡的 `direct_categories` 跟 `delegated_categories`，判斷這個任務屬於哪一類。
+1.5. **Recall（動手／分派前先查記憶與 skill）**：任務經第 1 步判定為需要實際執行的任務（即不是 `general_conversation`、`clarification` 這種一開始就由 CoS 直接回覆的類別）後，**在進入第 2 步分派、或 CoS 自己動手之前**，一律先做一次明確檢索，且**必須把結果講出來**，格式固定為一行：
+
+    `Recall: 命中 skill <名稱> ｜ 命中 memory <條目/檔名> ｜ 查無相似`
+
+    （三選一；同時命中 skill 與 memory 就都列出。）檢索範圍是 (a) `.claude/skills/**/SKILL.md` 有沒有可直接執行的程序（Procedural）、(b) `memory/MEMORY.md` 索引與相關 `memory/*.md` 有沒有可複用的既有決策或事實（Semantic）。三種結果的處理：
+
+    - **命中 skill** → 走該 skill。若該 skill 屬於某領域的專業工作，仍照第 3 步分派，不因為「已經找到現成程序」就自己代打。
+    - **命中既有決策／事實** → 把它當上下文帶進第 3 步分派（一併交給領域 subagent），或在確認相符後直接複用既有結論、不從頭重新規劃。
+    - **查無相似** → 明確記「查無相似」，才進入從頭規劃／分派。
+
+    **相關性確認（防呆，強制）**：命中不等於照抄。CoS 要先確認召回的舊解確實對得上當前任務，並在複用時註明是「直接複用」還是「以舊解為基礎調整」；若召回內容看似相關但脈絡可能已過期（尤其規劃類），標為「相似但需確認」，不得拿舊結論硬套當前任務。
+
+    **為什麼要強制且可稽核**：跟這份政策存在的理由同源（見「為什麼需要這份政策」）——模型會用「這任務我直接從頭想比較快」的合理直覺跳過查記憶。把 recall 做成必講的一行，讓「有沒有查、查到什麼」變成可預期、可稽核，而不是取決於當下模型想不想查。
+
+    **與 `orientation_read`／`depends_on` 的關係**：輕量 recall（掃 MEMORY.md 索引 + skill 清單）屬於 `orientation_read` 既有範圍——只用來決定「複用什麼、帶什麼上下文去分派」，一樣受 orientation_read 邊界約束：不能拿召回內容直接把領域的實質工作做掉。若命中的內容需要 `knowledge` 去整併／解讀完整記憶、或要在既有規劃上疊加，就照下方「領域間依賴」先分派 `knowledge` 取上下文——recall-first 本質上就是把「先找 knowledge 補脈絡」推廣到所有任務的前置動作。
 2. **查 Owner**：
    - 屬於 `direct_categories` → CoS 自己處理。
    - 屬於 `delegated_categories` → owner 是對應的 domain。

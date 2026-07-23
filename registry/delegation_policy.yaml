@@ -63,3 +63,15 @@ fallback:
     拒絕使用「任務規模」作為是否分派的判斷依據，沒有例外。
     無法分類時，先向使用者釐清，或挑最接近的 delegated_categories 分派，
     並在回覆中註明「這是最接近的分類」。
+
+recall:
+  # recall-first：分派/動手前的強制檢索步驟（決策程序步驟 1.5）。
+  # 人類可讀說明見 ../delegation_policy.md「決策程序」步驟 1.5。
+  enabled: true
+  # 需實際執行的任務才觸發；general_conversation / clarification 不觸發
+  applies_to: delegated_and_direct_substantive
+  scope:
+    procedural: ".claude/skills/**/SKILL.md"      # 先找可直接執行的 skill
+    semantic: ["memory/MEMORY.md", "memory/*.md"]  # 再找可複用的既有決策/事實
+  audit_line_format: "Recall: 命中 skill <名稱> ｜ 命中 memory <條目/檔名> ｜ 查無相似"
+  relevance_confirmation_required: true            # 命中須先確認相關性；過期脈絡標「相似但需確認」
