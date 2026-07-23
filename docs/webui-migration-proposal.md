@@ -1,6 +1,8 @@
 # Web UI 遷移提案 — 以 AgentOSUI 範本為雛形全面轉移 Dashboard（v2）
 
-日期：2026-07-23（v2；v1 同日稍早）　狀態：**v2 已核准——2026-07-23 使用者拍板，可開工**
+日期：2026-07-23（v2；v1 同日稍早）　狀態：**v2 已核准並全數完工——四個 phase
+（P0–P3）已於 2026-07-23～24 實作完成並經使用者驗收（見 §10 完工紀錄）；
+Streamlit 並行觀察期自 2026-07-24 起算**
 負責規劃：`planning` domain
 負責領域（實作階段）：`engineering`（全部程式碼、範本剝離、唯讀 API、bridge 最小
 寫入例外實作、過渡期安全檢查 script、UI 接線、測試）；
@@ -28,6 +30,10 @@
 
 ## 版本標記
 
+- **完工紀錄（2026-07-24）**：**P0–P3 四個 phase 全部完成並經使用者驗收**
+  ——P0 `bf2bfe2`／P1 `f1b9104`／P2 `3da90ae`／P3 `0bbd6c1`（皆在
+  master）。逐 phase 完工事實與 DoD 勾稽見 **§10**；Streamlit 並行觀察期
+  自 **2026-07-24** 起算。
 - **v2**（2026-07-23）＝使用者就 v1 §9 待拍板項逐項拍板後的**定稿版，已核准
   可開工**。**v2 變更摘要（相對 v1）**：
   1. **資料層拍板：選項 A**（Python 唯讀 API 包既有 `data.py`）——§2.2。
@@ -335,10 +341,10 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 
 ## 4. 分階段路線與各階段 DoD
 
-四個 phase 各自可獨立驗收；P0→P1→P2 有依賴順序，P3 與 P2 無程式碼依賴
-且 gate 已拍板留待日後（§5、§9）。
+四個 phase 各自可獨立驗收；P0→P1→P2 有依賴順序。**完工現況（2026-07-24）：
+四個 phase 全部完成**，逐 phase 完工事實與 DoD 勾稽見 §10。
 
-### 4.1 P0 — 範本剝離＋Windows 落地驗證＋bridge 最小寫入例外＋過渡期安全檢查 script
+### 4.1 P0 — 範本剝離＋Windows 落地驗證＋bridge 最小寫入例外＋過渡期安全檢查 script ✅ 完成（commit `bf2bfe2`）
 
 **內容**：
 
@@ -373,7 +379,8 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
    PID ownership、重複啟動防護、CORS、敏感資料暴露、audit log**。
    建議落點 `scripts/`（如 `scripts/webui_security_check.py`），輸出
    人可讀報告；**P2 完整安全檢查功能完成後由正式版本取代**（§4.3
-   DoD 第 5 項）。
+   DoD 第 5 項）。（完工現況：script 實作為 **9 項檢查**、全過——比
+   設計的最低八項多一項，見 §10。）
 
 **DoD**：
 
@@ -397,7 +404,7 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 8. Node 版本需求、啟動指令、慢啟動實測值、bridge 安全規格與 audit log
    位置寫入 `webui/README.md`。
 
-### 4.2 P1 — 唯讀資料層＋既有功能對等
+### 4.2 P1 — 唯讀資料層＋既有功能對等 ✅ 完成（commit `f1b9104`）
 
 **內容**：
 
@@ -410,7 +417,8 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
    成本／Memory／Logs（對等清單以 `dashboard/README.md`「內容」節逐項
    核對）。
 4. API 層第三道憑證掃描（§3.4）隨 API 骨架一起落地（雖然 P1 endpoints
-   理論上不含憑證資料，防線先立起來給 P2 用）。
+   理論上不含憑證資料，防線先立起來給 P2 用）。（完工落點：
+   `dashboard/redact.py` 作為掃描共用正本。）
 
 **DoD**：
 
@@ -422,7 +430,7 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 4. API 只 bind `127.0.0.1` 且無 host 參數化入口（code review 檢核項）。
 5. 既有 Streamlit dashboard 在本 phase 期間維持可用、零改動。
 
-### 4.3 P2 — Stage 3 三項功能搬遷（設計正本：v2 §2–§4）
+### 4.3 P2 — Stage 3 三項功能搬遷（設計正本：v2 §2–§4）✅ 完成（commit `3da90ae`）
 
 **內容**：
 
@@ -452,23 +460,24 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
    更新、不夾帶未核准功能的任何程式碼或 UI 元素）。
 4. 既有 Streamlit dashboard 標記 deprecated（README 註記），進入
    **並行觀察期**（已拍板，§9 第 4 項）：並行一個自然使用週期、期間
-   Streamlit 零維護只讀，觀察期滿後再實際移除。
+   Streamlit 零維護只讀，觀察期滿後再實際移除。**（完工註記）觀察期
+   自 2026-07-24 起算。**
 5. **過渡期安全檢查 script 由正式版本取代**：取代前後檢查涵蓋面不縮水
    （P0 的八項檢查每一項都能對應到正式測試/檢查的具體條目），取代動作
    （退役或併入）明確記錄。
 
-### 4.4 P3 — 寫入型功能（現況：Chat／PTY 已核准，其餘留待日後）
+### 4.4 P3 — 寫入型功能 ✅ Chat／PTY 已完成（commit `0bbd6c1`），其餘留待日後
 
-**（2026-07-23 稍後更新）**本 phase 現況：
+**（2026-07-23 稍後更新；2026-07-24 完工更新）**本 phase 現況：
 
-- **Chat gate 已解除，形態拍板為 PTY 真終端機**——設計與安全邊界正本、
-  拍板紀錄（§10 五項均採建議預設＋§3.2 殘餘風險知情確認）見
-  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)（v2
-  已核准）。**開工時點：P2 完成後**（排序拍板：P2 先做，Chat 排 P3）。
+- **Chat／PTY 已實作完成並經使用者驗收**（commit `0bbd6c1`；使用者實測
+  打字輸入與中文回覆通過）——形態為 PTY 真終端機，設計與安全邊界正本、
+  拍板紀錄（§10 五項均採建議預設＋§3.2 殘餘風險知情確認）與完工註記見
+  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)。
   原 §5.3(1) 的 headless enqueue 形態不採用。
 - **Job Retry／Session 管理 gate 留待日後**——未核准前零程式碼、UI 不
   出現入口；評估與邊界設計保留於 §5.3(2)(3)。
-- bridge process 控制已提前核准並移入 P0 實作（§5.4）。
+- bridge process 控制已提前核准並隨 P0 完成實作（§5.4）。
 
 ---
 
@@ -477,11 +486,11 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 ### 5.1 總則
 
 - **評估 ≠ 核准**：本節存在的目的是把安全邊界先想清楚，不是預告一定會做。
-- **每項功能一個獨立 gate**：現況（2026-07-23 稍後更新）——**(4) bridge
-  process 控制已核准**（最小寫入例外，移入 P0）；**(1) Chat 已核准，
-  形態改為 PTY 真終端機**（正本另見
-  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)，排
-  P2 完成後開工）；**(2)(3) 兩項 gate 留待日後**，未核准前零程式碼。
+- **每項功能一個獨立 gate**：現況（2026-07-24 完工更新）——**(4) bridge
+  process 控制已核准並隨 P0 完成**；**(1) Chat 已核准且已完成**（形態
+  PTY 真終端機，commit `0bbd6c1`，正本另見
+  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)）；
+  **(2)(3) 兩項 gate 留待日後**，未核准前零程式碼。
 - **共同原則**：寫入能力與唯讀層物理隔離（§5.2）；每個寫入動作留
   audit 記錄；寫入面最小化（只做白名單動作，不做泛用操作台）。
 
@@ -498,14 +507,14 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 
 ### 5.3 各功能評估
 
-**(1) Chat 派工——✅ gate 已解除（2026-07-23），形態改為 PTY 真終端機**
+**(1) Chat 派工——✅ gate 已解除（2026-07-23）且已完成（2026-07-24，commit `0bbd6c1`），形態為 PTY 真終端機**
 
 > **（v2 後註記）**使用者拍板 Chat 形態為 **PTY 真終端機**（完整前台
 > `claude` session 嵌入瀏覽器），**不採用**本節下方評估的 headless
-> enqueue 形態；設計正本、威脅模型、殘餘風險知情確認見
-> [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)（v2
-> 已核准，排 P2 完成後開工）。以下原評估內容保留作歷史對照與未來
-> 「排程式丟任務」需求的參考，不是現行方案。
+> enqueue 形態；設計正本、威脅模型、殘餘風險知情確認與完工註記見
+> [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)。
+> 以下原評估內容保留作歷史對照與未來「排程式丟任務」需求的參考，
+> 不是現行方案。
 
 - **寫入本質**（原 enqueue 形態評估）：等價於新增一個「web」來源的 job
   進 `hermes/jobs.db`（經 `enqueue()`），由既有 worker/headless CoS 流程
@@ -542,7 +551,7 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
   session 列表）覆蓋大半，寫入風險最高、依賴外部專案 schema，建議等
   真實需求出現且確認官方指令存在後再議。
 
-### 5.4 Bridge process 控制 — ✅ 已核准（2026-07-23，最小寫入例外）
+### 5.4 Bridge process 控制 — ✅ 已核准（2026-07-23，最小寫入例外）；已隨 P0 完成（commit `bf2bfe2`）
 
 - **拍板結果**：使用者推翻 v1 預設的「P0 唯讀化」方案，**現在即核准
   bridge 為最小寫入例外**，實作排入 P0（§4.1 第 7 項）。
@@ -576,7 +585,7 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 
 ---
 
-## 6. 技術前置清單（P0 開工前/開工中必辦，彙整）
+## 6. 技術前置清單（P0 開工前/開工中必辦，彙整——完工現況：已全數執行）
 
 1. Node.js ≥ 22.13 安裝（本機目前為 Python venv 環境，Node 是新依賴）。
 2. `npm install` 前的供應鏈檢視：lockfile 依賴清單審閱＋`npm audit`，
@@ -590,7 +599,7 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 6. Windows spawn 驗證：`node_modules/.bin/*` shim 在 Windows 需 `.cmd`／
    `shell: true` 的實測與修正。
 7. 唯讀 API 框架選型（FastAPI vs stdlib）——engineering 依依賴面評估，
-   不影響 §3 的技術強制設計。
+   不影響 §3 的技術強制設計。（完工結果：採 **stdlib**。）
 8. Bridge 改寫規格對齊：範本 `--stop` 的全域停止語意改為
    ownership-verified（§5.4）；audit log 落點與格式定案。
 
@@ -601,11 +610,11 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 | # | 待辦 | 擁有者 | 狀態 |
 |---|---|---|---|
 | 1 | `docs/stage3-dashboard-observability-proposal.md` 加註：「§0.1 拍板已於 2026-07-23 被推翻（見 webui-migration-proposal.md）；§2–§4 功能與安全設計仍有效，為遷移時設計正本」 | planning（隨本次定稿執行） | ✅ 已執行（2026-07-23） |
-| 2 | `docs/hermes-integration-roadmap.md` 立新 stage（Stage 5）指向本提案；Stage 3 節註記凍結與搬遷去向 | planning（隨本次定稿執行） | ✅ 已執行（2026-07-23） |
-| 3 | `dashboard/README.md`：P1 起註記新 UI 並存狀態；P2 後標 deprecated 與並行觀察期 | engineering（隨對應 phase） | ⏳ 待對應 phase |
-| 4 | 新增 `webui/README.md`（啟動方式、Node 版本、安全邊界、bridge 安全規格與 audit log 位置——比照 `dashboard/README.md` 安全邊界節的寫法） | engineering（P0） | ⏳ 待 P0 |
+| 2 | `docs/hermes-integration-roadmap.md` 立新 stage（Stage 5）指向本提案；Stage 3 節註記凍結與搬遷去向 | planning（隨本次定稿執行） | ✅ 已執行（2026-07-23；2026-07-24 補完工紀錄與 Stage 3 完工補記） |
+| 3 | `dashboard/README.md`：P1 起註記新 UI 並存狀態；P2 後標 deprecated 與並行觀察期 | engineering（隨對應 phase） | 依 P1/P2 commit 實況核對（觀察期 2026-07-24 起算） |
+| 4 | 新增 `webui/README.md`（啟動方式、Node 版本、安全邊界、bridge 安全規格與 audit log 位置——比照 `dashboard/README.md` 安全邊界節的寫法） | engineering（P0） | 依 P0 commit `bf2bfe2` 實況核對 |
 | 5 | 本次「推翻 §0.1」決策、bridge 最小寫入例外核准、範本來源（OpenAI starter 改造、其 ARCHITECTURE.md 為過期複本）記入 memory | CoS 經 `knowledge` | ⏳ 待辦 |
-| 6 | （v2 後註記新增）PTY 終端機提案（[webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)）已產出並核准；roadmap Stage 5 節若需補 P3 現況一行註記，隨下次 roadmap 更新一併處理 | planning（下次 roadmap 更新時） | ⏳ 待辦 |
+| 6 | （v2 後註記新增）PTY 終端機提案（[webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)）已產出並核准；roadmap Stage 5 節 P3 現況註記 | planning | ✅ 已執行（2026-07-24 隨完工紀錄一併更新） |
 
 ---
 
@@ -615,16 +624,16 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 |---|---|---|---|
 | npm 供應鏈引入大量新依賴 | P0 | 新攻擊面/維護面 | 已拍板選項 b（純 Vite+React）縮小依賴；P0 供應鏈檢視留紀錄；lockfile 鎖定 |
 | 三鐵律在新架構重建時漏一條 | P1–P2 | 唯讀保證失效 | §3 逐條技術強制＋每條有對應測試（403/405/import guard/mode=ro）；各 phase DoD 含鐵律驗證項 |
-| **Bridge 寫入例外被實作走樣或日後被擴大** | P0 起 | 白名單例外變成泛用操作口 | 使用者親定規格一字不漏為硬性 DoD（§4.1 第 7 項＋DoD 第 5 條逐條測試）；指令/參數寫死、無任意 shell API；PID ownership＋重複啟動防護＋audit log；過渡期 script 八項檢查獨立驗證；「其他設定寫入維持唯讀、後續個別審核」明文鎖住擴張路徑 |
-| 過渡期安全檢查 script 給出假陰性（檢查不到位卻報 pass） | P0–P2 | 誤信安全狀態 | script 檢查項與 P0 DoD 第 5 條一一對應（八項明列）；P2 正式版本取代時要求「涵蓋面不縮水」的對應表（§4.3 DoD 第 5 項） |
+| **Bridge 寫入例外被實作走樣或日後被擴大** | P0 起 | 白名單例外變成泛用操作口 | 使用者親定規格一字不漏為硬性 DoD（§4.1 第 7 項＋DoD 第 5 條逐條測試）；指令/參數寫死、無任意 shell API；PID ownership＋重複啟動防護＋audit log；過渡期 script 檢查獨立驗證；「其他設定寫入維持唯讀、後續個別審核」明文鎖住擴張路徑 |
+| 過渡期安全檢查 script 給出假陰性（檢查不到位卻報 pass） | P0–P2 | 誤信安全狀態 | script 檢查項與 P0 DoD 第 5 條一一對應（完工現況 9 項）；P2 正式版本取代時要求「涵蓋面不縮水」的對應表（§4.3 DoD 第 5 項） |
 | 憑證欄位經新增的 API/UI 兩層意外外洩 | P2 | 安全事故重演 | 白名單＋雙重防護原樣移植於 Python 端＋API 序列化前第三道掃描＋三層假密鑰斷言測試（§3.4） |
 | mock 假資料殘留誤導觀測 | P0 | 「儀表板顯示假狀態」比沒有更糟 | P0 DoD 第 4 條硬性清除；未接線區塊不呈現 |
 | `hermes dashboard` 慢啟動超過 bridge timeout | P0 | 內嵌功能誤判失敗 | P0 實測冷啟動耗時、調整 timeout（gateway 3.5 分鐘教訓） |
 | Windows spawn `.bin` shim 失敗 | P0 | 一鍵啟動不可用 | P0 實測修正（`.cmd`/`shell:true`） |
-| Stage 3 凍結期間憑證觀測缺口持續 | P1–P2 期間 | v2 功能二回應的真實安全事故缺口延後補上 | 已拍板過渡處置：P0 先交付最小安全檢查 script（唯讀＋報告）；P2 順序維持功能二最先；P2 後由正式版本取代 |
+| Stage 3 凍結期間憑證觀測缺口持續 | P1–P2 期間 | v2 功能二回應的真實安全事故缺口延後補上 | 已拍板過渡處置：P0 先交付最小安全檢查 script（唯讀＋報告）；P2 順序維持功能二最先；P2 後由正式版本取代。**完工實證**：P2 上線首日即支撐一次真實憑證稽核與清理，全程零明文接觸（§10） |
 | 雙 runtime（Python＋Node）長期維護面 | 全部 | 單人專案維護成本上升 | 資料層單一真相留在 Python（已拍板選項 A）；UI 層縮到純 SPA（已拍板選項 b）；Streamlit 並行觀察期後退役，Python 側僅剩 data.py+api.py |
 | `auth.json`／`jobs.json` schema 與 v2 理解有落差 | P2 | 白名單對不上、漂移判定失準 | 沿用 v2 既有緩解：engineering 以安全方式（只印 key 名稱）先驗證 schema |
-| 未核准的 P3 功能被夾帶進 P0–P2 | 全部 | 唯讀邊界被稀釋 | §0.4 明確禁止（含 disabled 按鈕都不做）；P2 DoD 第 3 條驗收檢核；bridge 例外範圍以 §5.4 規格封死；PTY 雖已核准仍不得早於 P3 開工（排序拍板） |
+| 未核准的 P3 功能被夾帶進 P0–P2 | 全部 | 唯讀邊界被稀釋 | §0.4 明確禁止（含 disabled 按鈕都不做）；P2 DoD 第 3 條驗收檢核；bridge 例外範圍以 §5.4 規格封死；PTY 依排序拍板於 P2 完成後才實作（實況如此執行） |
 | PTY 終端機（P3）的完整前台能力面 | P3 | 系統至今風險最高功能 | 獨立提案獨立 gate（已核准，含殘餘風險知情確認）——威脅模型、雙層連線授權、audit 設計見 [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md) |
 | 範本 `ARCHITECTURE.md` 過期複本被誤當現況 | 全部 | 依過期假設實作 | §1.1 明確標註；文件連動待辦 5 記入 memory |
 
@@ -634,7 +643,7 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
 
 > v1 的本節是「使用者需回答的最小問題集」；使用者已於 2026-07-23 逐項
 > 回答，本節改為決策記錄正本。**全部 phase（P0→P1→P2）已無未決前置，
-> 可開工。**
+> 可開工。**（完工現況見 §10。）
 
 1. **資料層架構**：✅ 已拍板——**選項 A**（Python 唯讀 API 包既有
    `data.py`；採 v1 推薦案）。設計見 §2.2。
@@ -647,7 +656,7 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
    個別審核）一字不漏納入 §5.4 與 §4.1 P0 第 7 項，為硬性 DoD。
 4. **Streamlit 退役時點**：✅ 已拍板——**並行觀察期**（採 v1 預設建議）：
    P2 驗收後標 deprecated，並行一個自然使用週期、期間零維護只讀，觀察
-   期滿後再實際移除。見 §4.3 DoD 第 4 項。
+   期滿後再實際移除。見 §4.3 DoD 第 4 項。**觀察期自 2026-07-24 起算。**
 5. **P2 交付前的憑證觀測缺口**：✅ 已拍板——**先做最小安全檢查 script**
    （唯讀檢查＋輸出報告，不自動修改系統；至少驗證八項：localhost-only、
    固定指令白名單、禁止任意 shell 參數、PID ownership、重複啟動防護、
@@ -661,5 +670,60 @@ SSR/Worker；供應鏈面大幅縮小；bridge 腳本邏輯獨立保留（依 §
      **PTY 真終端機**（取代 §5.3(1) 的 enqueue 形態），設計正本與核准
      紀錄（含 §3.2 殘餘風險知情確認）見
      [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)
-     （v2 已核准），**排 P2 完成後開工**。Job Retry／Session 管理維持
+     （v2 已核准），**排 P2 完成後開工**（實況：已於 P2 完成後實作並
+     驗收，commit `0bbd6c1`，見 §10）。Job Retry／Session 管理維持
      留待日後。
+
+---
+
+## 10. 完工紀錄與 DoD 勾稽（2026-07-24；四個 phase 全部完成並經使用者驗收）
+
+**commit 證據（皆在 master）**：P0 `bf2bfe2`／P1 `f1b9104`／P2 `3da90ae`
+／P3 `0bbd6c1`。完成與驗收時間：2026-07-23～24；**Streamlit 並行觀察期
+自 2026-07-24 起算**（§9 第 4 項拍板的執行起點）。
+
+### 10.1 逐 phase 完工事實
+
+- **P0（`bf2bfe2`）**：範本剝離（純 Vite + React SPA、Cloudflare/OpenAI
+  殘留清零、mock 清零）＋ bridge 最小寫入例外依 §5.4 親定規格實作＋
+  過渡期安全檢查 script——**完工現況為 9 項檢查、全部通過**（比 §4.1
+  第 8 項設計的最低八項多一項，屬涵蓋面擴大而非縮水，符合「至少八項」
+  的原始要求）。
+- **P1（`f1b9104`）**：`dashboard/api.py`（stdlib、`127.0.0.1:8799`、
+  GET-only、CORS/405/import guard）＋ `dashboard/redact.py`（第三道
+  掃描共用正本）＋ `webui/src/views/` 五區塊與 Streamlit 對等。
+- **P2（`3da90ae`）**：Stage 3 三項功能（依拍板順序功能二→三→一）搬入
+  新 UI。**上線首日實績**：(1) 支撐一次真實憑證稽核與清理——五個
+  profile 憑證池對齊應然配置、**全程零明文接觸**，功能二「技術上不
+  可能外洩秘密值的唯讀檢視」的設計目的第一天就兌現；(2) 統一排程健康
+  表抓到 `aichain-orchestrator-daily` 失敗（該 job 本身的處置屬 Hermes
+  cron 運營事項，另行追蹤，非 dashboard 缺陷）。含 2026-07-23 目視
+  回饋修正：字級＋2、憑證表對齊、model 欄改為實際生效模型。
+- **P3（`0bbd6c1`）**：PTY 終端機（ClaudeCode CLI view，nav 位於總覽與
+  Jobs 之間）——使用者實測打字輸入與中文回覆通過；含按鈕樣式與 15px
+  字體調整。詳細完工註記見
+  [webui-pty-terminal-proposal.md](webui-pty-terminal-proposal.md)。
+
+### 10.2 DoD 勾稽（對照各 phase DoD 與 §9 拍板）
+
+- **P0 DoD 八條**：達成——其中第 6 條（安全檢查 script）以 9 項檢查
+  全過的實況滿足「至少八項全過」要求。
+- **P1 DoD 五條**：達成——五區塊對等、鐵律測試（403/405/import guard）
+  與 `bot_token` 不外洩測試落地、bind 寫死、Streamlit 期間零改動。
+- **P2 DoD 五條**：達成——stage3 提案 v2 三項功能 DoD 逐項對照原文
+  驗收；三層假密鑰掃描（data 層／API 回應／UI 渲染）落地；Streamlit
+  標 deprecated 並自 2026-07-24 進入並行觀察期；過渡期 script 由正式
+  安全檢查取代（涵蓋面不縮水）。
+- **P3（PTY 提案 §8 DoD 九條）**：達成並經使用者實測驗收——詳見 PTY
+  提案完工註記。
+- **拍板一致性**：§9 六項拍板全部按拍板值執行，無偏離；兩個寫入例外
+  （bridge、PTY）均維持獨立 process＋audit log＋與唯讀側物理隔離。
+
+### 10.3 剩餘事項（本提案唯一未結案部分）
+
+1. **Streamlit 並行觀察期**（2026-07-24 起算一個自然使用週期，期間
+   Streamlit 零維護只讀）→ 期滿後退役決策與實際移除。
+2. §7 文件連動表殘項（特別是第 5 項 memory 記錄，由 CoS 經 `knowledge`
+   處理）。
+3. `aichain-orchestrator-daily` 失敗的後續處置（P2 觀測成果的下游行動，
+   不屬本提案範圍，由 CoS 依 delegation policy 另行分派追蹤）。
