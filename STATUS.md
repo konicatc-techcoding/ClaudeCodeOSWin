@@ -44,7 +44,6 @@
 ## 3. 卡住/未決的問題
 
 - **Streamlit 退役決策**:待並行觀察期(2026-07-24 起)滿一個自然使用週期後拍板。
-- **nous 撤銷收尾**:本機憑證已清;**服務端撤銷待使用者到 Nous Portal 操作**。
 - **env 變數清理待使用者手動**:建議移除 `GEMINI_API_KEY`/`GOOGLE_API_KEY`/
   `ANTHROPIC_API_KEY`(防重撿);`OPENROUTER_API_KEY` 為 nemocoding 必需不可移除。
 - 本地 master 領先 origin 多個 commit,**尚未 push**(push 需使用者確認)。
@@ -58,5 +57,6 @@
 
 - **日常實際使用新 UI**(`webui/` 下 `npm run local` + `readonly-api`),
   在觀察期內累積使用經驗,發現問題隨時回報修正;觀察期滿拍板 Streamlit 退役。
-- 次優先:push 到 origin(待確認);nous Portal 服務端撤銷+env 變數移除
-  (使用者手動);確認 07-19 排程首次自動觸發結果。
+- 次優先:push 到 origin(待確認);env 變數移除(使用者手動);
+  確認 07-19 排程首次自動觸發結果。
+  (nous 已結案:使用者 2026-07-24 拍板從未使用過,本機清除即可,不追服務端撤銷。)
