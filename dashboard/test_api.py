@@ -37,6 +37,7 @@ import api  # noqa: E402
 import data  # noqa: E402
 import data_resident  # noqa: E402
 import data_stage3  # noqa: E402
+import data_update  # noqa: E402
 import db  # noqa: E402
 import redact  # noqa: E402
 
@@ -178,7 +179,8 @@ class ImportGuardTests(unittest.TestCase):
     # 想加東西?先想清楚它有沒有寫入能力,再來改這份白名單。
     ALLOWED_IMPORTS = {
         "argparse", "json", "re", "sys", "urllib.parse",
-        "http.server", "pathlib", "data", "data_resident", "data_stage3", "redact",
+        "http.server", "pathlib", "data", "data_resident", "data_stage3",
+        "data_update", "redact",
     }
     # 已知寫入模組(防守性斷言;白名單本來就擋掉它們,雙保險)
     FORBIDDEN = {
@@ -597,6 +599,78 @@ class ResidentStatusEndpointTests(ApiServerTestCase):
 
     def test_resident_status_rejects_non_get(self):
         status, _, _ = self._request("/api/resident-status", method="POST")
+        self.assertEqual(status, 405)
+
+
+class UpdatePrecheckEndpointTests(ApiServerTestCase):
+    """Hermes 更新唯讀升級預檢 endpoint(webui-update-button-proposal §3,階段一)。
+
+    兩端/五態的判定邏輯在 test_data_update.py;這裡鎖 API 層:endpoint 曝露、
+    非 GET 拒絕、探測失敗優雅退化(不噴 500)。以替換 data_update._probe 隔離,
+    不觸碰真實 git/wsl。"""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_probe = data_update._probe
+        data_update._cache = None
+
+    def tearDown(self):
+        data_update._probe = self._orig_probe
+        data_update._cache = None
+        super().tearDown()
+
+    def test_update_precheck_returns_probe_payload(self):
+        data_update._probe = lambda: {
+            "checked_at": "2026-07-24T00:00:00+00:00",
+            "remote_note": "遠端資訊只讀本地已有 refs(origin/main),可能過期——階段一預檢未執行 fetch",
+            "stage": "唯讀升級預檢(階段一);寫入/執行功能未核准,無任何執行鈕",
+            "targets": [
+                {"id": "windows", "label": "Windows Hermes (live gateway)", "light": "orange",
+                 "light_text": "帶客製 diverge——需人工受控 merge", "queryable": True,
+                 "overall_driver": "upstream", "blocking_reasons": [],
+                 "advice": "備份同步 ✓;官方有 16 個新 commit,因帶 12 個客製屬 diverged",
+                 "comparisons": [
+                     {"remote": "origin", "role": "backup", "behind": 0, "ahead": 0,
+                      "light": "green", "summary": "備份同步 ✓", "applicable": True,
+                      "counts_toward_overall": True},
+                     {"remote": "upstream", "role": "upstream", "behind": 16, "ahead": 12,
+                      "light": "orange", "summary": "官方有 16 個新 commit", "applicable": True,
+                      "counts_toward_overall": True},
+                 ]},
+                {"id": "wsl", "label": "WSL Hermes (Ubuntu)", "light": "blue",
+                 "light_text": "可 ff-only 前進", "queryable": True,
+                 "overall_driver": "upstream", "blocking_reasons": [],
+                 "advice": "官方有 5 個新 commit,無客製分歧",
+                 "comparisons": [
+                     {"remote": "origin", "role": "upstream", "behind": 5, "ahead": 0,
+                      "light": "blue", "summary": "官方有 5 個新 commit", "applicable": True,
+                      "counts_toward_overall": True},
+                 ]},
+            ],
+        }
+        payload = self._get_json("/api/update-precheck")
+        self.assertEqual(len(payload["targets"]), 2)
+        win = payload["targets"][0]
+        self.assertEqual(win["id"], "windows")
+        self.assertEqual(win["light"], "orange")
+        self.assertEqual(win["overall_driver"], "upstream")
+        # 雙基準都要原樣傳到前端(備份綠 + 官方橙)
+        roles = {c["role"]: c for c in win["comparisons"]}
+        self.assertEqual(roles["backup"]["light"], "green")
+        self.assertEqual(roles["upstream"]["behind"], 16)
+        self.assertEqual(roles["upstream"]["ahead"], 12)
+        self.assertEqual(payload["targets"][1]["light"], "blue")
+        self.assertIn("未執行 fetch", payload["remote_note"])
+
+    def test_update_precheck_failure_degrades_to_gray_not_500(self):
+        data_update._probe = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        status, _, body = self._request("/api/update-precheck")
+        self.assertEqual(status, 200, "探測失敗必須優雅退化,不得 500")
+        payload = json.loads(body)
+        self.assertTrue(all(t["light"] == "gray" for t in payload["targets"]))
+
+    def test_update_precheck_rejects_non_get(self):
+        status, _, _ = self._request("/api/update-precheck", method="POST")
         self.assertEqual(status, 405)
 
 

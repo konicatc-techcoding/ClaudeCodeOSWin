@@ -9,6 +9,7 @@ import Overview from "./views/Overview";
 import ResidentStatus from "./ResidentStatus";
 import SessionsView from "./views/Sessions";
 import TerminalView from "./views/Terminal";
+import UpdatePrecheckView from "./views/UpdatePrecheck";
 
 // P1:與既有 Streamlit dashboard 對等的五個資料區塊(總覽/Jobs/成本/Memory/Logs,
 // 全部經唯讀 API 取數,見 src/api.ts)+ P0 交付的 Hermes Dashboard view。
@@ -18,7 +19,7 @@ import TerminalView from "./views/Terminal";
 
 // P3:ClaudeCode CLI(PTY 真終端機,唯一的寫入型 view)——nav 位置在
 // 總覽與 Jobs 之間(使用者原話指定),設計正本 docs/webui-pty-terminal-proposal.md。
-type ViewId = "overview" | "terminal" | "jobs" | "cost" | "memory" | "logs" | "sessions" | "credentials" | "hermes";
+type ViewId = "overview" | "terminal" | "jobs" | "cost" | "memory" | "logs" | "sessions" | "credentials" | "update" | "hermes";
 
 const NAV_ITEMS: ReadonlyArray<{ id: ViewId; icon: string; title: string; sub: string }> = [
   { id: "overview", icon: "O", title: "總覽", sub: "Worker / Jobs / 排程表" },
@@ -29,6 +30,7 @@ const NAV_ITEMS: ReadonlyArray<{ id: ViewId; icon: string; title: string; sub: s
   { id: "logs", icon: "L", title: "Logs", sub: "Tail Viewer" },
   { id: "sessions", icon: "S", title: "Hermes Sessions", sub: "唯讀 session 列表" },
   { id: "credentials", icon: "C", title: "憑證/Lane 狀態", sub: "治理中繼資訊(唯讀)" },
+  { id: "update", icon: "U", title: "Hermes 更新", sub: "唯讀升級預檢(階段一)" },
   { id: "hermes", icon: "H", title: "Hermes Dashboard", sub: "Control & Settings" },
 ];
 
@@ -40,6 +42,7 @@ const PAGE_META: Record<Exclude<ViewId, "hermes" | "terminal">, { kicker: string
   logs: { kicker: "LOGS", title: "Logs", desc: "log 檔案尾端檢視(唯讀)" },
   sessions: { kicker: "SESSIONS", title: "Hermes Sessions", desc: "Hermes session 唯讀列表——不含訊息內容,不提供全文檢視" },
   credentials: { kicker: "CREDENTIALS", title: "憑證/Lane 狀態", desc: "Capability lane 治理表+憑證治理中繼資訊(唯讀,絕不顯示憑證值)" },
+  update: { kicker: "HERMES UPDATE", title: "Hermes 更新", desc: "唯讀升級預檢:兩端版本/落後/能否 ff/客製 diverge/rescue ref/服務狀態——零執行鈕(階段二未核准)" },
 };
 
 export default function App() {
@@ -112,6 +115,7 @@ export default function App() {
               {activeView === "logs" && <LogsView />}
               {activeView === "sessions" && <SessionsView />}
               {activeView === "credentials" && <CredentialsView />}
+              {activeView === "update" && <UpdatePrecheckView />}
             </div>
           </>
         )}

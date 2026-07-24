@@ -145,6 +145,79 @@ export type ResidentStatusPayload = {
   gateway: { ready: boolean; state: string | null; detail: string; mtime?: string | null } | null;
 };
 
+// --- Hermes 更新唯讀升級預檢(docs/webui-update-button-proposal.md §3,階段一)---
+// 對應 dashboard/data_update.py::get_update_precheck()。**純唯讀**:UI 只顯示
+// 預檢結果,零執行/升級/同步按鈕(階段二寫入未核准);唯一允許的操作是
+// 「重新整理(重跑唯讀預檢)」的讀取鈕。此邊界由 update-precheck-render.test.mjs
+// 與 scripts/webui_security_check.py 第 11 項靜態鎖定。
+
+export type UpdateLight = "green" | "blue" | "orange" | "red" | "gray";
+
+export type UpdateTargetService = {
+  kind?: string;
+  detail?: string;
+  ready?: boolean | null;
+  state?: string | null;
+  units?: Record<string, ResidentUnitState> | null;
+  resident_units?: string[];
+} & Record<string, unknown>;
+
+export type UpdateRescueRef = { name: string; object: string; type: string };
+
+// 比較基準角色:upstream=官方上游(有無新版可吸收)、backup=私有備份/防重演
+// 基準(本機與雲端是否同步)、peer=其他基準(僅供參考,不計入整體燈)。
+// 角色由資料層**依 remote URL** 判定,不依 remote 名稱——兩端 remote 命名不同。
+export type UpdateRole = "upstream" | "backup" | "peer";
+
+export type UpdateComparison = {
+  remote: string;
+  url: string | null;
+  role: UpdateRole;
+  role_label: string;
+  ref: string;
+  tip: string | null;
+  applicable: boolean;
+  counts_toward_overall: boolean;
+  behind: number | null;
+  ahead: number | null;
+  can_ff: boolean | null;
+  diverged: boolean | null;
+  diverge_commits: string[];
+  light: UpdateLight;
+  light_text: string;
+  summary: string;
+} & Record<string, unknown>;
+
+export type UpdateTarget = {
+  id: string;
+  label: string;
+  runner?: string;
+  light: UpdateLight;
+  light_text: string;
+  advice: string;
+  blocking_reasons: string[];
+  // 整體燈由哪一組造成:"upstream" / "backup" / "target"(目標端層級的紅)
+  overall_driver?: string | null;
+  queryable: boolean;
+  repo?: string;
+  head?: { short: string | null; describe: string | null; branch: string | null } | null;
+  dirty?: boolean | null;
+  remotes?: string[];
+  comparisons?: UpdateComparison[];
+  rescue_refs?: UpdateRescueRef[];
+  rescue_count?: number;
+  expect_custom?: boolean;
+  expect_rescue?: boolean;
+  service?: UpdateTargetService | null;
+} & Record<string, unknown>;
+
+export type UpdatePrecheckPayload = {
+  checked_at: string;
+  remote_note: string;
+  stage: string;
+  targets: UpdateTarget[];
+};
+
 export class ApiError extends Error {
   constructor(
     public status: number,

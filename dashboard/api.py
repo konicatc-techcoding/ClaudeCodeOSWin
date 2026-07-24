@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import data  # noqa: E402
 import data_resident  # noqa: E402(背景常駐狀態燈號,唯讀三層探測,見 data_resident.py)
 import data_stage3  # noqa: E402(P2:Stage 3 三項唯讀函式,見 data_stage3.py)
+import data_update  # noqa: E402(Hermes 更新唯讀升級預檢——階段一,見 data_update.py)
 import redact  # noqa: E402
 
 API_HOST = "127.0.0.1"  # 鐵律:寫死,無參數化入口(提案 §3.1)
@@ -193,6 +194,12 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
             # 三層探測(data_resident.py):distro 未運作即止步,絕不執行會
             # 喚醒 distro 的指令;失敗優雅退化為 gray;資料層帶 5 秒快取。
             return 200, data_resident.get_resident_status()
+        # --- Hermes 更新唯讀升級預檢(docs/webui-update-button-proposal.md §3,階段一)---
+        if path == "/api/update-precheck":
+            # 純唯讀 git 讀取(白名單子指令);兩端並列(Windows/WSL)。WSL 端
+            # distro Stopped 不喚醒(複用 data_resident 守門);失敗優雅退化為灰。
+            # 45 秒 TTL 快取(git 讀取較重)。**零寫入、零 fetch、無執行入口。**
+            return 200, data_update.get_update_precheck()
         if path.startswith("/api/logs/"):
             name = path[len("/api/logs/"):]
             if ".." in name or not _LOG_NAME_RE.match(name):

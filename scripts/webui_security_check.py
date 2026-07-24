@@ -27,6 +27,14 @@ P3 追加(2026-07-24,docs/webui-pty-terminal-proposal.md;只追加、不放寬
       探測資料層 subprocess 位點僅兩個凍結唯讀查詢常數,無任何
       systemd/wsl 寫入動詞(寫入部分未核准,零程式碼)
 
+追加(2026-07-24,docs/webui-update-button-proposal.md §3 唯讀升級預檢;
+只追加、不放寬既有 1–10 項的任何判準):
+  11. 更新升級預檢唯讀       — UI 零執行/升級/同步鈕(唯一互動為讀取型
+      RefreshButton、onClick 僅 reload)、僅 GET 取數;資料層 git 讀取限
+      凍結唯讀模板集合(subprocess 單一位點、非白名單模板即拒絕),白名單
+      子指令集與原始碼皆無任何寫入 git 子指令,WSL 端不喚醒 distro
+      (階段二寫入執行未核准,零程式碼)
+
 用法: python scripts/webui_security_check.py
 結束碼: 0=全部通過, 1=任一項失敗
 """
@@ -45,6 +53,8 @@ VITE_CONFIG = WEBUI / "vite.config.ts"
 PTY_SERVER = WEBUI / "scripts" / "pty-server.mjs"
 RESIDENT_COMPONENT = WEBUI / "src" / "ResidentStatus.tsx"
 DATA_RESIDENT = REPO_ROOT / "dashboard" / "data_resident.py"
+UPDATE_COMPONENT = WEBUI / "src" / "views" / "UpdatePrecheck.tsx"
+DATA_UPDATE = REPO_ROOT / "dashboard" / "data_update.py"
 
 EXCLUDED_DIRS = {"node_modules", "dist", ".git"}
 SOURCE_SUFFIXES = {".ts", ".tsx", ".mjs", ".js", ".json", ".html", ".css", ".md"}
@@ -494,6 +504,109 @@ def check_resident_readonly(component: str, data_resident: str) -> tuple[bool, l
     return ok, details
 
 
+def check_update_precheck_readonly(component: str, data_update: str) -> tuple[bool, list[str]]:
+    """追加第 11 項:Hermes 更新——唯讀升級預檢(階段一)。階段二寫入(執行/升級/
+    同步)未核准——UI 不得出現任何執行入口,資料層 git 讀取限凍結唯讀模板,無任何
+    寫入/觸網 git 子指令。只追加,不放寬既有 1–10 項的任何判準。
+    正本 docs/webui-update-button-proposal.md §3/§8。"""
+    details: list[str] = []
+    ok = True
+
+    # (a) UI:取數僅經唯讀 apiGet;無直連 fetch
+    if "fetch(" in component:
+        ok = False
+        details.append("UpdatePrecheck.tsx 出現直連 fetch(取數必須走唯讀 apiGet)")
+    elif 'apiGet<UpdatePrecheckPayload>("/api/update-precheck")' in component:
+        details.append("取數僅經唯讀 API client(apiGet → GET /api/update-precheck,8799)")
+    else:
+        ok = False
+        details.append("未找到預期的唯讀 API 取數呼叫")
+
+    # (b) UI:零執行入口——view 內不自訂 <button(僅共用 RefreshButton),
+    #     且唯一 onClick 是 reload(讀取型重跑預檢),非任何執行/升級/同步動作
+    if "<button" in component:
+        ok = False
+        details.append("UpdatePrecheck.tsx 自訂了 <button(階段二執行鈕未核准;唯讀先行)")
+    else:
+        details.append("UpdatePrecheck.tsx 無自訂 <button(唯一互動為共用 RefreshButton 讀取鈕)")
+    onclicks = re.findall(r"onClick=\{[^}]*\}", component)
+    bad_onclicks = [oc for oc in onclicks if oc != "onClick={reload}"]
+    if bad_onclicks:
+        ok = False
+        details.append(f"UpdatePrecheck.tsx onClick 非讀取型 reload: {bad_onclicks}")
+    else:
+        details.append(f"onClick 僅 reload(重跑唯讀預檢),共 {len(onclicks)} 處,無執行/升級/同步處理器")
+
+    # (c) UI:寫入面字面不得出現(hermes update/ff-only merge/reset/fetch/pull)
+    ui_forbidden = ["hermes update", "--ff-only", '"reset"', '"merge"', '"fetch"', '"pull"']
+    ui_found = [f for f in ui_forbidden if f in component]
+    if ui_found:
+        ok = False
+        details.append(f"UpdatePrecheck.tsx 出現寫入面字面: {ui_found}")
+    else:
+        details.append("UpdatePrecheck.tsx 無 hermes update/ff-only/reset/merge/fetch/pull 字面")
+
+    # (d) 資料層:subprocess.run 只有一個位點(在 _exec 內)
+    call_sites = re.findall(r"subprocess\.run\(", data_update)
+    if len(call_sites) == 1:
+        details.append("data_update.py subprocess.run 位點恰為一處(_exec 唯一 spawn 點)")
+    else:
+        ok = False
+        details.append(f"data_update.py subprocess.run 位點與預期不符: {len(call_sites)} 處")
+
+    # (e) 資料層:git 讀取的兩層白名單強制——
+    #     (e1) 無參數查詢限凍結模板集合;(e2) 帶 remote 名的查詢限凍結建構器,
+    #     且 remote 名須過嚴格 regex(擋 `-` 開頭旗標、`/` 路徑、空白等注入)。
+    if "FROZEN_GIT_TEMPLATES" in data_update and re.search(
+        r"if args not in FROZEN_GIT_TEMPLATES", data_update
+    ):
+        details.append("無參數 git 查詢以 FROZEN_GIT_TEMPLATES 成員檢查強制(非白名單 → ValueError)")
+    else:
+        ok = False
+        details.append("未找到 FROZEN_GIT_TEMPLATES 的凍結模板強制檢查")
+    if re.search(r"if builder not in REF_TEMPLATE_BUILDERS", data_update):
+        details.append("帶 remote 名的 git 查詢限 REF_TEMPLATE_BUILDERS 凍結建構器")
+    else:
+        ok = False
+        details.append("未找到 REF_TEMPLATE_BUILDERS 的建構器白名單檢查")
+    if re.search(r'REMOTE_NAME_RE\s*=\s*re\.compile\(r"\^\[A-Za-z0-9\]\[A-Za-z0-9\._-\]', data_update) \
+            and "REMOTE_NAME_RE.match(remote)" in data_update:
+        details.append("remote 名以嚴格 regex 驗證(不得含 - 開頭/斜線/空白 → 無法注入旗標或路徑)")
+    else:
+        ok = False
+        details.append("remote 名的嚴格 regex 驗證與預期不符")
+    if re.search(r"if args\[0\] not in ALLOWED_GIT_SUBCOMMANDS", data_update):
+        details.append("建構器產出的子指令再過一次 ALLOWED_GIT_SUBCOMMANDS 白名單(縱深防禦)")
+    else:
+        ok = False
+        details.append("未找到建構器產出子指令的白名單覆核")
+
+    # (f) 資料層:白名單子指令集不含任何寫入子指令;原始碼無寫入 git 命令字面
+    if re.search(r"ALLOWED_GIT_SUBCOMMANDS\s*=\s*frozenset", data_update):
+        details.append("ALLOWED_GIT_SUBCOMMANDS 白名單子指令集存在(rev-parse/rev-list/merge-base/… 唯讀)")
+    else:
+        ok = False
+        details.append("未找到 ALLOWED_GIT_SUBCOMMANDS 白名單集")
+    # 寫入 git 子指令的「命令字面」(quoted token)——"merge-base" 是唯讀模板,
+    # 其字面為 '"merge-base"',不含 '"merge"';故此掃描不誤傷。
+    git_write_literals = ['"fetch"', '"pull"', '"merge"', '"reset"', '"checkout"',
+                          '"clone"', '"push"', '"commit"', '"rebase"', '"stash"', '"apply"']
+    git_found = [lit for lit in git_write_literals if lit in data_update]
+    if git_found:
+        ok = False
+        details.append(f"data_update.py 出現寫入 git 命令字面: {git_found}")
+    else:
+        details.append("data_update.py 無任何寫入 git 命令字面(fetch/pull/merge/reset/checkout/…)")
+
+    # (g) 資料層:WSL 端不喚醒——複用 resident 的 _distro_state 守門,distro 非 Running 不下 wsl -d
+    if "_distro_state()" in data_update and "避免喚醒" in data_update:
+        details.append("WSL 端沿用 resident _distro_state() 守門:distro 非 Running 不下任何 wsl -d(不喚醒)")
+    else:
+        ok = False
+        details.append("未找到 WSL distro 不喚醒守門(應複用 data_resident._distro_state)")
+    return ok, details
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -501,7 +614,8 @@ def main() -> int:
         pass
 
     missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG, PTY_SERVER,
-                                RESIDENT_COMPONENT, DATA_RESIDENT) if not p.exists()]
+                                RESIDENT_COMPONENT, DATA_RESIDENT,
+                                UPDATE_COMPONENT, DATA_UPDATE) if not p.exists()]
     if missing:
         print(f"FAIL — 檢查標的不存在: {missing}")
         return 1
@@ -524,6 +638,10 @@ def main() -> int:
     report.add(
         "常駐狀態燈號唯讀(零操作入口、探測指令凍結、無寫入動詞)",
         *_two(check_resident_readonly(read(RESIDENT_COMPONENT), read(DATA_RESIDENT))),
+    )
+    report.add(
+        "Hermes 更新升級預檢唯讀(階段一:零執行鈕、git 唯讀模板凍結、無寫入子指令)",
+        *_two(check_update_precheck_readonly(read(UPDATE_COMPONENT), read(DATA_UPDATE))),
     )
 
     return 0 if report.render() else 1
