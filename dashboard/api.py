@@ -41,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import data  # noqa: E402
+import data_resident  # noqa: E402(背景常駐狀態燈號,唯讀三層探測,見 data_resident.py)
 import data_stage3  # noqa: E402(P2:Stage 3 三項唯讀函式,見 data_stage3.py)
 import redact  # noqa: E402
 
@@ -187,6 +188,11 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
             if source is not None and not _SOURCE_RE.match(source):
                 raise ApiError(400, "source 格式不正確")
             return 200, data_stage3.get_hermes_sessions(source=source, limit=limit)
+        # --- 背景常駐狀態燈號(docs/webui-service-control-proposal.md §1,唯讀)---
+        if path == "/api/resident-status":
+            # 三層探測(data_resident.py):distro 未運作即止步,絕不執行會
+            # 喚醒 distro 的指令;失敗優雅退化為 gray;資料層帶 5 秒快取。
+            return 200, data_resident.get_resident_status()
         if path.startswith("/api/logs/"):
             name = path[len("/api/logs/"):]
             if ".." in name or not _LOG_NAME_RE.match(name):

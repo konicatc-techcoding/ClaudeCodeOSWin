@@ -21,6 +21,12 @@ P3 追加(2026-07-24,docs/webui-pty-terminal-proposal.md;只追加、不放寬
      constant-time token 比對、token 不落磁碟、spawn 目標/引數/cwd 寫死、
      訊息面僅 stdin/resize、audit 只記事件不落 transcript、與唯讀側物理隔離
 
+追加(2026-07-24,docs/webui-service-control-proposal.md §1 唯讀燈號;
+只追加、不放寬既有 1–9 項的任何判準):
+  10. 常駐狀態燈號唯讀       — UI 元件零按鈕/零點擊處理器/僅 GET 取數;
+      探測資料層 subprocess 位點僅兩個凍結唯讀查詢常數,無任何
+      systemd/wsl 寫入動詞(寫入部分未核准,零程式碼)
+
 用法: python scripts/webui_security_check.py
 結束碼: 0=全部通過, 1=任一項失敗
 """
@@ -37,6 +43,8 @@ BRIDGE = WEBUI / "scripts" / "bridge.mjs"
 LAUNCHER = WEBUI / "scripts" / "agentos-local.mjs"
 VITE_CONFIG = WEBUI / "vite.config.ts"
 PTY_SERVER = WEBUI / "scripts" / "pty-server.mjs"
+RESIDENT_COMPONENT = WEBUI / "src" / "ResidentStatus.tsx"
+DATA_RESIDENT = REPO_ROOT / "dashboard" / "data_resident.py"
 
 EXCLUDED_DIRS = {"node_modules", "dist", ".git"}
 SOURCE_SUFFIXES = {".ts", ".tsx", ".mjs", ".js", ".json", ".html", ".css", ".md"}
@@ -439,13 +447,61 @@ def check_pty_server(pty: str, launcher: str, bridge: str) -> tuple[bool, list[s
     return ok, details
 
 
+def check_resident_readonly(component: str, data_resident: str) -> tuple[bool, list[str]]:
+    """追加第 10 項:背景常駐狀態燈號(唯讀)——寫入部分未核准,
+    UI 與資料層都不得存在任何操作入口。只追加,不影響 1–9 項。"""
+    details: list[str] = []
+    ok = True
+
+    # (a) UI 元件:零按鈕、零點擊處理器、取數僅經唯讀 apiGet(GET-only client)
+    if "<button" in component or "onClick" in component:
+        ok = False
+        details.append("ResidentStatus.tsx 出現 button/onClick 操作入口(寫入部分未核准)")
+    else:
+        details.append("ResidentStatus.tsx 零 button/零 onClick(無任何操作入口,含 disabled 假按鈕)")
+    if "fetch(" in component:
+        ok = False
+        details.append("ResidentStatus.tsx 出現直連 fetch(取數必須走唯讀 apiGet)")
+    elif 'apiGet<ResidentStatusPayload>("/api/resident-status")' in component:
+        details.append("取數僅經唯讀 API client(apiGet → GET /api/resident-status,8799)")
+    else:
+        ok = False
+        details.append("未找到預期的唯讀 API 取數呼叫")
+
+    # (b) 資料層:subprocess 位點僅兩個凍結唯讀查詢常數
+    call_sites = re.findall(r"subprocess\.run\(\s*(\w+)", data_resident)
+    if sorted(set(call_sites)) == ["WSL_LIST_COMMAND", "WSL_SYSTEMCTL_COMMAND"] and len(call_sites) == 2:
+        details.append("data_resident.py subprocess 位點恰為兩處凍結常數(wsl --list / systemctl list-units)")
+    else:
+        ok = False
+        details.append(f"data_resident.py subprocess 位點與預期不符: {call_sites}")
+    if re.search(r'WSL_LIST_COMMAND\s*=\s*\("wsl\.exe",\s*"--list",\s*"--verbose"\)', data_resident) and \
+            '"list-units"' in data_resident:
+        details.append("探測指令皆為唯讀查詢形式;第一層 wsl --list 不喚醒 distro")
+    else:
+        ok = False
+        details.append("凍結探測指令常數內容與預期不符")
+
+    # (c) 資料層:無任何 systemd/wsl 寫入動詞字面值
+    write_verbs = ['"start"', '"stop"', '"restart"', '"enable"', '"disable"', '"mask"',
+                   "--terminate", "--shutdown", "daemon-reload"]
+    found = [verb for verb in write_verbs if verb in data_resident]
+    if found:
+        ok = False
+        details.append(f"data_resident.py 出現寫入動詞字面值: {found}")
+    else:
+        details.append("data_resident.py 無任何 systemd/wsl 寫入動詞字面值")
+    return ok, details
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
 
-    missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG, PTY_SERVER) if not p.exists()]
+    missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG, PTY_SERVER,
+                                RESIDENT_COMPONENT, DATA_RESIDENT) if not p.exists()]
     if missing:
         print(f"FAIL — 檢查標的不存在: {missing}")
         return 1
@@ -465,6 +521,10 @@ def main() -> int:
     report.add("敏感資料暴露(無真實憑證/密鑰/.env)", *_two(check_sensitive_data(bridge)))
     report.add("audit log(操作記錄落 logs/)", *_two(check_audit_log(bridge)))
     report.add("PTY server 安全(P3:隔離/授權/spawn 邊界/audit 不落 transcript)", *_two(check_pty_server(pty, launcher, bridge)))
+    report.add(
+        "常駐狀態燈號唯讀(零操作入口、探測指令凍結、無寫入動詞)",
+        *_two(check_resident_readonly(read(RESIDENT_COMPONENT), read(DATA_RESIDENT))),
+    )
 
     return 0 if report.render() else 1
 

@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hermes"))
 import api  # noqa: E402
 import data  # noqa: E402
+import data_resident  # noqa: E402
 import data_stage3  # noqa: E402
 import db  # noqa: E402
 import redact  # noqa: E402
@@ -177,7 +178,7 @@ class ImportGuardTests(unittest.TestCase):
     # 想加東西?先想清楚它有沒有寫入能力,再來改這份白名單。
     ALLOWED_IMPORTS = {
         "argparse", "json", "re", "sys", "urllib.parse",
-        "http.server", "pathlib", "data", "data_stage3", "redact",
+        "http.server", "pathlib", "data", "data_resident", "data_stage3", "redact",
     }
     # 已知寫入模組(防守性斷言;白名單本來就擋掉它們,雙保險)
     FORBIDDEN = {
@@ -552,6 +553,51 @@ class Stage3EndpointTests(ApiServerTestCase):
                      "/api/schedule-table", "/api/hermes/sessions"]:
             status, _, _ = self._request(path, method="POST")
             self.assertEqual(status, 405, path)
+
+
+class ResidentStatusEndpointTests(ApiServerTestCase):
+    """背景常駐狀態燈號 endpoint(webui-service-control §1.3,唯讀)。
+
+    探測本體的三層/五態邏輯在 test_data_resident.py;這裡鎖 API 層:
+    endpoint 曝露、非 GET 拒絕、探測失敗優雅退化(不噴 500)。
+    以替換 data_resident._probe 隔離,不觸碰真實 wsl。"""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_probe = data_resident._probe
+        data_resident._cache = None
+
+    def tearDown(self):
+        data_resident._probe = self._orig_probe
+        data_resident._cache = None
+        super().tearDown()
+
+    def test_resident_status_returns_probe_payload(self):
+        data_resident._probe = lambda: {
+            "light": "green", "text": "背景常駐中", "detail": "常駐單元全部 active,gateway 就緒",
+            "checked_at": "2026-07-24T00:00:00+00:00",
+            "distro": {"name": "Ubuntu", "running": True, "detail": "distro 狀態:Running"},
+            "resident_units": ["hermes-worker.service", "hermes-telegram.service"],
+            "units": {"hermes-worker.service": {"state": "active", "sub": "running",
+                                                "load": "loaded", "resident": True}},
+            "gateway": {"ready": True, "state": "running", "detail": "gateway 就緒"},
+        }
+        payload = self._get_json("/api/resident-status")
+        self.assertEqual(payload["light"], "green")
+        self.assertEqual(payload["text"], "背景常駐中")
+        self.assertEqual(payload["distro"]["running"], True)
+
+    def test_resident_status_probe_failure_degrades_to_gray_not_500(self):
+        data_resident._probe = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        status, _, body = self._request("/api/resident-status")
+        self.assertEqual(status, 200, "探測失敗必須優雅退化,不得 500")
+        payload = json.loads(body)
+        self.assertEqual(payload["light"], "gray")
+        self.assertEqual(payload["text"], "無法查詢")
+
+    def test_resident_status_rejects_non_get(self):
+        status, _, _ = self._request("/api/resident-status", method="POST")
+        self.assertEqual(status, 405)
 
 
 if __name__ == "__main__":

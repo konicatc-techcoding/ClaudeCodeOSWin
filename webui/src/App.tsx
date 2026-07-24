@@ -6,6 +6,7 @@ import JobsView from "./views/Jobs";
 import LogsView from "./views/Logs";
 import MemoryView from "./views/Memory";
 import Overview from "./views/Overview";
+import ResidentStatus from "./ResidentStatus";
 import SessionsView from "./views/Sessions";
 import TerminalView from "./views/Terminal";
 
@@ -54,6 +55,11 @@ export default function App() {
             <span>Control Center</span>
           </div>
         </div>
+
+        {/* 背景常駐狀態燈號:唯讀、全 view 共用頂部、常駐掛載(切 view 不重置
+            30 秒輪詢);零操作按鈕——寫入部分(重啟/關閉鍵)未核准,無任何入口。
+            設計正本 docs/webui-service-control-proposal.md §1。 */}
+        <ResidentStatus />
 
         <p className="nav-label">WORKSPACE</p>
         <nav className="main-nav" aria-label="主要功能">

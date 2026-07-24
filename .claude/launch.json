@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "webui",
+      "runtimeExecutable": "npm.cmd",
+      "runtimeArgs": ["run", "local", "--prefix", "webui"],
+      "port": 5173
+    },
+    {
       "name": "readonly-api",
       "runtimeExecutable": "${workspaceFolder}/.venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "dashboard.api"],

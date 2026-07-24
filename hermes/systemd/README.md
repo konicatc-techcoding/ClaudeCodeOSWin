@@ -79,6 +79,68 @@ cron-daily-memory-check）**維持 WSL systemd 管理不變**。timer 已 mask �
 docs/stage2.4d-episode-capture-proposal.md §8）。驗證入口：`journalctl --user
 -u hermes-bridge-*` 與 `systemctl --user list-units --failed`。
 
+## 開機自動啟動（2026-07-24 起：`HermesWslKeepAlive` + linger）
+
+**問題**：Windows 開機後 Ubuntu distro 是 Stopped，常駐服務（worker／telegram）
+不會自己起來；而且即使被喚醒（例如 `HermesBridgeDaily` 08:05 觸發），**最後一個
+`wsl.exe` client 結束後 WSL 仍會把 distro terminate——systemd 背景服務不足以讓
+distro 存活**（2026-07-24 實測：08:05 bridge 跑完後，09:23 檢查時 distro 已回到
+Stopped）。所以解法要兩件事同時成立：**開機喚醒 + 常駐 keep-alive client**。
+
+兩側設定：
+
+1. **WSL 側——linger**（讓 `systemctl --user` 單元不依賴登入 session）：
+
+   ```bash
+   loginctl enable-linger razer          # 一次性；本機實測不需 sudo
+   loginctl show-user razer --property=Linger   # 應回 Linger=yes
+   ```
+
+   linger 開了之後，distro 一 boot、`user@1000` 就起，enabled 的 hermes 單元
+   （worker／telegram／rss／cron timer）約 3 秒內自動 active，**不需要任何人
+   開 shell**。linger=no 的行為（歷史坑）：user 單元跟著 wsl session 走，
+   session 一結束服務就被停掉。
+
+2. **Windows 側——Task Scheduler task `HermesWslKeepAlive`**：
+
+   - 觸發：**At log on**（使用者 `razer`）。Windows 10 19045 沒有「開機就啟動
+     WSL」的官方選項（Windows 11 才有的 boot 相關功能不適用）；WSL VM 是
+     per-user 的，login 觸發是這台機器可行的最早時點。
+   - 動作：`wscript.exe //B //Nologo
+     "C:\Users\razer\dev\ClaudeCodeOSWin\hermes\windows\hermes-wsl-keepalive.vbs"`
+     ——vbs 以**隱藏視窗**執行 `wsl.exe -d Ubuntu --exec sleep infinity` 並
+     等待。這個永遠不結束的 client 就是 keep-alive：只要它活著，WSL 不會
+     terminate Ubuntu。（不直接掛 `wsl.exe` 的原因：Interactive 任務會在桌面
+     留一個永久可見的 console 視窗。）
+   - 設定：**執行時間上限＝無限**（`PT0S`；預設 72 小時會把 keep-alive 殺掉，
+     必關）、`MultipleInstances IgnoreNew`（不重複啟動）、**失敗自動重啟
+     3 次／間隔 1 分鐘**（`wsl --shutdown` 之後 task 會偵測到 client 死掉並
+     自動復活整條鏈）、電池模式照常執行。Principal 比照 `HermesBridgeDaily`
+     （`razer`／Interactive／Limited，建立不需提權）。
+   - `.wslconfig` 的 `[wsl2] vmIdleTimeout` **不是替代方案**——它管的是 utility
+     VM 的 idle 關機，擋不住 distro 本身被 terminate。
+
+**驗證紀錄**（2026-07-24 實測）：`wsl --terminate Ubuntu`（Stopped 確認）→
+`schtasks /run /tn HermesWslKeepAlive` → distro 自動 boot → worker／telegram
+於 boot 後 **3.1 秒** 自動 active（`ActiveEnterTimestampMonotonic`≈3.09s，
+早於任何人為 probe，證明是 linger 拉起、不是被檢查指令帶起）→ 持續觀察
+5 分鐘：distro 維持 Running、`NRestarts=0`、零 failed units、三個 timer
+（rss／cron-daily-memory-check／bridge skill-sync）正常排定；telegram adapter
+log 顯示輪詢正常（同日稍早並有真實訊息 enqueue 紀錄），worker 在 boot 後
+實際 claim 並完成多筆 RSS job（端到端管線活著）。
+
+**維運要點**：
+
+- 冷啟後驗證服務，記得 hermes gateway（hermes-agent 側）啟動後約 **3.5 分鐘**
+  才寫狀態檔，不要提早誤判 not running（見 memory）。
+- 手動重建鏈路（例如 `wsl --shutdown` 之後不想等自動重啟）：
+  `schtasks /run /tn HermesWslKeepAlive`。
+- 要停用開機自動啟動：Task Scheduler 停用/刪除 `HermesWslKeepAlive`；要連
+  「distro boot 就起服務」一起關，再加 `loginctl disable-linger razer`。
+- 限制：trigger 是 At log on，**Windows 重開機後要有人登入 `razer` 一次**
+  服務才會起來；無人登入的冷開機狀態下 Telegram bot 不可用（Win10 無
+  boot-time WSL 選項，若未來升 Windows 11 可再評估）。
+
 ## 安裝 / 移除
 
 ```bash

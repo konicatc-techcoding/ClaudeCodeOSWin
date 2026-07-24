@@ -121,6 +121,30 @@ export type HermesSession = {
 // 與 HermesSessionAdapter 的 session_source 值域一致
 export const SESSION_SOURCES = ["cli", "tui", "telegram", "cron"] as const;
 
+// --- 背景常駐狀態燈號(docs/webui-service-control-proposal.md §1,唯讀)---
+// 對應 dashboard/data_resident.py::get_resident_status() 的回傳結構。
+
+export type ResidentLight = "green" | "yellow" | "orange" | "red" | "gray";
+
+export type ResidentUnitState = {
+  state: string;
+  sub: string;
+  load?: string;
+  resident?: boolean;
+};
+
+export type ResidentStatusPayload = {
+  light: ResidentLight;
+  text: string;
+  detail: string;
+  checked_at: string;
+  distro: { name: string; running: boolean | null; detail: string };
+  // units/gateway 為 null = 該層未探測(前一層未通過即止步,探測零副作用)
+  units: Record<string, ResidentUnitState> | null;
+  resident_units: string[];
+  gateway: { ready: boolean; state: string | null; detail: string; mtime?: string | null } | null;
+};
+
 export class ApiError extends Error {
   constructor(
     public status: number,
