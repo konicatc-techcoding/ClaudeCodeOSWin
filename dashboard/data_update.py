@@ -25,8 +25,8 @@ REF_TEMPLATE_BUILDERS 建構器,且 remote 名須通過 REMOTE_NAME_RE 嚴格驗
   這個相等就是防重演機制本身,使 `reset --hard origin/main` 成為 no-op);
   `upstream` = 官方 NousResearch。只看 origin 會得到 0/0「已最新」,
   但實際 vs 官方是領先 12 / 落後 16。
-- WSL:**remote 結構與 Windows 不同**——`origin` 就是官方 NousResearch,
-  另有 `windows-side`(本機路徑 remote)。故**不假設兩端 remote 同名**,
+- WSL:**remote 結構與 Windows 不同**,且**2026-07-25 re-graft 後又改過一次**
+  (見下方「WSL remote 結構已變更」)。故**不假設兩端 remote 同名**,
   一律動態讀取實際 remote 清單(`git remote`),並**依 remote URL 判定角色**
   (而非依名稱),再對每個 remote 各算一組 ahead/behind/ff。
 
@@ -37,6 +37,36 @@ REF_TEMPLATE_BUILDERS 建構器,且 remote 名須通過 REMOTE_NAME_RE 嚴格驗
 | upstream | 含 NousResearch/hermes-agent | 官方上游——「有沒有新版可吸收」 |
 | backup   | 含 hermes-agent-private      | 私有備份/防重演基準——「本機與雲端是否同步」 |
 | peer     | 其他(例如本機路徑 remote)   | 其他基準,僅供參考,不計入整體燈 |
+
+## WSL remote 結構已變更(2026-07-25 re-graft)+ **已知燈號限制**
+
+2026-07-25 的 WSL side re-graft(docs/wsl-regraft-plan.md,方案 A,已執行完成)
+把 WSL `main` 對齊到 Windows 整合 tip `970118870`(兩側樹逐 byte 相同),
+並**重排 remote**:
+
+- 舊:`origin` = 官方 NousResearch、`windows-side` = 本機 Windows 路徑
+- **新:`origin` = `/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent`
+  (本機 Windows 路徑)、`upstream` = 官方 NousResearch**
+
+目的是讓 `hermes update` 的 diverged fallback(`reset --hard origin/main`)
+退化成對「Windows 整合 tip」的 no-op(防重演)。
+
+**⚠️ 由此產生的已知限制(本模組刻意不修正判定邏輯)**:
+
+WSL 的 `origin` 現在是**本機路徑 URL**,既不含 `nousresearch/hermes-agent`
+也不含 `hermes-agent-private`,故 `_role_for_url()` 判為 **`peer`**
+→ `counts_toward_overall = False`。
+
+**後果:WSL target 的「整體燈」完全由 `upstream` 組(官方)驅動,
+「WSL 有沒有跟上 Windows 整合 tip」這條完全不計入燈號。**
+偏偏那才是 WSL 最該被監控的一條——WSL 的正確語意就是「跟隨 Windows」,
+對官方落後多少反而是與 Windows 相同的預期常態(re-graft 後兩側同為
+領先 12 / 落後 295)。該組資訊仍**完整輸出**在 comparisons 內(role=`peer`,
+`counts_toward_overall=False`),只是不參與燈號合成——**看得到,但不會亮燈**。
+
+改善方向(新增一種能辨識「本機路徑且指向 Windows repo」的 role 並計入燈號)
+已記在 docs/webui-update-button-proposal.md §10.1,**需獨立評估與核准**;
+在那之前**本模組的角色判定與燈號邏輯維持原樣不動**,此處僅作說明。
 
 `<remote>/main` ref 不存在(未 fetch 過/無該 remote)→ 該組
 applicable=False「不適用/無法查詢」,不噴例外、不計入整體燈。
@@ -56,7 +86,10 @@ applicable=False「不適用/無法查詢」,不噴例外、不計入整體燈�
 - **WSL**:經 `wsl -d Ubuntu --exec git -C <repo>`。**distro Stopped 不喚醒**
   ——先用 data_resident 既有的 `_distro_state()`(只跑 `wsl --list --verbose`)
   守門;非 Running 直接灰,絕不下任何 `wsl -d` 指令。服務狀態複用
-  data_resident 既有探測,不重寫。
+  data_resident 既有探測,不重寫。expect_custom/expect_rescue 皆 False。
+  **WSL 端無 live gateway**(gateway 只在 Windows 側),故服務欄看的是
+  systemd --user 常駐單元,不是 gateway。整體燈的來源見上方
+  「WSL remote 結構已變更 + 已知燈號限制」——**由 upstream 組獨力驅動**。
 
 ## 燈號(每組一盞 + 整體取較嚴重者)
 

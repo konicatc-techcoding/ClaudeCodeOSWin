@@ -172,7 +172,24 @@ target**（§4）回報：
 | target | ff 判定對象 | 「切 live」方式 | 服務重啟 | live 驗證重點 |
 |---|---|---|---|---|
 | **Windows gateway** | 本機 hermes-agent vs 上游/整合 tip | 幾乎總是**需 merge**（Windows 側帶客製 tip）→ 按鈕多半**拒絕自動、退回人工** | gateway restart（生產服務，最保守） | doctor＋allowlist 負面 fail-closed＋ledger＋版本字串 |
-| **WSL 服務** | WSL main vs Windows main（本機路徑 remote，免網路） | **ff-only**（WSL 落後、是 Windows 的祖先）→ **按鈕可安全全自動**（首測） | `wsl -d Ubuntu systemctl --user restart <hermes 單元>`（複用 service-control 規格） | 同上，WSL 側 |
+| **WSL 服務** | WSL main vs **`origin/main`**（`origin` 即本機 Windows 路徑 remote，免網路免憑證；官方在 `upstream`） | **ff-only**（2026-07-25 re-graft 後兩側樹相同，未來同步**永遠可 ff**） | **不適用**——WSL **無 live gateway**（`ps` 無 gateway process），Telegram bot／worker 與 hermes-agent 零耦合**不需停**；只需暫停 3 個 systemd --user timer（`hermes-rss` / `hermes-bridge` / `hermes-cron-daily-memory-check`） | 同上，WSL 側（重點仍是 allowlist 負面 fail-closed） |
+
+**WSL 側現況（2026-07-25 re-graft 已執行完成，見
+[wsl-regraft-plan.md](wsl-regraft-plan.md) §10）**：
+
+- WSL `main` 已對齊 Windows 整合 tip `970118870`，`git diff --stat origin/main`
+  零輸出 → **兩側樹逐 byte 相同**；因此**未來同步永遠是 ff**，正是本按鈕階段二
+  設計的目標場景。
+- remote 結構**已改**（原本 `origin` = 官方、`windows-side` = 本機路徑）：
+  現為 **`origin` = `/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent`**、
+  **`upstream` = 官方 NousResearch**。語意是「WSL 跟隨 Windows 整合 tip」，
+  順帶讓 `hermes update` 的 diverged fallback `reset --hard origin/main` 退化成
+  **no-op**（防重演，§6）。
+  ⚠️ 換名時 `branch.main.remote` 會被 rename 一併帶走，必須手動修回 `origin`
+  才有這個 fail-safe——踩坑細節見 wsl-regraft-plan §10.2 偏差 1。
+- **「服務重啟」欄對 WSL 不適用**：WSL 內沒有任何 hermes gateway process，
+  live gateway 只在 Windows 側；停機需求僅止於 3 個 timer。2026-07-25 實測
+  **Telegram bot 停機 0 分鐘**。這也修正了 §9 待拍板項 6 的前提（見該項註記）。
 
 **關鍵不對稱**：Windows 側因帶客製，**結構上就不是 ff 場景**——按鈕對
 Windows 的常態行為是「預檢顯示需 merge → 不給自動執行鈕 → 指向人工受控
@@ -296,5 +313,40 @@ Windows，那正是事故的根源。
    自動 update 觸發源）並停用之——確認此依賴順序（防重演先於給按鈕）。
 6. **WSL 服務重啟窗口**：WSL telegram bot 在線，ff-only 升級要停機——
    採建議「執行前明示將停機、由使用者選時機觸發」？
+   → **前提已被 2026-07-25 re-graft 推翻（本項可簡化）**：實測證實
+   Telegram bot／worker 跑在 ClaudeCodeOSWin 自己的 `.venv`，不 import
+   hermes-agent、不呼叫 `hermes` CLI，**升級不需要停它**（實際停機 0 分鐘）。
+   WSL 端真正需要的只是「暫停 3 個 timer → 升級 → 恢復 timer」。
 7. **階段二整體 gate**：階段一隨本提案核准即做；階段二（WSL ff-only
    執行）是否現在核准，或先用階段一預檢一段時間、觸發源停用後再開？
+
+---
+
+## 10. 後續改進待辦（2026-07-25 re-graft 後新增）
+
+### 10.1 燈號盲點：WSL 最該被監控的那一條，目前不計入整體燈
+
+**現況（已知限制，非 bug）**：2026-07-25 re-graft 把 WSL 的 `origin` 指向
+**本機 Windows 路徑**（`/mnt/c/.../hermes/hermes-agent`）。而
+`dashboard/data_update.py::_role_for_url()` **依 URL 判角色**，本機路徑不含
+`nousresearch/hermes-agent` 也不含 `hermes-agent-private`，因此被判為
+**`peer`**，其 `counts_toward_overall` 為 `false`。
+
+後果：**WSL target 的整體燈完全由 `upstream` 組（官方 NousResearch）驅動**，
+而「**WSL 有沒有跟上 Windows 整合 tip**」這條**不計入燈號**——偏偏那才是 WSL
+最該被監控的一條（WSL 的正確語意就是「跟隨 Windows」，對官方落後多少反而
+是預期中的常態，兩側都落後同樣數量）。
+
+**待辦（需獨立評估與核准，不在本次改動範圍）**：考慮新增一種 role
+（暫名 `follow` / `peer-authoritative`），讓「**本機路徑 remote 且指向
+Windows hermes-agent repo**」能被辨識並**計入 WSL target 的整體燈**：
+
+- 判定不能只靠「是本機路徑」——要能確認該路徑就是 Windows 側 hermes-agent
+  repo（否則任何本機 remote 都會被誤升級成權威基準）。
+- 語意應是「落後 = 該同步了（可 ff，藍）／領先或分歧 = 異常（橙，因為 WSL
+  理論上不該有 Windows 沒有的東西）」，與 `upstream` 組的語意不同。
+- 需同步更新 `data_update.py` 的 `ROLE_LABEL`、`_build_comparison()` 的
+  `counts_toward_overall`、`_classify_target()` 的燈號合成，以及該模組
+  docstring 的角色表與燈號表。
+- **在此待辦落地前，判定邏輯維持不動**——只在 docstring 記載此限制，避免
+  在沒有完整評估的情況下改動燈號語意。
