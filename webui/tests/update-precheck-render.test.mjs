@@ -100,6 +100,15 @@ function windowsTarget(overrides) {
     overall_driver: "upstream",
     queryable: true,
     head: { short: "970118870", describe: "rescue/pre-remerge-20260724-14-g970118870", branch: "main" },
+    // live 版本字串(提案 §3.1 第一項,切片 1 補實作)。資料層取自
+    // HEAD 的 pyproject.toml blob + merge-base,**未執行 hermes CLI**。
+    live_version: {
+      package: "0.19.0",
+      upstream_base: "3910ab28",
+      local: "97011887",
+      carried: 12,
+      text: "v0.19.0 upstream 3910ab28 + local 97011887 (+12 carried commits)",
+    },
     dirty: false,
     remotes: ["origin", "upstream"],
     comparisons: [comparison({}), UPSTREAM_ORANGE],
@@ -127,6 +136,13 @@ function wslTarget(overrides) {
     overall_driver: "upstream",
     queryable: true,
     head: { short: "c12c64f9e", describe: "pre-upstream-merge", branch: "main" },
+    live_version: {
+      package: "0.19.0",
+      upstream_base: "3910ab28",
+      local: "c12c64f9",
+      carried: 0,
+      text: "v0.19.0 upstream 3910ab28 + local c12c64f9",
+    },
     dirty: false,
     remotes: ["origin", "windows-side"],
     comparisons: [
@@ -274,6 +290,31 @@ test("零執行入口:五態卡片渲染輸出皆不含任何 button(階段二�
 // ---------------------------------------------------------------------------
 // 事實欄位
 // ---------------------------------------------------------------------------
+
+test("live 版本字串如實呈現(v<pkg> upstream <base> + local <head>)", () => {
+  const html = mod.renderCard(windowsTarget({}));
+  assert.ok(html.includes("v0.19.0 upstream 3910ab28 + local 97011887 (+12 carried commits)"),
+    "須完整呈現 live 版本字串");
+  assert.ok(html.includes("版本（live）"), "須有版本欄標題");
+  // 語意誠實:必須說明版本來自 HEAD 的 pyproject.toml,且未跑 hermes CLI
+  assert.ok(html.includes("未執行 hermes CLI"), "須註明取數未執行 hermes CLI");
+});
+
+test("live 版本字串:缺漏/未知時顯示 — 不臆測、不噴例外", () => {
+  for (const lv of [null, undefined, { text: null, package: null, upstream_base: null, local: null, carried: null }]) {
+    const html = mod.renderCard(windowsTarget({ live_version: lv }));
+    assert.ok(html.includes("版本（live）"), "欄位仍在");
+    assert.ok(!html.includes("undefined"), "不得漏出 undefined");
+    assert.ok(!html.includes("未執行 hermes CLI"), "無版本時不顯示來源說明");
+  }
+});
+
+test("live 版本欄位不引入任何執行入口(零 button 仍成立)", () => {
+  const html = mod.renderCard(windowsTarget({}));
+  assert.ok(!html.includes("<button"), "版本欄不得帶 button");
+  const both = mod.renderCards(payload([windowsTarget({}), wslTarget({})]));
+  assert.ok(!both.includes("<button"), "兩端並列(含版本欄)仍不得含 button");
+});
 
 test("HEAD、rescue ref 如實呈現", () => {
   const html = mod.renderCard(windowsTarget({}));

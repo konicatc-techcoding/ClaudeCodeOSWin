@@ -508,7 +508,14 @@ def check_update_precheck_readonly(component: str, data_update: str) -> tuple[bo
     """追加第 11 項:Hermes 更新——唯讀升級預檢(階段一)。階段二寫入(執行/升級/
     同步)未核准——UI 不得出現任何執行入口,資料層 git 讀取限凍結唯讀模板,無任何
     寫入/觸網 git 子指令。只追加,不放寬既有 1–10 項的任何判準。
-    正本 docs/webui-update-button-proposal.md §3/§8。"""
+    正本 docs/webui-update-button-proposal.md §3/§8。
+
+    2026-07-25(切片 1,live 版本字串)**只加嚴不放寬**,新增 (g)(h) 兩組判準:
+    (g) 版本來源必須是凍結字面 `git show HEAD:pyproject.toml`,且 `show` 在原始碼
+        僅出現該一次(杜絕日後改成可參數化用法);
+    (h) 除唯一的 subprocess.run 外不得存在任何其他 spawn 原語——鎖死「版本改用
+        跑 hermes CLI 取得」這條會產生副作用的捷徑。
+    原 (g) WSL 不喚醒判準原封不動改編號為 (i)。"""
     details: list[str] = []
     ok = True
 
@@ -598,7 +605,38 @@ def check_update_precheck_readonly(component: str, data_update: str) -> tuple[bo
     else:
         details.append("data_update.py 無任何寫入 git 命令字面(fetch/pull/merge/reset/checkout/…)")
 
-    # (g) 資料層:WSL 端不喚醒——複用 resident 的 _distro_state 守門,distro 非 Running 不下 wsl -d
+    # (g) 資料層:live 版本字串的來源必須是凍結字面(2026-07-25 切片 1 加嚴)。
+    #     版本**不得**靠跑 hermes CLI 取得——那會 spawn process 並可能寫
+    #     ~/.hermes/.update_check(「看狀態」變「動狀態」)。故唯一允許的來源是
+    #     讀 HEAD 的 pyproject.toml blob,且該指令是零參數化的凍結字面。
+    if re.search(r'GIT_PYPROJECT\s*=\s*\(\s*"show",\s*"HEAD:pyproject\.toml"\s*\)', data_update):
+        details.append("live 版本來源為凍結字面 git show HEAD:pyproject.toml(零參數化,無注入面)")
+    else:
+        ok = False
+        details.append("未找到凍結的版本來源字面(應為 GIT_PYPROJECT = (\"show\", \"HEAD:pyproject.toml\"))")
+    # `show` 只准出現在兩處:那條凍結字面,以及 ALLOWED_GIT_SUBCOMMANDS 的成員宣告。
+    # 多於兩處 = 有人另外拼了一條 show 指令;且不得以 f-string 參數化。
+    show_uses = re.findall(r'"show"', data_update)
+    parameterised_show = re.search(r'f"[^"\n]*show', data_update)
+    if len(show_uses) == 2 and not parameterised_show:
+        details.append("子指令 show 僅出現於凍結字面與白名單宣告兩處,且無 f-string 參數化用法")
+    else:
+        ok = False
+        details.append(
+            f"子指令 show 的用法與預期不符(出現 {len(show_uses)} 處,"
+            f"參數化={bool(parameterised_show)};只允許凍結字面+白名單宣告)")
+
+    # (h) 資料層:除唯一的 subprocess.run 外,不得存在任何其他 spawn 原語
+    spawn_primitives = ["Popen", "os.system", "os.popen", "subprocess.call",
+                        "check_output", "os.exec", "os.spawn", "shutil.which"]
+    spawn_found = [p for p in spawn_primitives if p in data_update]
+    if spawn_found:
+        ok = False
+        details.append(f"data_update.py 出現非 git 的 spawn 原語: {spawn_found}")
+    else:
+        details.append("data_update.py 無任何其他 spawn 原語(Popen/os.system/check_output/…)")
+
+    # (i) 資料層:WSL 端不喚醒——複用 resident 的 _distro_state 守門,distro 非 Running 不下 wsl -d
     if "_distro_state()" in data_update and "避免喚醒" in data_update:
         details.append("WSL 端沿用 resident _distro_state() 守門:distro 非 Running 不下任何 wsl -d(不喚醒)")
     else:

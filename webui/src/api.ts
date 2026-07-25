@@ -183,9 +183,24 @@ export type UpdateComparison = {
   can_ff: boolean | null;
   diverged: boolean | null;
   diverge_commits: string[];
+  // 本地歷史與該 remote 的共同祖先(live 版本字串的 `upstream <sha>` 來源)
+  merge_base?: string | null;
   light: UpdateLight;
   light_text: string;
   summary: string;
+} & Record<string, unknown>;
+
+// live 版本字串(提案 §3.1 第一項)。資料層取自 **HEAD 的 pyproject.toml blob**
+// (`git show`,唯讀凍結字面)+ merge-base + 既有 ahead 數——**不執行 hermes CLI**
+// (那會 spawn process 並可能寫 ~/.hermes/.update_check),故取數零副作用。
+export type UpdateLiveVersion = {
+  package: string | null;
+  upstream_base: string | null;
+  local: string | null;
+  carried: number | null;
+  // 組好的字串,如 "v0.19.0 upstream 3910ab28 + local 97011887 (+12 carried commits)"
+  text: string | null;
+  source?: string;
 } & Record<string, unknown>;
 
 export type UpdateTarget = {
@@ -201,6 +216,7 @@ export type UpdateTarget = {
   queryable: boolean;
   repo?: string;
   head?: { short: string | null; describe: string | null; branch: string | null } | null;
+  live_version?: UpdateLiveVersion | null;
   dirty?: boolean | null;
   remotes?: string[];
   comparisons?: UpdateComparison[];

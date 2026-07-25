@@ -66,6 +66,13 @@ cd .. && .venv/Scripts/python.exe dashboard/api.py   # http://127.0.0.1:8799
 | `/api/adapter-config` | `get_adapter_config_status()` |
 | `/api/logs/<name>?lines` | `tail_log()`(檔名嚴格白名單 regex,擋 traversal) |
 
+後續在同一支 GET-only server 上追加的唯讀 endpoint(資料層各自獨立模組):
+
+| Endpoint | 資料層 | view |
+|---|---|---|
+| `/api/resident-status` | `dashboard/data_resident.py::get_resident_status()` | 背景常駐燈號 |
+| `/api/update-precheck` | `dashboard/data_update.py::get_update_precheck()` | Hermes 更新(唯讀升級預檢;安全邊界見下方專節) |
+
 每個回應在序列化前統一過 `dashboard/redact.py` 的遞迴憑證掃描(§3.4
 第三道防線,P1 先立防線給 P2 用)。測試:
 `.venv/Scripts/python.exe dashboard/test_api.py`(CORS/403、405、
@@ -230,6 +237,52 @@ npm test                                                # UI 渲染層(tests/sta
 到期自動終止真實 claude(audit 三行:disconnect/grace-expired/terminate);
 launcher 樹殺後 claude child 同步結束、8801/8787/5173 全部釋放,零殘留。
 E2E 過程未在 claude session 內執行任何實質指令。
+
+## Hermes 更新頁——唯讀升級預檢的安全邊界(階段一,2026-07-24;版本欄 2026-07-25 補)
+
+設計正本 [docs/webui-update-button-proposal.md](../docs/webui-update-button-proposal.md)
+§3/§6/§8。**本節是該提案 §6 第 4 項明文要求載明的安全邊界。**
+
+- **第一鐵律(不可協商)**:**本頁絕不呼叫 `hermes update`
+  (`hermes_cli/main.py:11086`)、bootstrap installer 的任何 update 模式
+  (`hermes-setup.exe --update`)、或 Hermes Desktop Install 鈕所走的那條路徑
+  (`apps/desktop/electron/main.ts:2584 applyUpdates()`)。**
+  理由是 2026-07-24 事故:那三條路徑的 diverged fallback 都是
+  `reset --hard origin/main`,會把本機客製整批毀掉。**本頁只「看」,不「動」。**
+- **零執行鈕**:UI 沒有任何執行/升級/同步入口(階段二寫入未核准)。唯一互動是
+  共用的「重新整理」讀取鈕,它**只重跑唯讀預檢,不 fetch、不寫入**。
+  三重鎖定:`views/UpdatePrecheck.tsx` 內不得自訂 `<button>`、view 內唯一
+  `onClick` 只能是 `reload`(渲染測試 + 原始碼靜態斷言 +
+  `scripts/webui_security_check.py` 第 11 項)。
+- **git 子指令白名單(兩層強制)**:資料層 `dashboard/data_update.py` 只跑
+  `rev-parse` / `rev-list` / `merge-base` / `for-each-ref` / `describe` /
+  `log` / `status --porcelain` / `remote` / `remote get-url` /
+  `show HEAD:pyproject.toml`。**絕不**跑 `fetch` / `pull` / `merge` /
+  `reset` / `checkout` / `clone` / `push` / `commit` / `rebase` / `stash`。
+  強制方式:(1) 無參數查詢必須是 `FROZEN_GIT_TEMPLATES` 成員;
+  (2) 帶 remote 名的查詢必須用 `REF_TEMPLATE_BUILDERS` 建構器,且 remote 名
+  須過 `REMOTE_NAME_RE`(擋 `-` 開頭旗標、`/` 路徑、空白 → 無法注入)。
+  非白名單一律 `ValueError`。
+- **單一 spawn 位點**:全模組 `subprocess.run` **恰為一處**(`_exec`),
+  且只會是 `git`(Windows)或 `wsl -d <distro> --exec git`(WSL)——
+  模組認得的可執行檔常數只有 `GIT_BIN` / `WSL_BIN` 兩個。
+- **遠端資訊不 fetch**:所有 ahead/behind/ff 一律相對**本地已有的**
+  `<remote>/main` 計算,UI 明白標示「遠端資訊可能過期——未執行 fetch」。
+- **WSL 不喚醒**:探測前先用 `data_resident._distro_state()`(只跑
+  `wsl --list --verbose`)守門;distro 非 Running 時**完全不下任何 `wsl -d`
+  指令**,直接顯示灰燈。「觀測」不得變成「改變系統狀態」。
+- **live 版本字串同樣零副作用**(2026-07-25 補):
+  `v0.19.0 upstream 3910ab28 + local 97011887 (+12 carried commits)`——
+  版本號讀 **HEAD 的 `pyproject.toml` blob**(`git show HEAD:pyproject.toml`,
+  凍結字面、零參數化),`upstream <sha>` 取 `merge-base`。
+  **刻意不跑 `hermes --version` 或任何 hermes CLI**:那會 spawn process、
+  載入整包 hermes,且其 banner 會寫 `~/.hermes/.update_check` ——
+  「看狀態」就變成「動狀態」了。
+- **偵測型防線(這頁存在的另一半價值)**:預檢會在「客製 commit 相對官方上游
+  歸零」(疑似被 reset 成純上游)、「rescue ref 全部遺失」、「工作樹髒」時亮**紅**;
+  在「本機領先私有備份 N 個 commit(尚未推送)」時亮**橙**。後者正是防重演機制
+  的失效條件警告——`reset --hard origin/main` 只在 `main == origin/main` 時
+  才是 no-op(見提案 §6.1)。
 
 ## 實測數據(2026-07-23,Windows 10,hermes v0.18.2)
 

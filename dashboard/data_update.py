@@ -76,6 +76,34 @@ applicable=False「不適用/無法查詢」,不噴例外、不計入整體燈�
 所有 ahead/behind/ff 一律相對**本地已有的 `<remote>/main`**計算——
 **不執行 fetch**(有網路副作用)。輸出明確標示「遠端資訊可能過期,未 fetch」。
 
+## live 版本字串(提案 §3.1 第一項;2026-07-25 切片 1 補實作)
+
+輸出形如 `v0.19.0 upstream 3910ab28 + local 97011887 (+12 carried commits)`,
+四個組成部分與其**零副作用**取得方式:
+
+| 部分 | 來源 | 為何無副作用 |
+|------|------|--------------|
+| `v0.19.0` | `git show HEAD:pyproject.toml` 的 `[project] version` | `show` 是唯讀子指令,參數是**凍結字面**(`GIT_PYPROJECT`,零參數化);只從 object database 讀 blob,不碰工作區、不觸網、不 spawn 任何非 git process |
+| `upstream 3910ab28` | `git merge-base <upstream-remote>/main HEAD`(取前 8 碼) | `merge-base` 本來就在白名單(既有 `--is-ancestor` 用的同一個);純圖論查詢,無寫入 |
+| `local 97011887` | 既有的 `rev-parse --short HEAD`(取前 8 碼) | 既有唯讀查詢,無新增 |
+| `(+12 carried commits)` | 既有 upstream 組的 `ahead`(`rev-list --count`) | 既有唯讀查詢,無新增 |
+
+**為何不用其他來源**(逐一排除,留紀錄以免日後「優化」成有副作用的版本):
+
+- **不跑 `hermes --version` / 任何 hermes CLI**——那會 spawn 一個真的 Python
+  process、載入整包 hermes、可能觸發 banner 的 update 檢查(`hermes_cli/banner.py`
+  會寫 `~/.hermes/.update_check`)。**那就是「看狀態」變「動狀態」**,違反 §3.1 唯讀鐵律。
+- **不讀 `venv/.../*.dist-info`**——Windows 端可直接讀檔,但 WSL 端得另開一個
+  **非 git 的** `wsl -d ... ls` 呼叫,會破壞「subprocess 只有一個位點且只跑 git」
+  這條可被靜態驗證的不變式。
+- **不讀 `gateway_state.json`**——實測其內容無版本欄位(只有 pid/state/platforms)。
+
+**語意誠實聲明**:版本取自 **HEAD 的 pyproject.toml**。兩端都是 editable install
+(`pip install -e`),故 HEAD 的原始碼即生效程式碼;但若 merge 後**未重跑
+`pip install -e`**,已安裝的依賴可能落後於此字串——那不在本欄位涵蓋範圍
+(工作樹未提交的改動則另由 `dirty` 欄呈現)。`pyproject.toml` 不存在/無法解析時
+一律回 None,字串降級成不含 `v…` 的形式,不臆測、不噴例外。
+
 ## 兩端並列(提案 §4,處理方式不對稱)
 
 - **Windows**:%LOCALAPPDATA%\\hermes\\hermes-agent,直接 `git -C <repo>`。
@@ -135,6 +163,7 @@ GIT_TIMEOUT_SECONDS = 15
 CACHE_TTL_SECONDS = 45.0  # 提案 §4 建議 30–60 秒;git 讀取重,短快取避免輪詢放大成本
 
 COMPARE_BRANCH = "main"  # 比較基準分支(各 remote 的 <remote>/main)
+SHORT_SHA_LEN = 8        # live 版本字串的 sha 縮寫長度(提案 §3.1 範例即 8 碼)
 
 # remote 名嚴格驗證:字母數字開頭,只允許字母數字與 . _ - ——
 # 不得含 `-` 開頭/`/`/空白 → 技術上無法注入旗標、路徑或額外參數。
@@ -162,9 +191,14 @@ GIT_REFS = (
     "refs/heads/",
     "refs/tags/",
 )
+# live 版本字串的套件版本來源:讀 **HEAD 的** pyproject.toml blob。
+# `show` 是唯讀子指令,且此處是零參數化的凍結字面——無任何注入面,
+# 不碰工作區、不觸網、不 spawn 非 git process(理由詳見模組 docstring)。
+GIT_PYPROJECT = ("show", "HEAD:pyproject.toml")
 
 FROZEN_GIT_TEMPLATES = frozenset({
     GIT_HEAD_SHORT, GIT_BRANCH, GIT_DESCRIBE, GIT_PORCELAIN, GIT_REMOTE_LIST, GIT_REFS,
+    GIT_PYPROJECT,
 })
 
 
@@ -193,8 +227,16 @@ def _t_diverge_log(remote: str) -> tuple[str, ...]:
     return ("log", "--oneline", "-n", "20", f"{remote}/{COMPARE_BRANCH}..HEAD")
 
 
+def _t_merge_base(remote: str) -> tuple[str, ...]:
+    """本地歷史裡最新的、該 remote 也有的 commit(＝共同祖先)。
+    live 版本字串的 `upstream <sha>` 就是這一顆。子指令 `merge-base` 與既有的
+    `--is-ancestor` 同一個,白名單無需擴充寫入面;純圖論查詢,零寫入。"""
+    return ("merge-base", f"{remote}/{COMPARE_BRANCH}", "HEAD")
+
+
 REF_TEMPLATE_BUILDERS = (
     _t_remote_url, _t_tip, _t_behind, _t_ahead, _t_ancestor, _t_diverge_log,
+    _t_merge_base,
 )
 
 # 白名單子指令(提案 §3.1 列舉集)。凍結模板與建構器產出的每一條,args[0] 都在
@@ -202,6 +244,7 @@ REF_TEMPLATE_BUILDERS = (
 ALLOWED_GIT_SUBCOMMANDS = frozenset({
     "rev-parse", "rev-list", "merge-base", "for-each-ref",
     "describe", "branch", "log", "status", "remote",
+    "show",  # 僅用於 GIT_PYPROJECT 這一條凍結字面(讀 HEAD 的 pyproject.toml blob)
 })
 
 LIGHT_TEXT = {
@@ -274,6 +317,68 @@ def _to_count(text: str | None) -> int | None:
         return None
 
 
+def _short8(sha: str | None) -> str | None:
+    """統一縮寫長度(提案 §3.1 範例用的就是 8 碼:`upstream 3910ab28 + local 97011887`)。
+    純字串切片,不再跑一次 git。"""
+    if not sha:
+        return None
+    token = sha.strip().split()[0] if sha.strip() else ""
+    return token[:SHORT_SHA_LEN] or None
+
+
+def _parse_project_version(text: str | None) -> str | None:
+    """從 pyproject.toml 內容取 `[project]` 段的 `version`。
+
+    刻意用**段落感知的逐行掃描**而非 toml 解析器:輸入是外部檔案,逐行掃描
+    對畸形內容天然免疫(不會噴例外),且只認 `[project]` 段——避免誤抓
+    `[tool.poetry] version` 之類的其他段落。找不到一律 None(不臆測)。"""
+    if not text:
+        return None
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section != "project":
+            continue
+        match = re.match(r'^version\s*=\s*["\']([^"\']+)["\']\s*$', line)
+        if match:
+            return match.group(1).strip() or None
+    return None
+
+
+def _live_version(head_short: str | None, package: str | None,
+                  comparisons: list[dict]) -> dict:
+    """組出提案 §3.1 的 live 版本字串。任何一段取不到就誠實省略該段,
+    不噴例外、不臆測(全都取不到時 text=None)。"""
+    upstream = _pick(comparisons, "upstream")
+    upstream_base = _short8(upstream.get("merge_base")) if upstream else None
+    carried = upstream.get("ahead") if upstream else None
+    local = _short8(head_short)
+
+    parts: list[str] = []
+    if package:
+        parts.append(f"v{package}")
+    if upstream_base:
+        parts.append(f"upstream {upstream_base}")
+    if local:
+        parts.append(f"+ local {local}" if parts else f"local {local}")
+    text = " ".join(parts) if parts else None
+    if text and carried:
+        text = f"{text} (+{carried} carried commits)"
+    return {
+        "package": package,
+        "upstream_base": upstream_base,
+        "local": local,
+        "carried": carried,
+        "text": text,
+        "source": "HEAD:pyproject.toml + merge-base(唯讀 git;未執行 hermes CLI)",
+    }
+
+
 def _role_for_url(url: str | None) -> str:
     """依 remote URL 判定角色(不依名稱——兩端 remote 命名不同)。"""
     low = (url or "").lower()
@@ -338,11 +443,14 @@ def _build_comparison(prefix: tuple[str, ...], remote: str) -> dict:
         return {
             **base, "applicable": False, "behind": None, "ahead": None,
             "can_ff": None, "diverged": None, "diverge_commits": [],
+            "merge_base": None,
             "light": "gray", "light_text": LIGHT_TEXT["gray"],
             "summary": f"不適用/無法查詢:本地無 {ref} ref(未 fetch 過此 remote)",
         }
     behind = _to_count(_ok_str(_run_git_remote(prefix, _t_behind, remote)))
     ahead = _to_count(_ok_str(_run_git_remote(prefix, _t_ahead, remote)))
+    # 共同祖先:live 版本字串的 `upstream <sha>` 來源(見模組 docstring 的版本欄)。
+    merge_base = _ok_str(_run_git_remote(prefix, _t_merge_base, remote))
     ancestor = _run_git_remote(prefix, _t_ancestor, remote)
     can_ff = (ancestor[0] == 0) if ancestor is not None else None
     diverge_commits: list[str] = []
@@ -353,7 +461,7 @@ def _build_comparison(prefix: tuple[str, ...], remote: str) -> dict:
     return {
         **base, "applicable": True, "behind": behind, "ahead": ahead,
         "can_ff": can_ff, "diverged": (ahead > 0) if ahead is not None else None,
-        "diverge_commits": diverge_commits,
+        "diverge_commits": diverge_commits, "merge_base": merge_base,
         "light": light, "light_text": LIGHT_TEXT[light], "summary": summary,
     }
 
@@ -397,6 +505,11 @@ def _facts_from_prefix(prefix: tuple[str, ...], repo_display: str) -> dict:
         _build_comparison(prefix, r) for r in remotes if REMOTE_NAME_RE.match(r)
     ]
 
+    # live 版本字串(提案 §3.1 第一項):套件版本讀 HEAD 的 pyproject.toml blob,
+    # 與 upstream 組的共同祖先/領先數組成。**零副作用**——不跑 hermes CLI、
+    # 不讀 venv metadata、不新增任何非 git 的 spawn(理由見模組 docstring)。
+    package_version = _parse_project_version(_ok_str(_run_git(prefix, GIT_PYPROJECT)))
+
     return {
         "queryable": True,
         "repo": repo_display,
@@ -406,6 +519,7 @@ def _facts_from_prefix(prefix: tuple[str, ...], repo_display: str) -> dict:
         "rescue_count": len(rescue),
         "remotes": remotes,
         "comparisons": comparisons,
+        "live_version": _live_version(head_short, package_version, comparisons),
     }
 
 

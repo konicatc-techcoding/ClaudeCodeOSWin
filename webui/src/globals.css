@@ -184,6 +184,12 @@ button { color: inherit; }
 .update-facts span { display: block; color: var(--muted); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
 .update-facts b { display: block; margin-top: 5px; font-size: 17px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .update-facts small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 12px; word-break: break-all; }
+/* live 版本字串:整行較長(v0.19.0 upstream 3910ab28 + local 97011887 (+12 …)),
+   故橫跨兩欄並調小字級。⚠ 同上特異性紀律:`.update-facts > div`(0,1,1)與
+   `.update-facts b`(0,1,1)都帶元素選擇器,故此處一律以 `.update-facts` 前綴
+   +class →(0,2,0)/(0,2,1)勝出,不需 !important。 */
+.update-facts .update-version { grid-column: 1 / -1; }
+.update-facts .update-version b { font-size: 14px; word-break: break-all; }
 /* 工作樹乾淨/髒:字重+顏色 pill,一眼可辨(沿用既有 --green/--orange 色變數)。
    ⚠ 特異性:上方 `.update-facts span`(0,1,1)會蓋過單一 class(0,1,0)的 color,
    故 pill 規則一律加上 `.update-facts` 前綴 →(0,2,0)勝出,不需 !important。

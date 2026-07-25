@@ -629,6 +629,11 @@ class UpdatePrecheckEndpointTests(ApiServerTestCase):
                  "light_text": "帶客製 diverge——需人工受控 merge", "queryable": True,
                  "overall_driver": "upstream", "blocking_reasons": [],
                  "advice": "備份同步 ✓;官方有 16 個新 commit,因帶 12 個客製屬 diverged",
+                 # live 版本字串(提案 §3.1 第一項,切片 1 補實作)
+                 "live_version": {"package": "0.19.0", "upstream_base": "3910ab28",
+                                  "local": "97011887", "carried": 12,
+                                  "text": "v0.19.0 upstream 3910ab28 + local 97011887"
+                                          " (+12 carried commits)"},
                  "comparisons": [
                      {"remote": "origin", "role": "backup", "behind": 0, "ahead": 0,
                       "light": "green", "summary": "備份同步 ✓", "applicable": True,
@@ -661,6 +666,10 @@ class UpdatePrecheckEndpointTests(ApiServerTestCase):
         self.assertEqual(roles["upstream"]["ahead"], 12)
         self.assertEqual(payload["targets"][1]["light"], "blue")
         self.assertIn("未執行 fetch", payload["remote_note"])
+        # live 版本字串須原樣傳到前端(redact 掃描不得吃掉版本/sha)
+        self.assertEqual(win["live_version"]["text"],
+                         "v0.19.0 upstream 3910ab28 + local 97011887 (+12 carried commits)")
+        self.assertEqual(win["live_version"]["package"], "0.19.0")
 
     def test_update_precheck_failure_degrades_to_gray_not_500(self):
         data_update._probe = lambda: (_ for _ in ()).throw(RuntimeError("boom"))

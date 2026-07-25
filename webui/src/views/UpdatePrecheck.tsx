@@ -114,6 +114,14 @@ export function UpdateTargetCard({ target }: { target: UpdateTarget }) {
       )}
 
       <div className="update-facts">
+        {/* live 版本字串(提案 §3.1 第一項):v<pkg> upstream <base> + local <head>。
+            資料層取自 HEAD 的 pyproject.toml blob + merge-base,**未執行 hermes CLI**
+            ——顯示層在此只是把字串印出來,不新增任何取數路徑。 */}
+        <div className="update-version">
+          <span>版本（live）</span>
+          <b>{target.live_version?.text ?? "—"}</b>
+          <small>{target.live_version?.text ? "版本取自 HEAD 的 pyproject.toml（editable install）；未執行 hermes CLI" : ""}</small>
+        </div>
         <div>
           <span>HEAD</span>
           <b>{head?.short ?? "—"}</b>
