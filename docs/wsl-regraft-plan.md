@@ -771,7 +771,7 @@ hermes send --help | grep -- '--message-key'   # 客製仍在
 | editable install | 0.18.2 → **0.19.0** |
 | remote 結構 | `origin` = `/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent`；`upstream` = 官方 NousResearch |
 | `updates.pre_update_backup` | `false` → **boolean `true`**（與 Windows 一致） |
-| 驗證 | **V1–V9、V12–V15 全過**；V10 與 V14 後半未執行（見 §10.4） |
+| 驗證 | **V1–V15 全數通過**（V10 與 V14 後半於 2026-07-25 補測完成，見 §10.4） |
 
 **rescue 錨（已建立，rollback 仍可用）**：
 
@@ -838,12 +838,30 @@ hermes send --help | grep -- '--message-key'   # 客製仍在
   2026-07-23 的官方快照為準，實際數字以此節為準——**重點不是絕對數字，而是
   兩側完全相同**。
 
-### 10.4 尚未執行的驗證項
+### 10.4 補測紀錄（2026-07-25，驗證清單至此全數關閉）
 
-| # | 項目 | 未執行原因 |
+**V10 ledger 冪等（正面）——2026-07-25 補測，通過。**
+使用者選定測試頻道 `C0BHZC2EG84`（先例頻道，在 allowlist 內），
+以同一 `--message-key regraft-v10-20260725` 連送兩次相同內容：
+
+| 次序 | CLI 輸出 | exit |
 |---|---|---|
-| V10 | ledger 冪等**正面**測試（同一 `--message-key` 送兩次） | 會**實際送出一則 Slack 訊息**到允許清單內的頻道；需先徵得使用者同意並選定測試頻道。負面測試 V9 已過，客製路徑已有基本保證 |
-| V14 後半 | 使用者在 Telegram 實際對 bot 送訊息確認回應 | 待使用者自行實測。V14 前半（`systemctl --user is-active hermes-telegram.service hermes-worker.service` 皆 `active`）已通過，且本流程全程未停這兩個 unit |
+| 第 1 次 | `sent` | 0 |
+| 第 2 次 | `already sent (deduplicated, ts=1784963993.073579)` | 0 |
+
+`~/.hermes/slack_send_ledger.db` 的 `sends` 表由 **5 列增為 6 列**（只增一列），
+該列 `state='success'`、`attempts=1`——第二次呼叫**沒有**產生新的投遞嘗試，
+Slack 頻道端只出現一則訊息。至此 ledger 的去重路徑在 re-graft 後確認完好，
+與 V9（allowlist fail-closed）合起來涵蓋客製硬化的兩條主要路徑。
+
+**V14 後半 Telegram bot 回應——2026-07-25 由使用者實測，通過。**
+使用者在 Telegram 對 bot 送訊息並收到回應。前半（`systemctl --user is-active
+hermes-telegram.service hermes-worker.service` 皆 `active`）在執行當日即已通過，
+且本流程全程未停這兩個 unit。複查時另確認：worker 正常承接背景 CoS 任務
+（`invoke_cos.sh` + `claude -p` 執行中），Telegram adapter 跑的是 ClaudeCodeOSWin
+自己的 `.venv`、與 hermes-agent 無耦合——與 §2 調查結論一致。
+
+至此 §9 驗證清單 V1–V15 全數關閉，本次 re-graft 無遺留驗證項。
 
 ### 10.5 rollback 狀態
 
