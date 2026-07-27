@@ -1,7 +1,7 @@
-# Web UI — 背景常駐狀態燈號＋服務控制鍵 設計提案（v1）
+# Web UI — 背景常駐狀態燈號＋服務控制鍵 設計提案（v1.1）
 
-日期：2026-07-24　狀態：**v1 草案——待使用者核准（寫入部分為獨立核准 gate，
-核准前零程式碼）**
+日期：2026-07-24（v1）／2026-07-27（v1.1）　狀態：**v1.1——唯讀部分已交付
+（commit 3871129），寫入部分已於 2026-07-27 經使用者核准並實作**
 負責規劃：`planning` domain
 負責領域（實作階段，若核准）：`engineering`（唯讀探測函式＋API endpoint＋
 UI 燈號、寫入側白名單操作＋audit＋測試）；`automation` 於本提案角色為零
@@ -14,6 +14,7 @@ UI 燈號、寫入側白名單操作＋audit＋測試）；`automation` 於本�
 線＝綠燈的定義）與 **stop 鍵和自動重啟策略的互動**（§2.4）必須以該案
 定案的單元清單與 `Restart=`／linger 行為為準——列為寫入部分的 start
 blocker（§5 第 5 項）。
+**（v1.1 更新）此 start blocker 已解除**——查證結論見版本標記與 §2.4。
 
 依賴文件：
 
@@ -37,6 +38,27 @@ blocker（§5 第 5 項）。
 - **v1**（2026-07-24）＝第一個正式版本（草案）。來源：使用者原話——
   「在webui的上方加一個是否背景常駐的文字和燈號，也許也加一個重啟和
   關閉鍵」。使用者已明確拍板**先規劃就好，不實作**。
+- **v1.1**（2026-07-27）＝寫入部分拍板與實作紀錄。使用者核准四項決策：
+  1. **寫入部分整體 gate：核准實作**（§5 項 6）。
+  2. **宿主：併入既有 bridge 8787**（§2.3 選項 a）——以「白名單第二群組」
+     擴充，兩群組白名單以獨立常數分列，測試斷言枚舉完整清單，防群組
+     互相滲透。
+  3. **單元白名單：僅 `hermes-worker.service` 與 `hermes-telegram.service`**，
+     不含 timer（§5 項 2 採建議）。
+  4. **關閉鍵層級：僅服務層級**，不做 `wsl --terminate`（§5 項 4 採建議）。
+
+  另兩項現況：§5 項 3（輪詢頻率）已隨 commit 3871129 的唯讀實作定案
+  （前端 30 秒＋API 端快取；§1 唯讀部分視為已由 3871129 交付，端點名為
+  `/api/resident-status` 而非本提案草擬的 `/api/service-status`）；
+  §2.4 start blocker 已解除——查證結論：喚醒機制是 Task Scheduler task
+  `HermesWslKeepAlive`（`hermes/windows/hermes-wsl-keepalive.vbs`，
+  `wsl -d Ubuntu --exec sleep infinity`，只保 distro 活著），**不會把被
+  stop 的服務拉回來**；systemd `Restart=always` 對明確 `systemctl stop`
+  不觸發。stop 的真實語意因此定案（見 §2.4），並已寫進 UI 按鈕旁說明。
+  實作落點：bridge `webui/scripts/bridge.mjs`（第二群組常數＋route＋
+  audit）、UI `webui/src/ServiceControl.tsx`、測試
+  `webui/tests/service-control.test.mjs`、安全檢查
+  `scripts/webui_security_check.py` 第 12 項。
 
 ---
 
@@ -77,6 +99,12 @@ blocker（§5 第 5 項）。
 ---
 
 ## 1. 唯讀部分——背景常駐狀態燈號
+
+> **（v1.1 標記）本節已由 commit 3871129 交付**：資料層
+> `dashboard/data_resident.py`、endpoint `GET /api/resident-status`
+> （非本提案草擬的 `/api/service-status`）、UI `webui/src/ResidentStatus.tsx`
+> （sidebar 燈號＋tooltip 明細）。輪詢頻率照 §1.3 建議值定案
+> （前端 30 秒）。以下保留原規劃文字作為設計依據。
 
 ### 1.1 資料來源設計
 
@@ -133,6 +161,10 @@ blocker（§5 第 5 項）。
 
 ## 2. 寫入部分——重啟／關閉鍵（獨立核准 gate）
 
+> **（v1.1 標記）本節已於 2026-07-27 經使用者核准並實作**：宿主採 §2.3
+> 選項 (a)（併入 bridge 8787，白名單第二群組），單元白名單僅兩個常駐
+> service（不含 timer），關閉鍵僅服務層級。實作與測試落點見版本標記。
+
 ### 2.1 與 bridge 既有例外的誠實對照（為什麼不能直接說「照 bridge 做」）
 
 | 面向 | bridge（已核准） | 本功能（候選） |
@@ -182,7 +214,7 @@ shell、localhost-only、audit log），但 ownership 一項以「具名白名�
   「process 隔離」更能對抗實際風險（白名單靜默膨脹），且擴充本來就要
   重新核准，gate 沒有被繞過。
 
-### 2.4 stop 鍵與自動化機制的互動（設計課題，start blocker）
+### 2.4 stop 鍵與自動化機制的互動（設計課題，start blocker——**v1.1 已解除**）
 
 - **`Restart=` 抵銷問題**：常駐 service 若設 `Restart=always`（或
   automation 常駐案為了「crash 自動重啟」而設定），使用者按 stop 後
@@ -192,6 +224,16 @@ shell、localhost-only、audit log），但 ownership 一項以「具名白名�
   automation 常駐案的機制定案後才能誠實定義**。本提案不猜：列為寫入
   部分的 start blocker，實作前與該案對齊並把定案語意寫進 UI 文字
   （按鈕旁明確說明「停止後將於（何時）自動恢復」或「不會自動恢復」）。
+- **（v1.1 定案）blocker 解除的查證結論與 stop 真實語意**：喚醒機制是
+  Task Scheduler task `HermesWslKeepAlive`
+  （`hermes/windows/hermes-wsl-keepalive.vbs`，內容為
+  `wsl -d Ubuntu --exec sleep infinity`）——它只保 distro 活著，**不會把
+  被 stop 的服務拉回來**；systemd 的 `Restart=always` 對明確的
+  `systemctl stop` 不觸發（crash 才觸發）。因此 stop 的真實語意定案為：
+  **停止後不自動恢復，直到下次 Windows 登入／WSL distro 重啟時由
+  systemd（依 enable 狀態）重新拉起**。這句話已寫進 UI 按鈕旁的說明
+  文字（`webui/src/ServiceControl.tsx` 的 `STOP_SEMANTICS_TEXT`，由
+  測試與安全檢查第 12 項鎖定不可移除）。
 - **timer 不建議納入 stop 對象**（待拍板項 2 的建議理由）：timer 的
   「停止」和排程語意糾纏（Persistent=true 的補跑等），誤操作面大於
   價值；排程健康觀測已有 P2 排程健康表。
@@ -223,16 +265,18 @@ shell、localhost-only、audit log），但 ownership 一項以「具名白名�
 
 ---
 
-## 5. 待拍板項清單（使用者需回答的最小問題集）
+## 5. 待拍板項清單（使用者需回答的最小問題集）——**v1.1 全數已決**
 
-1. **寫入鍵宿主**：採推薦「併入 bridge 8787、白名單第二群組、重新核准」
-   （選項 a），或獨立小 server（選項 b）？
-2. **單元白名單範圍**：採建議「僅常駐 service（`hermes-worker`／
-   `hermes-telegram`）」，或含 timer？
-3. **燈號輪詢頻率**：採建議「前端 30 秒＋API 端 5 秒快取」？
-4. **關閉鍵層級**：採建議「僅服務層級」，或含「關閉整個 Ubuntu distro
-   （`wsl --terminate`）」（不建議——影響面超出 hermes）？
-5. **（start blocker，非問題而是順序確認）**寫入部分實作前，與
-   automation 常駐案對齊 stop 語意（§2.4）——確認此依賴順序。
-6. **寫入部分整體 gate**：燈號（唯讀）隨本提案核准即做；重啟/關閉鍵
-   （寫入）是否現在就核准，或等常駐案完成、燈號用一段時間後再議？
+1. **寫入鍵宿主**【已決 2026-07-27】：採推薦「併入 bridge 8787、白名單
+   第二群組、重新核准」（選項 a）。兩群組白名單以獨立常數分列，測試
+   斷言枚舉完整清單。
+2. **單元白名單範圍**【已決 2026-07-27】：採建議——僅常駐 service
+   （`hermes-worker.service`／`hermes-telegram.service`），不含 timer。
+3. **燈號輪詢頻率**【已決,隨 commit 3871129 唯讀實作定案】：前端 30 秒
+   ＋API 端短快取（§1 已交付）。
+4. **關閉鍵層級**【已決 2026-07-27】：採建議——僅服務層級,不做
+   `wsl --terminate`。
+5. **（start blocker）**【已解除,查證結論見 §2.4/版本標記】：
+   `HermesWslKeepAlive` 只保 distro 活著,不會拉回被 stop 的服務;
+   `Restart=always` 對明確 stop 不觸發——stop 語意已誠實定義並寫進 UI。
+6. **寫入部分整體 gate**【已決 2026-07-27】：核准實作。

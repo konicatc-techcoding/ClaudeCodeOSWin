@@ -3,9 +3,11 @@ import { apiGet } from "./api";
 import type { ResidentLight, ResidentStatusPayload } from "./api";
 
 // 背景常駐狀態燈號(純唯讀;設計正本 docs/webui-service-control-proposal.md §1)。
-// 寫入部分(重啟/關閉鍵)未核准——本元件**零操作入口**:沒有任何按鈕、
-// 沒有任何點擊處理器、只發 GET(apiGet 一條路);也不做停用狀態的假按鈕
-// (mock 清零原則)。此邊界由 resident-render.test.mjs 靜態鎖定。
+// 寫入部分(重啟/關閉鍵)已於 2026-07-27(v1.1)核准,但集中在獨立元件
+// ServiceControl.tsx(bridge 8787 白名單第二群組)——本燈號元件**維持零操作
+// 入口**:沒有任何按鈕、沒有任何點擊處理器、只發 GET(apiGet 一條路);
+// 也不做停用狀態的假按鈕(mock 清零原則)。此邊界由 resident-render.test.mjs
+// 靜態鎖定(讀寫分離:顯示歸這裡,操作歸 ServiceControl)。
 // 探測失敗/唯讀 API 未連線 → 優雅退化為灰燈「無法查詢」,不影響其他 view。
 
 export const RESIDENT_POLL_INTERVAL_MS = 30_000; // 提案 §1.3:前端 30 秒輪詢

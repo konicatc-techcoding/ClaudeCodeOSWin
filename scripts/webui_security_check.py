@@ -35,6 +35,17 @@ P3 追加(2026-07-24,docs/webui-pty-terminal-proposal.md;只追加、不放寬
       子指令集與原始碼皆無任何寫入 git 子指令,WSL 端不喚醒 distro
       (階段二寫入執行未核准,零程式碼)
 
+追加(2026-07-27,docs/webui-service-control-proposal.md v1.1 §2 寫入部分
+使用者核准;只追加、不放寬既有 1–11 項的任何判準):
+  12. WSL 服務控制寫入(白名單第二群組)— bridge 第二群組白名單常數存在
+      且恰為預期集合(單元僅 hermes-worker/hermes-telegram 兩 service、
+      動詞僅 start/stop/restart,皆凍結);指令固定模板
+      `wsl -d Ubuntu systemctl --user <op> <unit>` 無任意單元名參數化
+      (route=枚舉笛卡兒積、lookup 全字串比對、execFile 固定字面);
+      白名單外 400+audit;禁區動詞(enable/disable/mask/daemon-reload/
+      --terminate)技術上無入口;UI 端枚舉與 bridge 一致、二次確認、
+      stop 語意明示、bridge 離線按鈕停用;兩群組互不滲透。
+
 用法: python scripts/webui_security_check.py
 結束碼: 0=全部通過, 1=任一項失敗
 """
@@ -55,6 +66,8 @@ RESIDENT_COMPONENT = WEBUI / "src" / "ResidentStatus.tsx"
 DATA_RESIDENT = REPO_ROOT / "dashboard" / "data_resident.py"
 UPDATE_COMPONENT = WEBUI / "src" / "views" / "UpdatePrecheck.tsx"
 DATA_UPDATE = REPO_ROOT / "dashboard" / "data_update.py"
+SERVICE_COMPONENT = WEBUI / "src" / "ServiceControl.tsx"
+HERMES_VIEW = WEBUI / "src" / "views" / "Hermes.tsx"
 
 EXCLUDED_DIRS = {"node_modules", "dist", ".git"}
 SOURCE_SUFFIXES = {".ts", ".tsx", ".mjs", ".js", ".json", ".html", ".css", ".md"}
@@ -158,10 +171,11 @@ def check_command_whitelist(bridge: str, launcher: str) -> tuple[bool, list[str]
         ("POST", "/api/hermes/dashboard/stop"),
     }
     if set(routes) == expected and len(routes) == 4:
-        details.append("端點恰為四種白名單操作: health / start / reload / stop")
+        details.append("第一群組端點恰為四種白名單操作: health / start / reload / stop"
+                       "(第二群組服務控制 route 為枚舉表 lookup,由第 12 項單獨檢查)")
     else:
         ok = False
-        details.append(f"端點不符四種白名單: {routes}")
+        details.append(f"第一群組端點不符四種白名單: {routes}")
 
     spawn_calls = re.findall(r"spawn\(([^,]+),", bridge + launcher)
     allowed_spawn_first_args = {"command.bin", "process.execPath"}
@@ -458,15 +472,17 @@ def check_pty_server(pty: str, launcher: str, bridge: str) -> tuple[bool, list[s
 
 
 def check_resident_readonly(component: str, data_resident: str) -> tuple[bool, list[str]]:
-    """追加第 10 項:背景常駐狀態燈號(唯讀)——寫入部分未核准,
-    UI 與資料層都不得存在任何操作入口。只追加,不影響 1–9 項。"""
+    """追加第 10 項:背景常駐狀態燈號(唯讀)——燈號元件與唯讀資料層不得存在
+    任何操作入口。寫入部分已於 2026-07-27(v1.1)核准,但操作入口**集中在
+    ServiceControl.tsx + bridge 第二群組**(第 12 項檢查);本項判準不變:
+    燈號元件與 data_resident.py 維持零寫入面(讀寫分離)。只追加,不影響 1–9 項。"""
     details: list[str] = []
     ok = True
 
     # (a) UI 元件:零按鈕、零點擊處理器、取數僅經唯讀 apiGet(GET-only client)
     if "<button" in component or "onClick" in component:
         ok = False
-        details.append("ResidentStatus.tsx 出現 button/onClick 操作入口(寫入部分未核准)")
+        details.append("ResidentStatus.tsx 出現 button/onClick 操作入口(操作必須集中於 ServiceControl.tsx)")
     else:
         details.append("ResidentStatus.tsx 零 button/零 onClick(無任何操作入口,含 disabled 假按鈕)")
     if "fetch(" in component:
@@ -645,6 +661,143 @@ def check_update_precheck_readonly(component: str, data_update: str) -> tuple[bo
     return ok, details
 
 
+def check_service_control(bridge: str, component: str, hermes_view: str) -> tuple[bool, list[str]]:
+    """追加第 12 項:WSL systemd 服務控制(寫入,白名單第二群組)——
+    2026-07-27 使用者核准(docs/webui-service-control-proposal.md v1.1 §2.2/
+    §2.3 選項 a:併入 bridge 8787)。只追加、不放寬既有 1–11 項的任何判準。
+    邊界模型:PID ownership 不適用(單元由 systemd 管理),以「具名白名單
+    窮舉」替代(提案 §2.1 對照表)——本項鎖定枚舉封閉與模板不可參數化。"""
+    details: list[str] = []
+    ok = True
+
+    # (a) 第二群組白名單常數存在且恰為預期集合(凍結;與第一群組獨立分列)
+    if re.search(
+        r'SERVICE_UNIT_WHITELIST\s*=\s*Object\.freeze\(\[\s*"hermes-worker\.service",\s*"hermes-telegram\.service"\s*\]\)',
+        bridge,
+    ):
+        details.append("單元枚舉凍結且恰為 hermes-worker.service / hermes-telegram.service(不含 timer)")
+    else:
+        ok = False
+        details.append("SERVICE_UNIT_WHITELIST 常數不存在或與預期集合不符")
+    if re.search(r'SERVICE_OP_WHITELIST\s*=\s*Object\.freeze\(\[\s*"start",\s*"stop",\s*"restart"\s*\]\)', bridge):
+        details.append("動詞枚舉凍結且恰為 start/stop/restart(枚舉封閉)")
+    else:
+        ok = False
+        details.append("SERVICE_OP_WHITELIST 常數不存在或與預期集合不符")
+
+    # (b) 指令固定模板凍結:wsl.exe -d Ubuntu systemctl --user + <op> + <unit>
+    if re.search(
+        r'SERVICE_COMMAND\s*=\s*Object\.freeze\(\{\s*bin:\s*"wsl\.exe",\s*'
+        r'args:\s*Object\.freeze\(\[\s*"-d",\s*"Ubuntu",\s*"systemctl",\s*"--user"\s*\]\)',
+        bridge,
+    ):
+        details.append("指令模板凍結: wsl.exe -d Ubuntu systemctl --user <op> <unit>")
+    else:
+        ok = False
+        details.append("SERVICE_COMMAND 凍結模板不存在或內容被改動")
+
+    # (c) 無任意單元名參數化:route=兩枚舉笛卡兒積、lookup 全字串比對、
+    #     execFile 為固定字面且全檔位點封閉(taskkill+服務控制共兩處)
+    if re.search(r"for \(const unit of SERVICE_UNIT_WHITELIST\)\s*\{\s*for \(const op of SERVICE_OP_WHITELIST\)", bridge):
+        details.append("route 表由兩個白名單的笛卡兒積建成(2×3=6 條),無其他來源")
+    else:
+        ok = False
+        details.append("SERVICE_ROUTES 建表方式與預期不符(必須是兩枚舉的笛卡兒積)")
+    if "SERVICE_ROUTES.get(request.url)" in bridge:
+        details.append("route lookup 為 Map 全字串嚴格比對(不解析 URL、不抽取參數)")
+    else:
+        ok = False
+        details.append("未找到 SERVICE_ROUTES 全字串 lookup")
+    if "execFile(serviceCommand.bin, [...serviceCommand.args, op, unit]" in bridge:
+        details.append("服務 execFile 呼叫=「凍結模板 + 枚舉 op/unit」固定字面,不可參數化")
+    else:
+        ok = False
+        details.append("服務 execFile 呼叫形式與預期固定字面不符")
+    exec_calls = len(re.findall(r"execFile\(", bridge))
+    if exec_calls == 2:
+        details.append("bridge 全檔 execFile 位點恰為兩處(taskkill + 服務控制),spawn 面封閉")
+    else:
+        ok = False
+        details.append(f"execFile 位點 {exec_calls} 處,與預期(2)不符")
+
+    # (d) 白名單外一律 400 + audit(前綴命中但非枚舉成員)
+    if re.search(r"if \(!route\) \{\s*auditService\(", bridge) and "白名單外路徑" in bridge and re.search(
+        r"auditService\([\s\S]{0,200}?sendJson\(response,\s*400", bridge
+    ):
+        details.append("前綴命中但非枚舉成員 → 400 + audit(白名單外一律拒絕並留痕)")
+    else:
+        ok = False
+        details.append("未找到白名單外 400+audit 攔截")
+
+    # (e) 禁區動詞(提案 §0.2)技術上無入口——剝離 // 註解後掃描
+    code_only = re.sub(r"(?m)(?<!:)//.*$", "", bridge)
+    forbidden = ['"enable"', '"disable"', '"mask"', "daemon-reload", "--terminate"]
+    found = [f for f in forbidden if f in code_only]
+    if found:
+        ok = False
+        details.append(f"bridge 程式碼出現禁區動詞: {found}")
+    else:
+        details.append("bridge 程式碼無 enable/disable/mask/daemon-reload/--terminate(動詞枚舉封閉)")
+
+    # (f) audit:auditService 涵蓋成功/失敗/重複操作拒絕/白名單外拒絕,
+    #     每筆含時間、動詞、單元、結果/exit code
+    audit_calls = len(re.findall(r"auditService\(", bridge))
+    if audit_calls >= 5 and re.search(r"service:\$\{op\} \| unit=\$\{unit\}", bridge) and "exit=" in bridge:
+        details.append(f"auditService 共 {audit_calls} 處(成功/失敗/拒絕全路徑),格式含動詞/單元/exit code")
+    else:
+        ok = False
+        details.append(f"auditService 呼叫僅 {audit_calls} 處或格式不含動詞/單元/exit code")
+
+    # (g) UI 端(ServiceControl.tsx):枚舉一致、請求面封閉、二次確認、
+    #     stop 語意明示、bridge 離線按鈕停用(非假按鈕)
+    unit_literals = set(re.findall(r"hermes-[a-z-]+\.service", component))
+    if unit_literals == {"hermes-worker.service", "hermes-telegram.service"}:
+        details.append("UI 單元字面恰為白名單兩成員,無白名單外單元名")
+    else:
+        ok = False
+        details.append(f"UI 單元字面與白名單不符: {sorted(unit_literals)}")
+    if '"http://127.0.0.1:8787"' in component and (
+        "`${BRIDGE_URL}${SERVICE_ROUTE_PREFIX}${action.unit}/${action.op}`" in component
+    ):
+        details.append("UI 操作 URL 僅由凍結枚舉值組出(bridge 8787 + /api/service/ 模板)")
+    else:
+        ok = False
+        details.append("UI 操作 URL 組成與預期不符")
+    if "setPending({ unit, op })" in component and "execute(pending)" in component:
+        details.append("二次確認:第一次點擊僅進入待確認狀態,execute 只由確認鈕觸發")
+    else:
+        ok = False
+        details.append("未找到二次確認流程")
+    if "停止後不自動恢復" in component and "依 enable 狀態" in component:
+        details.append("stop 真實語意(不自動恢復,至下次登入/distro 重啟由 systemd 拉起)明示於按鈕旁")
+    else:
+        ok = False
+        details.append("未找到 stop 語意明示文字(v1.1 §2.4 定案)")
+    if "disabled={disabled}" in component and "未運行,按鈕已停用" in component:
+        details.append("bridge 離線 → 按鈕明確停用+原因說明(非假按鈕)")
+    else:
+        ok = False
+        details.append("未找到 bridge 離線停用處理")
+    if "等待狀態收斂" in component:
+        details.append("操作後顯示收斂等待(不樂觀更新)")
+    else:
+        ok = False
+        details.append("未找到「不樂觀更新」的收斂等待提示")
+
+    # (h) 兩群組互不滲透:服務控制元件不打第一群組端點;Hermes view 不打第二群組
+    if "/api/hermes/" not in component:
+        details.append("ServiceControl.tsx 零引用第一群組端點(/api/hermes/*)")
+    else:
+        ok = False
+        details.append("ServiceControl.tsx 引用了第一群組端點(群組滲透)")
+    if "/api/service/" not in hermes_view:
+        details.append("Hermes.tsx 零引用第二群組端點(/api/service/*)")
+    else:
+        ok = False
+        details.append("Hermes.tsx 引用了第二群組端點(群組滲透)")
+    return ok, details
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -653,7 +806,8 @@ def main() -> int:
 
     missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG, PTY_SERVER,
                                 RESIDENT_COMPONENT, DATA_RESIDENT,
-                                UPDATE_COMPONENT, DATA_UPDATE) if not p.exists()]
+                                UPDATE_COMPONENT, DATA_UPDATE,
+                                SERVICE_COMPONENT, HERMES_VIEW) if not p.exists()]
     if missing:
         print(f"FAIL — 檢查標的不存在: {missing}")
         return 1
@@ -680,6 +834,10 @@ def main() -> int:
     report.add(
         "Hermes 更新升級預檢唯讀(階段一:零執行鈕、git 唯讀模板凍結、無寫入子指令)",
         *_two(check_update_precheck_readonly(read(UPDATE_COMPONENT), read(DATA_UPDATE))),
+    )
+    report.add(
+        "WSL 服務控制寫入(v1.1 第二群組:枚舉封閉、模板凍結、400+audit、UI 邊界)",
+        *_two(check_service_control(bridge, read(SERVICE_COMPONENT), read(HERMES_VIEW))),
     )
 
     return 0 if report.render() else 1

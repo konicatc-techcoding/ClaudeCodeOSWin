@@ -124,7 +124,8 @@ npm test                                                # UI 渲染層(tests/sta
 實作:`scripts/bridge.mjs`(核心,可測試)+ `scripts/agentos-local.mjs`
 (launcher,零參數呼叫=全部走凍結常數)。規格正本:提案 §5.4,逐條落實:
 
-1. **僅四種白名單操作端點**,無其他操作入口:
+1. **僅四種白名單操作端點**(第一群組;2026-07-27 起另有服務控制第二
+   群組,見下方專節),無其他操作入口:
    - `GET  /health` — 查詢 bridge 與 dashboard 狀態
    - `POST /api/hermes/dashboard` — 啟動 Hermes Dashboard
    - `POST /api/hermes/dashboard/reload` — 重新載入(重啟自有 process)
@@ -151,6 +152,46 @@ npm test                                                # UI 渲染層(tests/sta
 覆蓋上述規格;`tests/ui-static.test.mjs` 鎖定 mock 清零與託管殘留清零)。
 過渡期八項安全檢查:`python scripts/webui_security_check.py`(repo 根,
 純唯讀、輸出報告)。
+
+## 服務控制鍵——bridge 白名單第二群組(2026-07-27 v1.1 核准)
+
+設計正本 [docs/webui-service-control-proposal.md](../docs/webui-service-control-proposal.md)
+v1.1 §2。這是 bridge 8787 上的**第二個白名單操作群組**:對 WSL 側兩個
+hermes 常駐 systemd 單元做 start/stop/restart。與第一群組(Hermes
+dashboard 操作)以**獨立常數分列**,測試斷言兩群組各自的完整枚舉,防
+互相滲透。
+
+- **與 bridge PID-ownership 模式的差異(誠實對照,提案 §2.1)**:第一
+  群組的邊界是「只能停自己 spawn 的 child process」(PID ownership);
+  本群組的對象是 systemd 管理的具名單元,**PID ownership 模型不適用**
+  ——邊界改由「具名白名單窮舉」替代:能控制什麼由枚舉窮舉,不由
+  ownership 推導。
+- **單元枚舉寫死**(`SERVICE_UNIT_WHITELIST`):僅 `hermes-worker.service`
+  /`hermes-telegram.service`,不含 timer。**動詞枚舉寫死**
+  (`SERVICE_OP_WHITELIST`):僅 `start`/`stop`/`restart`。
+- **指令固定模板**:`wsl -d Ubuntu systemctl --user <op> <unit>`
+  (`SERVICE_COMMAND` 凍結常數)。route 表=兩枚舉的笛卡兒積(6 條
+  `POST /api/service/<unit>/<op>`),lookup 全字串嚴格比對——op/unit
+  永遠取自表內凍結值,不從 URL 解析、不讀 body、不解析 query。白名單外
+  一律 **400 + audit**。
+- **明確不做**(提案 §0.2):`enable`/`disable`/`mask`、`daemon-reload`、
+  unit 檔、`wsl --terminate`——動詞枚舉封閉,技術上不存在入口。
+- **stop 的真實語意**(v1.1 §2.4 定案,UI 按鈕旁明示):停止後不自動
+  恢復,直到下次 Windows 登入/WSL distro 重啟時由 systemd(依 enable
+  狀態)重新拉起(`HermesWslKeepAlive` 只保 distro 活著,不會拉回被
+  stop 的服務)。
+- **audit log**:沿用同一份 `logs/webui_bridge_audit.log`,每次操作
+  (含拒絕)一筆——時間、動詞(`service:<op>`)、單元、結果/exit code。
+- **重複操作防護**:同一單元已有操作進行中 → 409 + audit。
+- **UI**(`src/ServiceControl.tsx`,sidebar 燈號下方):枚舉與 bridge
+  一致(測試斷言);全部動作**二次確認**;操作後**不樂觀更新**(顯示
+  黃色收斂等待,狀態以燈號 30 秒輪詢收斂為準);bridge 未運行時按鈕為
+  明確停用狀態+原因說明(不做假按鈕)。唯讀燈號(`ResidentStatus.tsx`)
+  維持零操作入口——讀寫分離,顯示歸燈號、操作歸本元件。
+
+測試:`tests/service-control.test.mjs`(FAKE wsl fixture,**絕不對真實
+systemd 單元執行任何操作**;枚舉完整性/400/409/exit code/audit/UI 邊界
+逐條鎖定);`scripts/webui_security_check.py` 第 12 項靜態鎖定。
 
 ## P3:ClaudeCode CLI(PTY 真終端機,2026-07-24)
 
