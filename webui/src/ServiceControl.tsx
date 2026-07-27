@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ServiceUnitLight, useResidentStatus } from "./ResidentStatus";
 
 // 服務控制鍵(寫入,白名單第二群組;2026-07-27 使用者核准,設計正本
 // docs/webui-service-control-proposal.md v1.1 §2)。宿主=既有 bridge 8787。
@@ -11,6 +12,10 @@ import { useEffect, useState } from "react";
 // - 操作後不樂觀更新:顯示黃色「等待狀態收斂」提示,燈號(ResidentStatus,
 //   30 秒輪詢)收斂後自然反映真實狀態。
 // - bridge(8787)未運行 → 按鈕顯示為不可用狀態並說明原因,不做假按鈕。
+// - 個別服務小燈號(2026-07-27 拍板):讀寫分離——燈號唯讀走 8799
+//   (useResidentStatus 共享 store,與聚合燈同一條 30 秒輪詢,本元件零新增
+//   fetch/interval),操作走 8787;bridge 離線只影響按鈕可用性,不影響燈號。
+//   不樂觀更新:按完後燈號維持既有輪詢節奏,就地收斂。
 
 const BRIDGE_URL = "http://127.0.0.1:8787";
 const SERVICE_ROUTE_PREFIX = "/api/service/";
@@ -38,6 +43,34 @@ export const CONVERGE_NOTICE_MS = 45_000; // 收斂提示至少涵蓋一輪燈�
 type PendingAction = { unit: ServiceUnit; op: ServiceOp };
 type BridgeState = "unknown" | "online" | "offline";
 
+// 操作鈕圖示化(2026-07-27):每列三鈕改為 play(啟動)/reload(重啟)/stop(停止)
+// 圖示,騰出橫向空間給個別燈號。inline SVG + currentColor——顏色跟隨按鈕文字色
+// (stop 鈕沿用 .service-btn-stop 紅字),零外部依賴(CSP 自足,不引入 icon
+// 字型/CDN)。無障礙不倒退:按鈕本體帶 aria-label 與 title(「啟動
+// hermes-worker.service」等級的完整描述);二次確認對話維持全文字,不圖示化。
+function OpIcon({ op }: { op: ServiceOp }) {
+  if (op === "start") {
+    return (
+      <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
+        <polygon points="2.5,1.5 10.5,6 2.5,10.5" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (op === "restart") {
+    return (
+      <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
+        <path d="M10.5 6A4.5 4.5 0 1 1 6 1.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <polygon points="6,0 9.2,1.6 6,3.2" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
+      <rect x="2" y="2" width="8" height="8" rx="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 type ServiceResult = { ok?: boolean; error?: string; exitCode?: number | null };
 
 export default function ServiceControl() {
@@ -45,6 +78,8 @@ export default function ServiceControl() {
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busyUnit, setBusyUnit] = useState<ServiceUnit | null>(null);
   const [notice, setNotice] = useState<{ kind: "converging" | "error"; text: string } | null>(null);
+  // 個別燈號資料:與聚合燈同源(8799 唯讀共享 store),非 bridge
+  const residentStatus = useResidentStatus();
 
   useEffect(() => {
     let cancelled = false;
@@ -105,16 +140,19 @@ export default function ServiceControl() {
       {SERVICE_UNITS.map((unit) => (
         <div className="service-control-row" key={unit}>
           <span className="service-unit" title={unit}>{UNIT_LABELS[unit]}</span>
+          <ServiceUnitLight status={residentStatus} unit={unit} />
           <span className="service-actions">
             {SERVICE_OPS.map((op) => (
               <button
                 key={op}
                 type="button"
-                className={op === "stop" ? "service-btn service-btn-stop" : "service-btn"}
+                className={op === "stop" ? "service-btn service-btn-icon service-btn-stop" : "service-btn service-btn-icon"}
                 disabled={disabled}
+                aria-label={`${OP_LABELS[op]} ${unit}`}
+                title={`${OP_LABELS[op]} ${unit}`}
                 onClick={() => setPending({ unit, op })}
               >
-                {busyUnit === unit ? "…" : OP_LABELS[op]}
+                {busyUnit === unit ? "…" : <OpIcon op={op} />}
               </button>
             ))}
           </span>

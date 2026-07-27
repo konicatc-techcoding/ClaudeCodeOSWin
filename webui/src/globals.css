@@ -29,18 +29,21 @@ button { color: inherit; }
 .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 10; width: 232px; padding: 23px 14px 18px; display: flex; flex-direction: column; border-right: 1px solid var(--line-soft); background: rgba(16,18,23,.96); }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 7px 20px; }
 .brand-mark { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; color: white; background: linear-gradient(145deg,#8d80ff,#5545dc); font-size: 19px; font-weight: 800; box-shadow: 0 10px 30px #7668f63d; }
-.brand strong,.brand span { display: block; }.brand strong { font-size: 18px; letter-spacing: -.02em; }.brand span { margin-top: 2px; color: var(--muted); font-size: 13px; }
-.nav-label { margin: 6px 9px 8px; color: #535b6c; font-size: 11px; font-weight: 800; letter-spacing: .16em; }
+/* sidebar 灰字調亮(2026-07-27):非語意說明文字改近白,沿用檔內既有色階
+   (--text #f3f4f8 / #d8dbe3 / #b8bec9),不新增色彩系統;燈號語意色不動。
+   導覽項保留 active(white)/hover(--text)>基準(#d8dbe3)的對比層次。 */
+.brand strong,.brand span { display: block; }.brand strong { font-size: 18px; letter-spacing: -.02em; }.brand span { margin-top: 2px; color: #d8dbe3; font-size: 13px; }
+.nav-label { margin: 6px 9px 8px; color: #b8bec9; font-size: 11px; font-weight: 800; letter-spacing: .16em; }
 .main-nav { display: grid; gap: 6px; }
-.nav-item { width: 100%; min-height: 54px; padding: 8px 10px; display: grid; grid-template-columns: 31px 1fr 13px; gap: 8px; align-items: center; border: 1px solid transparent; border-radius: 11px; color: var(--muted); background: transparent; text-align: left; cursor: pointer; transition: .2s ease; }
+.nav-item { width: 100%; min-height: 54px; padding: 8px 10px; display: grid; grid-template-columns: 31px 1fr 13px; gap: 8px; align-items: center; border: 1px solid transparent; border-radius: 11px; color: #d8dbe3; background: transparent; text-align: left; cursor: pointer; transition: .2s ease; }
 .nav-item:hover { color: var(--text); background: var(--surface); }.nav-item.active { color: white; border-color: #3d375e; background: linear-gradient(90deg,#292443,#1b1b28); box-shadow: inset 3px 0 var(--violet); }
 .nav-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: #a99fff; background: #272439; font-size: 16px; font-weight: 800; }
-.nav-item b,.nav-item small { display: block; }.nav-item b { font-size: 14px; white-space: nowrap; }.nav-item small { margin-top: 3px; color: var(--muted-2); font-size: 11px; }.nav-item i { color: #565e6d; font-style: normal; }
+.nav-item b,.nav-item small { display: block; }.nav-item b { font-size: 14px; white-space: nowrap; }.nav-item small { margin-top: 3px; color: #b8bec9; font-size: 11px; }.nav-item i { color: #8f96a6; font-style: normal; }
 .sidebar-bottom { margin-top: auto; }
 .mini-status { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .mini-status-head { display: flex; align-items: center; gap: 8px; }.mini-status-head b { font-size: 13px; }.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px #3dd49b14; }
-.mini-status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft); }.mini-status-grid span { color: var(--muted-2); font-size: 11px; }.mini-status-grid b { display: block; margin-top: 4px; color: #d9dce5; font-size: 13px; }
-.user-card { width: 100%; margin-top: 9px; padding: 8px 7px; display: grid; grid-template-columns: 33px 1fr auto; gap: 9px; align-items: center; border: 0; background: transparent; text-align: left; cursor: pointer; }.user-card > span { width: 33px; height: 33px; display: grid; place-items: center; border-radius: 9px; color: #ddd9ff; background: #302c46; font-size: 12px; font-weight: 800; }.user-card b { font-size: 13px; }.user-card small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 10px; }.user-card i { color: #5f6675; font-style: normal; }
+.mini-status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft); }.mini-status-grid span { color: #b8bec9; font-size: 11px; }.mini-status-grid b { display: block; margin-top: 4px; color: var(--text); font-size: 13px; }
+.user-card { width: 100%; margin-top: 9px; padding: 8px 7px; display: grid; grid-template-columns: 33px 1fr auto; gap: 9px; align-items: center; border: 0; background: transparent; text-align: left; cursor: pointer; }.user-card > span { width: 33px; height: 33px; display: grid; place-items: center; border-radius: 9px; color: #ddd9ff; background: #302c46; font-size: 12px; font-weight: 800; }.user-card b { font-size: 13px; }.user-card small { display: block; margin-top: 3px; color: #b8bec9; font-size: 10px; }.user-card i { color: #8f96a6; font-style: normal; }
 
 .workspace { width: calc(100% - 232px); min-height: 100vh; margin-left: 232px; }
 .topbar { height: 84px; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; gap: 20px; position: sticky; top: 0; z-index: 5; border-bottom: 1px solid var(--line-soft); background: rgba(13,15,20,.88); backdrop-filter: blur(18px); }
@@ -157,23 +160,37 @@ button { color: inherit; }
 }
 
 /* ---- 背景常駐狀態燈號(唯讀,零操作入口;webui-service-control-proposal §1.3) ---- */
-.resident-status { display: flex; align-items: center; gap: 8px; margin: 0 7px 14px; padding: 7px 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(255,255,255,.03); font-size: 12px; color: var(--muted); cursor: help; }
+/* 狀態文字調亮為近白;色點的語意色(inline style)不受影響。
+   灰燈「無法查詢」的文字屬語意灰 → 由下方 .resident-light-gray 規則保留灰色 */
+.resident-status { display: flex; align-items: center; gap: 8px; margin: 0 7px 14px; padding: 7px 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(255,255,255,.03); font-size: 12px; color: var(--text); cursor: help; }
+.resident-status.resident-light-gray { color: var(--muted); }
 .resident-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; box-shadow: 0 0 6px 0 currentColor; }
 .resident-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- 服務控制鍵(寫入,第二白名單群組;webui-service-control-proposal v1.1 §2) ---- */
-.service-control { margin: 0 7px 14px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(255,255,255,.03); font-size: 11px; color: var(--muted); display: grid; gap: 6px; }
-.service-control-title { margin: 0; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted-2); }
+/* 非語意說明文字調亮(2026-07-27);燈號/按鈕語意色(紅 stop、黃收斂、
+   #9ca3af 離線灰、灰燈「無法查詢」)維持不變 */
+.service-control { margin: 0 7px 14px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(255,255,255,.03); font-size: 11px; color: #d8dbe3; display: grid; gap: 6px; }
+.service-control-title { margin: 0; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #b8bec9; }
 .service-control-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.service-unit { font-weight: 700; color: #d8dbe3; }
+.service-unit { font-weight: 700; color: var(--text); }
 .service-actions { display: flex; gap: 4px; }
+/* 個別服務小燈號(唯讀,與聚合燈同源;2026-07-27 拍板)——狀態文字調亮,
+   但灰燈「無法查詢」屬語意灰,由下一條規則保留原灰色 */
+.service-unit-light { display: inline-flex; align-items: center; gap: 4px; margin-right: auto; font-size: 10px; color: #d8dbe3; cursor: help; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.service-unit-light.service-unit-light-gray { color: var(--muted-2); }
+.service-unit-light-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: 0 0 5px 0 currentColor; }
+.service-unit-light-text { overflow: hidden; text-overflow: ellipsis; }
 .service-btn { padding: 3px 7px; border: 1px solid var(--line-soft); border-radius: 6px; background: rgba(255,255,255,.05); color: #d8dbe3; font-size: 11px; cursor: pointer; }
 .service-btn:hover:not(:disabled) { background: rgba(255,255,255,.12); }
 .service-btn:disabled { opacity: .4; cursor: not-allowed; }
+/* 圖示按鈕(play/reload/stop inline SVG,currentColor 跟隨文字色) */
+.service-btn-icon { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 21px; padding: 4px 6px; }
+.service-btn-icon svg { display: block; }
 .service-btn-stop { border-color: rgba(248,113,113,.5); color: #f87171; }
 .service-confirm { border: 1px solid rgba(251,191,36,.5); border-radius: 7px; padding: 6px 8px; display: grid; gap: 5px; }
 .service-confirm p { margin: 0; word-break: break-all; }
-.service-note { margin: 0; line-height: 1.5; color: var(--muted-2); }
+.service-note { margin: 0; line-height: 1.5; color: #c9cdd7; }
 .service-note-offline { color: #9ca3af; }
 .service-note-error { color: #f87171; }
 .service-note-converging { color: #fbbf24; }

@@ -280,6 +280,19 @@ test("UI 行為邊界:二次確認、stop 語意明示、不樂觀更新、bridg
   assert.ok(source.includes("setPending({ unit, op })"), "第一次點擊只能進入待確認狀態");
   assert.ok(source.includes("onClick={() => execute(pending)}"), "execute 只能由確認鈕觸發");
   assert.match(source, />\s*取消\s*</, "須有取消鈕");
+  // 圖示化(2026-07-27):操作鈕改 play/reload/stop 圖示——斷言改認
+  // aria-label/title(「動詞 + 完整單元名」全文描述),不再認可見文字;
+  // 無障礙不得倒退,零外部依賴(inline SVG,不引入 icon 字型/CDN)
+  assert.ok(source.includes("aria-label={`${OP_LABELS[op]} ${unit}`}"), "圖示按鈕須帶完整 aria-label(動詞+單元名)");
+  assert.ok(source.includes("title={`${OP_LABELS[op]} ${unit}`}"), "圖示按鈕須帶 title tooltip(動詞+單元名)");
+  assert.ok(source.includes("<svg"), "圖示須為 inline SVG(CSP 自足,零外部依賴)");
+  // 二次確認對話維持全文字(破壞性操作的確認必須一眼可讀,不圖示化)
+  assert.match(
+    source,
+    /確定要對 <b>\{pending\.unit\}<\/b> 執行「\{OP_LABELS\[pending\.op\]\}」/,
+    "確認對話文字須為全文字(單元名+動詞全文)",
+  );
+  assert.match(source, />\s*確認\{OP_LABELS\[pending\.op\]\}\s*</, "確認鈕須為全文字,不圖示化");
   // stop 語意(v1.1 §2.4 定案文字)必須完整出現
   assert.ok(
     source.includes("停止後不自動恢復,直到下次 Windows 登入/WSL distro 重啟時由 systemd(依 enable 狀態)重新拉起。"),
