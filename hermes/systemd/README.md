@@ -114,9 +114,19 @@ Stopped）。所以解法要兩件事同時成立：**開機喚醒 + 常駐 keep
      留一個永久可見的 console 視窗。）
    - 設定：**執行時間上限＝無限**（`PT0S`；預設 72 小時會把 keep-alive 殺掉，
      必關）、`MultipleInstances IgnoreNew`（不重複啟動）、**失敗自動重啟
-     3 次／間隔 1 分鐘**（`wsl --shutdown` 之後 task 會偵測到 client 死掉並
-     自動復活整條鏈）、電池模式照常執行。Principal 比照 `HermesBridgeDaily`
-     （`razer`／Interactive／Limited，建立不需提權）。
+     10 次／間隔 1 分鐘**（2026-07-27 由 3 次調大；`wsl --shutdown` 之後 task
+     會偵測到 client 死掉並自動復活整條鏈）、電池模式照常執行。Principal
+     比照 `HermesBridgeDaily`（`razer`／Interactive／Limited，建立不需提權）。
+   - **自癒 backstop（2026-07-27 起，keepalive-hardening 提案第一階段）**：
+     除 LogonTrigger 外另有一個 **TimeTrigger（StartBoundary 在過去）攜帶
+     `Repetition PT15M`**——每 15 分鐘 tick 一次，task 活著時被 IgnoreNew
+     吞掉（no-op），死了（含 RestartOnFailure 用盡放棄後）最壞 15 分鐘內
+     自動拉回。Repetition 放 TimeTrigger 而非 LogonTrigger 的原因（實測）：
+     LogonTrigger 的 Repetition 要等 trigger 真的觸發（＝下次登入）才上膛，
+     重註冊後的當前 session 完全沒有 tick；TimeTrigger 註冊後立即生效。
+     另一個實測教訓：**RestartOnFailure 只對「觸發器啟動」的執行生效**，
+     `schtasks /run` 手動啟動的實例失敗後不會被它重啟——手動介入後的保險
+     同樣靠 TimeTrigger tick。
    - `.wslconfig` 的 `[wsl2] vmIdleTimeout` **不是替代方案**——它管的是 utility
      VM 的 idle 關機，擋不住 distro 本身被 terminate。
 
@@ -129,12 +139,23 @@ Stopped）。所以解法要兩件事同時成立：**開機喚醒 + 常駐 keep
 log 顯示輪詢正常（同日稍早並有真實訊息 enqueue 紀錄），worker 在 boot 後
 實際 claim 並完成多筆 RSS job（端到端管線活著）。
 
+**驗證紀錄（2026-07-27 實測，自癒 backstop）**：背景＝task 於 07-24 失效後
+永久放棄、靜默停擺三天（見 auto-memory `wsl-keepalive-monitoring-gap`）。
+重註冊（Count=10＋TimeTrigger PT15M）後實測：`wsl --terminate Ubuntu`
+（12:13，task 轉 Ready／Last Result=1）→ **零人工介入** → 12:30:00 tick
+自動拉回 task（Running、下個 tick 12:45 已排定）→ distro 復活 → worker／
+telegram 於 12:30:07 由 linger 自動 active。
+
 **維運要點**：
 
 - 冷啟後驗證服務，記得 hermes gateway（hermes-agent 側）啟動後約 **3.5 分鐘**
   才寫狀態檔，不要提早誤判 not running（見 memory）。
 - 手動重建鏈路（例如 `wsl --shutdown` 之後不想等自動重啟）：
   `schtasks /run /tn HermesWslKeepAlive`。
+- **刻意 `wsl --shutdown`／`--terminate` 想讓 distro 休息時**：≤15 分鐘內
+  會被 TimeTrigger tick 復活（2026-07-27 拍板知情接受）——要保持關機，
+  **先停用 task**（`schtasks /change /tn HermesWslKeepAlive /disable`），
+  用完再 `/enable`。
 - 要停用開機自動啟動：Task Scheduler 停用/刪除 `HermesWslKeepAlive`；要連
   「distro boot 就起服務」一起關，再加 `loginctl disable-linger razer`。
 - 限制：trigger 是 At log on，**Windows 重開機後要有人登入 `razer` 一次**
