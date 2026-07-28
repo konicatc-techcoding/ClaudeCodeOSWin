@@ -7,7 +7,7 @@ import {
   type Domain,
   type Health,
   type StatusCounts,
-  type SystemdStatus,
+  type SystemdStatusPayload,
 } from "../api";
 import { ErrorNotice, InfoNotice, Metric, Panel, RefreshButton, useApiData, WarnNotice } from "./common";
 import SchedulePanel from "./Schedule";
@@ -22,7 +22,7 @@ const SYSTEMD_LABELS: ReadonlyArray<readonly [string, string]> = [
 
 type OverviewData = {
   health: Health;
-  systemd: SystemdStatus;
+  systemd: SystemdStatusPayload;
   adapterConfig: AdapterConfig;
   statusCounts: StatusCounts;
   domains: Domain[];
@@ -31,12 +31,50 @@ type OverviewData = {
 async function loadOverview(): Promise<OverviewData> {
   const [health, systemd, adapterConfig, statusCounts, domains] = await Promise.all([
     apiGet<Health>("/api/health"),
-    apiGet<SystemdStatus>("/api/systemd-status"),
+    apiGet<SystemdStatusPayload>("/api/systemd-status"),
     apiGet<AdapterConfig>("/api/adapter-config"),
     apiGet<StatusCounts>("/api/status-counts"),
     apiGet<Domain[]>("/api/domains"),
   ]);
   return { health, systemd, adapterConfig, statusCounts, domains };
+}
+
+// 純渲染元件(props 注入,供 render 測試):三分支誠實狀態文字——
+// (a) status "ok":真實狀態,查得到但單元不在 units 裡才顯示「未安裝」;
+// (b) "wsl_down":「WSL 未運作」(distro 未運作,資料層未探測、不喚醒);
+// (c) "unavailable":「無法查詢」。**不得把「查不到」顯示成「未安裝」。**
+export function SystemdMetricRow({ systemd }: { systemd: SystemdStatusPayload }) {
+  return (
+    <>
+      {systemd.status !== "ok" && systemd.reason && <InfoNotice message={systemd.reason} />}
+      <div className="metric-row">
+        {SYSTEMD_LABELS.map(([unit, label]) => {
+          if (systemd.status !== "ok") {
+            return (
+              <Metric
+                key={unit}
+                label={label}
+                value={systemd.status === "wsl_down" ? "WSL 未運作" : "無法查詢"}
+              />
+            );
+          }
+          const info = systemd.units?.[unit];
+          if (!info) return <Metric key={unit} label={label} value="未安裝" />;
+          // 嚴格比對 active(舊寫法 includes("active") 會把 inactive 誤判成
+          // 運作中——換源修正時一併矯正,與排程表 timer_active 判準一致)
+          const running = info.last_exit.split("/")[0] === "active";
+          return (
+            <Metric
+              key={unit}
+              label={label}
+              value={running ? "運作中" : "已停止(等排程)"}
+              sub={info.last_exit}
+            />
+          );
+        })}
+      </div>
+    </>
+  );
 }
 
 export default function Overview() {
@@ -55,23 +93,9 @@ export default function Overview() {
         <>
           <Panel
             title="Worker / Adapter 狀態"
-            caption="狀態來源是 systemctl --user(WSL 環境);此環境查不到時全部顯示「未安裝」。"
+            caption="狀態來源是 wsl -d Ubuntu systemctl --user(Windows 側經 WSL 查詢,distro 未運作時不喚醒)。WSL 未運作 →「WSL 未運作」;查詢失敗 →「無法查詢」;查得到但單元不存在才是「未安裝」。"
           >
-            <div className="metric-row">
-              {SYSTEMD_LABELS.map(([unit, label]) => {
-                const info = data.systemd[unit];
-                if (!info) return <Metric key={unit} label={label} value="未安裝" />;
-                const running = info.last_exit.split("/")[0].includes("active");
-                return (
-                  <Metric
-                    key={unit}
-                    label={label}
-                    value={running ? "運作中" : "已停止(等排程)"}
-                    sub={info.last_exit}
-                  />
-                );
-              })}
-            </div>
+            <SystemdMetricRow systemd={data.systemd} />
           </Panel>
 
           {/* P2 功能三:統一排程健康表(stage3 提案 §4.3——併入總覽,

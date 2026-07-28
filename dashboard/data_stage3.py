@@ -4,8 +4,13 @@
 設計正本:docs/stage3-dashboard-observability-proposal.md(v2)§2–§4;
 載體:docs/webui-migration-proposal.md §4.3(P2)——經 dashboard/api.py 唯讀
 API 曝露給 webui/。**不修改既有 dashboard/data.py**(Streamlit 零改動鐵律),
-Stage 3 新函式全部放這個新模組;路徑 A 的 systemd 狀態仍複用
-`data.get_systemd_status()`(stage3 提案 §4.4 DoD 第 6 項:不重新兜平行邏輯)。
+Stage 3 新函式全部放這個新模組。路徑 A 的 systemd 狀態原複用
+`data.get_systemd_status()`(stage3 提案 §4.4 DoD 第 6 項:不重新兜平行邏輯);
+2026-07-28 起改複用 `data_systemd_wsl.get_wsl_systemd_snapshot()`——
+readonly-api 跑在 Windows 側,裸 systemctl 不存在,舊路徑永遠 FileNotFoundError
+而把「查不到」誤報成「未安裝」。新快照經 `wsl -d` 包裹、分層守門絕不喚醒
+distro、帶 5 秒快取;「不另兜平行邏輯」的精神不變(單一共用快照,
+data.get_systemd_status() 原樣留給 deprecated 的 Streamlit app.py)。
 
 唯讀鐵律(stage3 提案 §0.5,逐條對應):
 
@@ -63,13 +68,12 @@ import importlib.util
 import json
 import os
 import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
-import data  # 既有唯讀資料層(路徑 A 複用 get_systemd_status,DoD 第 6 項)
+import data_systemd_wsl  # 路徑 A 複用共用 systemd 快照(WSL 包裹、守門不喚醒、5 秒快取)
 import redact  # 憑證掃描共用正本(webui-migration §3.4:共用實作,不複製貼上)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -322,37 +326,8 @@ def _parse_timer_files() -> list[dict]:
     return rows
 
 
-def _list_timers_status() -> dict:
-    """路徑 A 第 3 步:`systemctl --user list-timers --all --no-legend` 取
-    NEXT/LAST。容錯比照 data.get_systemd_status():不可用一律回 {}。
-
-    解析方式:--no-legend 仍保持欄位以 2+ 空格對齊
-    (NEXT / LEFT / LAST / PASSED / UNIT / ACTIVATES),用 2+ 空格切欄;
-    格式若因 systemd 版本改變導致切不出來,該行略過(退化為無法查詢),
-    不噴例外(§4.6 風險緩解:mock 測試鎖定既知格式)。"""
-    try:
-        proc = subprocess.run(
-            ["systemctl", "--user", "list-timers", "--all", "--no-legend"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return {}
-    result = {}
-    for line in proc.stdout.splitlines():
-        if "hermes-" not in line:
-            continue
-        columns = re.split(r"\s{2,}", line.strip())
-        if len(columns) < 5:
-            continue
-        next_raw, _left, last_raw, _passed, unit = columns[0], columns[1], columns[2], columns[3], columns[4]
-        if not unit.endswith(".timer"):
-            continue
-        result[unit] = {"next": next_raw, "last": last_raw}
-    return result
-
-
 def _service_last_result(service_info: dict | None) -> str:
-    """§4.2 路徑 A 第 4 步:複用 get_systemd_status() 已取得的 service
+    """§4.2 路徑 A 第 4 步:複用 systemd 快照已取得的 service
     active/sub state 當「上次執行結果」——systemd 對 oneshot service 的
     既有語意(成功回 dead/exited、失敗進 failed),不另發查詢。"""
     if not service_info:
@@ -369,22 +344,31 @@ def _service_last_result(service_info: dict | None) -> str:
 
 
 def _systemd_rows() -> list[dict]:
-    """路徑 A(source="systemd"):靜態 .timer 解析 + 既有 get_systemd_status()
-    複用 + list-timers NEXT/LAST。systemctl 不可用 → 動態欄位全部退化為
-    「無法查詢」,job_name/schedule_expr 永遠可得(§4.2 退化)。"""
+    """路徑 A(source="systemd"):靜態 .timer 解析 + 共用 systemd 快照
+    (data_systemd_wsl.get_wsl_systemd_snapshot():Windows 側經 `wsl -d`
+    包裹的唯讀查詢,分層守門絕不喚醒 distro,list-units 與 list-timers
+    NEXT/LAST 同一份 5 秒快取——wsl 呼叫不在無快取的熱路徑)。
+
+    誠實三分支退化(不得把「查不到」顯示成「未安裝」):
+    - snapshot "ok"          → 真實狀態(查得到、單元不存在才是「未安裝」)
+    - snapshot "wsl_down"    → 動態欄位全部「WSL 未運作」
+    - snapshot "unavailable" → 動態欄位全部「無法查詢」
+    job_name/schedule_expr 永遠可得(§4.2 退化)。"""
     static_rows = _parse_timer_files()
-    unit_status = data.get_systemd_status()  # DoD 第 6 項:複用既有邏輯
-    timers = _list_timers_status() if unit_status else {}
-    systemctl_available = bool(unit_status)
+    snapshot = data_systemd_wsl.get_wsl_systemd_snapshot()
+    queryable = snapshot.get("status") == "ok"
+    unit_status = snapshot.get("units") or {}
+    timers = snapshot.get("timers") or {}
+    degraded_text = "WSL 未運作" if snapshot.get("status") == "wsl_down" else "無法查詢"
 
     rows = []
     for item in static_rows:
-        if not systemctl_available:
-            deployed: object = "無法查詢"
-            timer_active = "無法查詢"
-            last_result = "無法查詢"
-            next_trigger = "無法查詢"
-            last_trigger = "無法查詢"
+        if not queryable:
+            deployed: object = degraded_text
+            timer_active = degraded_text
+            last_result = degraded_text
+            next_trigger = degraded_text
+            last_trigger = degraded_text
         else:
             timer_info = unit_status.get(item["timer_unit"])
             service_info = unit_status.get(item["service_unit"])

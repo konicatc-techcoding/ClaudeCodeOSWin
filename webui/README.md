@@ -59,7 +59,7 @@ cd .. && .venv/Scripts/python.exe dashboard/api.py   # http://127.0.0.1:8799
 | `/api/jobs?limit&status&source` | `get_recent_jobs()` |
 | `/api/jobs/<id>` | `get_job()` |
 | `/api/cost-summary` | `get_cost_summary()` |
-| `/api/systemd-status` | `get_systemd_status()` |
+| `/api/systemd-status` | `dashboard/data_systemd_wsl.py::get_wsl_systemd_snapshot()`(2026-07-28 換源:Windows 側經 `wsl -d Ubuntu` 的唯讀快照,distro 未運作不喚醒、三分支誠實狀態 ok/wsl_down/unavailable、5 秒快取;`data.get_systemd_status()` 的裸 systemctl 原樣留給 deprecated Streamlit) |
 | `/api/memory/inbox-counts` | `get_memory_inbox_counts()` |
 | `/api/memory/files` | `get_memory_files()` |
 | `/api/domains` | `get_domain_status()` |
@@ -81,7 +81,10 @@ import guard AST 白名單、bind 檢核、bot_token 不外洩、endpoint 行為
 ## P2:Stage 3 三項觀測功能(2026-07-23,設計正本 stage3 提案 v2 §2–§4)
 
 資料層在 **`dashboard/data_stage3.py`**(新模組;`data.py`/`app.py` 零改動,
-路徑 A 複用 `data.get_systemd_status()`),endpoint:
+路徑 A 原複用 `data.get_systemd_status()`,2026-07-28 起改複用
+`data_systemd_wsl.get_wsl_systemd_snapshot()` 共用快照——與
+`/api/systemd-status` 同源、同 5 秒快取;三分支退化:wsl_down →
+「WSL 未運作」、unavailable →「無法查詢」),endpoint:
 
 | Endpoint | data_stage3.py 函式 | view |
 |---|---|---|

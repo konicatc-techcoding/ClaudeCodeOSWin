@@ -175,6 +175,63 @@ test("排程表:空資料顯示提示,不噴例外", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 總覽:Worker / Adapter 狀態卡片(systemd 快照三分支;2026-07-28 換源修正)
+// ---------------------------------------------------------------------------
+
+const SYSTEMD_BASE = {
+  checked_at: "2026-07-28T00:00:00+00:00",
+  distro: { name: "Ubuntu", running: true, detail: "TEST" },
+  timers: {},
+};
+
+test("總覽 systemd 卡片:wsl_down 顯示「WSL 未運作」,不得偽裝成「未安裝」", () => {
+  const html = mod.renderSystemdMetrics({
+    ...SYSTEMD_BASE,
+    status: "wsl_down",
+    status_text: "WSL 未運作",
+    reason: "WSL distro Ubuntu 未運作(未探測 systemd,避免喚醒 distro)",
+    distro: { name: "Ubuntu", running: false, detail: "distro 狀態:Stopped" },
+    units: null,
+  });
+  assert.ok(html.includes("WSL 未運作"));
+  assert.ok(html.includes("避免喚醒"), "退化原因須呈現給使用者");
+  assert.ok(!html.includes("未安裝"), "查不到不得顯示成未安裝");
+});
+
+test("總覽 systemd 卡片:unavailable 顯示「無法查詢」,不得偽裝成「未安裝」", () => {
+  const html = mod.renderSystemdMetrics({
+    ...SYSTEMD_BASE,
+    status: "unavailable",
+    status_text: "無法查詢",
+    reason: "wsl -d systemctl --user 查詢失敗,單元狀態無法查詢",
+    units: null,
+  });
+  assert.ok(html.includes("無法查詢"));
+  assert.ok(!html.includes("未安裝"), "查不到不得顯示成未安裝");
+});
+
+test("總覽 systemd 卡片:ok 顯示真實狀態;單元缺席才是「未安裝」", () => {
+  const html = mod.renderSystemdMetrics({
+    ...SYSTEMD_BASE,
+    status: "ok",
+    status_text: "查詢成功",
+    reason: null,
+    units: {
+      "hermes-worker.service": { pid: "-", last_exit: "active/running", load: "loaded" },
+      "hermes-rss.timer": { pid: "-", last_exit: "inactive/dead", load: "loaded" },
+      // hermes-telegram.service / hermes-cron-daily-memory-check.timer 缺席 → 未安裝
+    },
+  });
+  assert.ok(html.includes("運作中"));
+  assert.ok(html.includes("已停止(等排程)"));
+  assert.ok(html.includes("未安裝"), "查得到且單元不存在才顯示未安裝");
+  assert.ok(!html.includes("WSL 未運作"));
+  assert.ok(!html.includes("無法查詢"));
+  // 唯讀邊界:卡片零操作按鈕
+  assert.ok(!html.includes("<button"));
+});
+
+// ---------------------------------------------------------------------------
 // 功能一:Hermes Sessions
 // ---------------------------------------------------------------------------
 

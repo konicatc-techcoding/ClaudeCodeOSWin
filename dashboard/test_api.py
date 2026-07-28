@@ -37,6 +37,7 @@ import api  # noqa: E402
 import data  # noqa: E402
 import data_resident  # noqa: E402
 import data_stage3  # noqa: E402
+import data_systemd_wsl  # noqa: E402
 import data_update  # noqa: E402
 import db  # noqa: E402
 import redact  # noqa: E402
@@ -180,7 +181,7 @@ class ImportGuardTests(unittest.TestCase):
     ALLOWED_IMPORTS = {
         "argparse", "json", "re", "sys", "urllib.parse",
         "http.server", "pathlib", "data", "data_resident", "data_stage3",
-        "data_update", "redact",
+        "data_systemd_wsl", "data_update", "redact",
     }
     # 已知寫入模組(防守性斷言;白名單本來就擋掉它們,雙保險)
     FORBIDDEN = {
@@ -354,11 +355,6 @@ class EndpointBehaviorTests(ApiServerTestCase):
         )
         self.assertEqual(self._get_json("/api/domains"), [{"id": "engineering", "status": "active"}])
 
-    def test_systemd_status_endpoint_returns_dict(self):
-        # Windows 上 systemctl 不存在 → data.get_systemd_status() 回 {},API 照回
-        payload = self._get_json("/api/systemd-status")
-        self.assertIsInstance(payload, dict)
-
     def test_log_tail(self):
         (data.LOG_DIR / "worker.log").write_text(
             "\n".join(f"line {i}" for i in range(10)), encoding="utf-8"
@@ -411,8 +407,17 @@ class Stage3EndpointTests(ApiServerTestCase):
         data_stage3.CAPABILITY_LANES_PATH = self._tmpdir / "capability_lanes.yaml"
         data_stage3.SYSTEMD_UNIT_DIR = self._tmpdir / "systemd_units"
         data_stage3.HERMES_STATE_DB = self._tmpdir / "state.db"
+        # 排程表的路徑 A 走共用 systemd 快照——測試一律替換,不觸碰真實 wsl
+        self._orig_snapshot = data_systemd_wsl.get_wsl_systemd_snapshot
+        data_systemd_wsl.get_wsl_systemd_snapshot = lambda: {
+            "checked_at": "TEST", "status": "unavailable", "status_text": "無法查詢",
+            "reason": "TEST:快照已 mock,不觸碰真實 wsl",
+            "distro": {"name": "Ubuntu", "running": None, "detail": "TEST"},
+            "units": None, "timers": None,
+        }
 
     def tearDown(self):
+        data_systemd_wsl.get_wsl_systemd_snapshot = self._orig_snapshot
         data_stage3.HERMES_HOME = self._orig_stage3["hermes_home"]
         data_stage3.CAPABILITY_LANES_PATH = self._orig_stage3["lanes"]
         data_stage3.SYSTEMD_UNIT_DIR = self._orig_stage3["systemd_dir"]
@@ -555,6 +560,66 @@ class Stage3EndpointTests(ApiServerTestCase):
                      "/api/schedule-table", "/api/hermes/sessions"]:
             status, _, _ = self._request(path, method="POST")
             self.assertEqual(status, 405, path)
+
+
+class SystemdStatusEndpointTests(ApiServerTestCase):
+    """/api/systemd-status:2026-07-28 起改由 data_systemd_wsl 供數(Windows 側
+    經 WSL 的唯讀快照,三分支誠實狀態)。守門/解析/快取本體在
+    test_data_systemd_wsl.py;這裡鎖 API 層:endpoint 曝露、三分支結構原樣
+    傳遞、探測失敗優雅退化(不噴 500)。以替換 data_systemd_wsl._probe 隔離,
+    不觸碰真實 wsl。"""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_probe = data_systemd_wsl._probe
+        data_systemd_wsl._cache = None
+
+    def tearDown(self):
+        data_systemd_wsl._probe = self._orig_probe
+        data_systemd_wsl._cache = None
+        super().tearDown()
+
+    def _fake_probe(self, payload):
+        data_systemd_wsl._probe = lambda: payload
+
+    def test_ok_snapshot_passthrough(self):
+        self._fake_probe({
+            "checked_at": "2026-07-28T00:00:00+00:00", "status": "ok",
+            "status_text": "查詢成功", "reason": None,
+            "distro": {"name": "Ubuntu", "running": True, "detail": "distro 狀態:Running"},
+            "units": {"hermes-worker.service": {"pid": "-", "last_exit": "active/running",
+                                                "load": "loaded"}},
+            "timers": {},
+        })
+        payload = self._get_json("/api/systemd-status")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["units"]["hermes-worker.service"]["last_exit"],
+                         "active/running")
+
+    def test_wsl_down_branch_passthrough(self):
+        self._fake_probe({
+            "checked_at": "2026-07-28T00:00:00+00:00", "status": "wsl_down",
+            "status_text": "WSL 未運作",
+            "reason": "WSL distro Ubuntu 未運作(未探測 systemd,避免喚醒 distro)",
+            "distro": {"name": "Ubuntu", "running": False, "detail": "distro 狀態:Stopped"},
+            "units": None, "timers": None,
+        })
+        payload = self._get_json("/api/systemd-status")
+        self.assertEqual(payload["status"], "wsl_down")
+        self.assertEqual(payload["status_text"], "WSL 未運作")
+        self.assertIsNone(payload["units"])
+
+    def test_probe_failure_degrades_to_unavailable_not_500(self):
+        data_systemd_wsl._probe = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        status, _, body = self._request("/api/systemd-status")
+        self.assertEqual(status, 200, "探測失敗必須優雅退化,不得 500")
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertEqual(payload["status_text"], "無法查詢")
+
+    def test_rejects_non_get(self):
+        status, _, _ = self._request("/api/systemd-status", method="POST")
+        self.assertEqual(status, 405)
 
 
 class ResidentStatusEndpointTests(ApiServerTestCase):

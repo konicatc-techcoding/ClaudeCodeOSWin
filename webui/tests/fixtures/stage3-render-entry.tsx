@@ -6,6 +6,7 @@
 // 本檔只在測試中經 esbuild bundle 使用,不進 app bundle。
 import { renderToStaticMarkup } from "react-dom/server";
 import { CredentialsPage, CREDENTIAL_PAGE_WARNING } from "../../src/views/Credentials";
+import { SystemdMetricRow } from "../../src/views/Overview";
 import { ScheduleTable } from "../../src/views/Schedule";
 import { SessionsTable } from "../../src/views/Sessions";
 
@@ -23,4 +24,10 @@ export function renderSchedule(rows: unknown): string {
 
 export function renderSessions(sessions: unknown): string {
   return renderToStaticMarkup(<SessionsTable sessions={sessions as never} />);
+}
+
+// 總覽「Worker / Adapter 狀態」卡片(2026-07-28:systemd 狀態改經 WSL 查詢,
+// 三分支誠實狀態文字——測試斷言「查不到」不再偽裝成「未安裝」)。
+export function renderSystemdMetrics(systemd: unknown): string {
+  return renderToStaticMarkup(<SystemdMetricRow systemd={systemd as never} />);
 }

@@ -10,9 +10,11 @@
   第 6 項(渲染輸出掃描)在新載體由 test_api.py(API 回應全文)與
   webui/tests/stage3-render.test.mjs(UI 渲染)接手。
 - 功能三 §4.4:第 1 項(涵蓋 6 個 systemd timer+原生 cron job、欄位齊全)、
-  第 2 項(兩路徑獨立退化)、第 3 項(list-timers mock 解析)、第 4 項
-  (jobs.json fixture 解析)、第 5 項(漂移三情境)、第 6 項(路徑 A 複用
-  get_systemd_status,不另兜平行邏輯)。
+  第 2 項(兩路徑獨立退化)、第 3 項(NEXT/LAST 對映;list-timers 輸出解析
+  已隨資料源移至 test_data_systemd_wsl.py)、第 4 項(jobs.json fixture 解析)、
+  第 5 項(漂移三情境)、第 6 項(路徑 A 複用共用 systemd 快照
+  data_systemd_wsl.get_wsl_systemd_snapshot,不另兜平行邏輯;2026-07-28 換源,
+  另補三分支誠實退化:wsl_down →「WSL 未運作」、unavailable →「無法查詢」)。
 - 功能一 §2.4:正常情境 normalized 欄位+遞迴不含 content、state.db 不存在
   回 []、source 篩選正確。
 
@@ -26,7 +28,6 @@ import ast
 import json
 import shutil
 import sqlite3
-import subprocess
 import tempfile
 import unittest
 import sys
@@ -34,8 +35,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import data  # noqa: E402
 import data_stage3  # noqa: E402
+import data_systemd_wsl  # noqa: E402
 import redact  # noqa: E402
 
 DASHBOARD_DIR = Path(__file__).resolve().parent
@@ -75,7 +76,10 @@ def _walk_keys(obj):
 
 
 class Stage3TestBase(unittest.TestCase):
-    """共用 fixture:把 data_stage3 的路徑常數指向 tempdir(隔離真實環境)。"""
+    """共用 fixture:把 data_stage3 的路徑常數指向 tempdir(隔離真實環境);
+    並一律 mock 共用 systemd 快照(data_systemd_wsl.get_wsl_systemd_snapshot)
+    ——預設 unavailable,測試絕不觸碰真實 wsl(比照 test_data_resident 慣例);
+    需要特定分支的測試用 set_systemd_snapshot() 覆寫。"""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="stage3_test_"))
@@ -91,13 +95,32 @@ class Stage3TestBase(unittest.TestCase):
         data_stage3.CAPABILITY_LANES_PATH = self.tmpdir / "capability_lanes.yaml"
         data_stage3.SYSTEMD_UNIT_DIR = self.tmpdir / "systemd_units"
         data_stage3.HERMES_STATE_DB = self.tmpdir / "state.db"
+        self._snapshot_patcher = mock.patch.object(
+            data_systemd_wsl, "get_wsl_systemd_snapshot")
+        self.snapshot_mock = self._snapshot_patcher.start()
+        self.set_systemd_snapshot(status="unavailable")
 
     def tearDown(self):
+        self._snapshot_patcher.stop()
         data_stage3.HERMES_HOME = self._orig["hermes_home"]
         data_stage3.CAPABILITY_LANES_PATH = self._orig["lanes"]
         data_stage3.SYSTEMD_UNIT_DIR = self._orig["systemd_dir"]
         data_stage3.HERMES_STATE_DB = self._orig["state_db"]
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def set_systemd_snapshot(self, status: str = "ok",
+                             units: dict | None = None,
+                             timers: dict | None = None):
+        """設定共用 systemd 快照的假回傳(結構同 data_systemd_wsl._payload)。"""
+        self.snapshot_mock.return_value = {
+            "checked_at": "2026-07-28T00:00:00+00:00",
+            "status": status,
+            "status_text": data_systemd_wsl.STATUS_TEXT[status],
+            "reason": None if status == "ok" else f"TEST reason ({status})",
+            "distro": {"name": "Ubuntu", "running": status == "ok", "detail": "TEST"},
+            "units": units if status == "ok" else None,
+            "timers": (timers or {}) if status == "ok" else None,
+        }
 
     # --- fixture builders ---
 
@@ -451,15 +474,6 @@ class CredentialStatusTests(Stage3TestBase):
 # 功能三 — 統一排程健康表+模型漂移旗標
 # ---------------------------------------------------------------------------
 
-FAKE_LIST_TIMERS_OUTPUT = (
-    "Fri 2026-07-24 08:10:00 CST  11h left  Wed 2026-07-23 08:10:00 CST  12h ago  "
-    "hermes-test.timer  hermes-test.service\n"
-    "n/a  n/a  n/a  n/a  hermes-never.timer  hermes-never.service\n"
-    "Fri 2026-07-24 09:00:00 CST  12h left  n/a  n/a  "
-    "other-app.timer  other-app.service\n"
-)
-
-
 class ScheduleTableSystemdTests(Stage3TestBase):
     def _write_timer(self, name: str, on_calendar: str, unit: str | None = None):
         data_stage3.SYSTEMD_UNIT_DIR.mkdir(exist_ok=True)
@@ -471,12 +485,12 @@ class ScheduleTableSystemdTests(Stage3TestBase):
         (data_stage3.SYSTEMD_UNIT_DIR / f"{name}.timer").write_text(
             "\n".join(lines), encoding="utf-8")
 
-    def test_static_fields_survive_without_systemctl(self):
-        """§4.4 DoD 第 2 項(路徑 A 退化):systemctl 完全不可用時,
-        job_name/schedule_expr 依然正確,其餘動態欄位=無法查詢。"""
+    def test_static_fields_survive_when_unqueryable(self):
+        """§4.4 DoD 第 2 項(路徑 A 退化):快照 unavailable(wsl 不存在/
+        逾時/查詢失敗)時,job_name/schedule_expr 依然正確,其餘動態欄位
+        =「無法查詢」(base fixture 預設即 unavailable)。"""
         self._write_timer("hermes-test", "*-*-* 08:10:00", "hermes-test.service")
-        with mock.patch.object(data, "get_systemd_status", return_value={}):
-            rows = data_stage3.get_cron_schedule_table()
+        rows = data_stage3.get_cron_schedule_table()
         systemd_rows = [r for r in rows if r["source"] == "systemd"]
         self.assertEqual(len(systemd_rows), 1)
         row = systemd_rows[0]
@@ -486,13 +500,24 @@ class ScheduleTableSystemdTests(Stage3TestBase):
             self.assertEqual(row[field], "無法查詢", field)
         self.assertEqual(row["model_drift"], "n/a")
 
+    def test_wsl_down_shows_honest_text_not_uninstalled(self):
+        """三分支誠實退化:distro 未運作(未探測,避免喚醒)→ 動態欄位
+        全部「WSL 未運作」——**不得**顯示成「未安裝」或「無法查詢」。"""
+        self._write_timer("hermes-test", "*-*-* 08:10:00", "hermes-test.service")
+        self.set_systemd_snapshot(status="wsl_down")
+        row = [r for r in data_stage3.get_cron_schedule_table()
+               if r["source"] == "systemd"][0]
+        for field in ["deployed", "timer_active", "last_result", "next_trigger", "last_trigger"]:
+            self.assertEqual(row[field], "WSL 未運作", field)
+        body = json.dumps([row], ensure_ascii=False)
+        self.assertNotIn("未安裝", body)
+
     def test_real_repo_timer_files_all_parsed(self):
         """§4.4 DoD 第 1 項(A 半):對 repo 內真實 .timer 檔(靜態設定、
         非執行期資料,依 §4.5 不需 fixture 隔離)斷言 6 個 OnCalendar 全部
         抽出——含尚未部署的 bridge-pipeline/notifier。"""
         data_stage3.SYSTEMD_UNIT_DIR = REPO_SYSTEMD_DIR
-        with mock.patch.object(data, "get_systemd_status", return_value={}):
-            rows = [r for r in data_stage3.get_cron_schedule_table() if r["source"] == "systemd"]
+        rows = [r for r in data_stage3.get_cron_schedule_table() if r["source"] == "systemd"]
         names = {r["job_name"] for r in rows}
         self.assertEqual(names, {
             "hermes-rss", "hermes-cron-daily-memory-check", "hermes-bridge-scanner",
@@ -501,19 +526,18 @@ class ScheduleTableSystemdTests(Stage3TestBase):
         for row in rows:
             self.assertNotEqual(row["schedule_expr"], "無法查詢", row["job_name"])
 
-    def test_deployed_state_reuses_get_systemd_status(self):
-        """§4.4 DoD 第 6 項:路徑 A 的部署狀態複用 data.get_systemd_status()
-        既有邏輯(mock 它、驗證輸出反映 mock 值=真的在用它,不是平行實作)。"""
+    def test_deployed_state_reuses_shared_snapshot(self):
+        """§4.4 DoD 第 6 項:路徑 A 的部署狀態複用共用 systemd 快照
+        (mock 它、驗證輸出反映 mock 值=真的在用它,不是平行實作)。
+        快照 ok 且單元不在 units 裡 → 這時「未安裝」才是誠實的。"""
         self._write_timer("hermes-test", "*-*-* 08:10:00", "hermes-test.service")
         self._write_timer("hermes-missing", "*-*-* 09:00:00")
-        fake_status = {
+        self.set_systemd_snapshot(status="ok", units={
             "hermes-test.timer": {"pid": "-", "last_exit": "active/waiting", "load": "loaded"},
             "hermes-test.service": {"pid": "-", "last_exit": "inactive/dead", "load": "loaded"},
-        }
-        with mock.patch.object(data, "get_systemd_status", return_value=fake_status), \
-             mock.patch.object(data_stage3, "_list_timers_status", return_value={}):
-            rows = {r["job_name"]: r for r in data_stage3.get_cron_schedule_table()
-                    if r["source"] == "systemd"}
+        })
+        rows = {r["job_name"]: r for r in data_stage3.get_cron_schedule_table()
+                if r["source"] == "systemd"}
         self.assertTrue(rows["hermes-test"]["deployed"])
         self.assertEqual(rows["hermes-test"]["timer_active"], "active")
         self.assertEqual(rows["hermes-test"]["last_result"], "成功")  # oneshot dead=成功
@@ -522,46 +546,31 @@ class ScheduleTableSystemdTests(Stage3TestBase):
 
     def test_failed_service_marked_failed(self):
         self._write_timer("hermes-test", "*-*-* 08:10:00", "hermes-test.service")
-        fake_status = {
+        self.set_systemd_snapshot(status="ok", units={
             "hermes-test.timer": {"pid": "-", "last_exit": "active/waiting", "load": "loaded"},
             "hermes-test.service": {"pid": "-", "last_exit": "failed/failed", "load": "loaded"},
-        }
-        with mock.patch.object(data, "get_systemd_status", return_value=fake_status), \
-             mock.patch.object(data_stage3, "_list_timers_status", return_value={}):
-            rows = {r["job_name"]: r for r in data_stage3.get_cron_schedule_table()}
+        })
+        rows = {r["job_name"]: r for r in data_stage3.get_cron_schedule_table()}
         self.assertEqual(rows["hermes-test"]["last_result"], "失敗")
 
-    def test_list_timers_output_parsing(self):
-        """§4.4 DoD 第 3 項:mock subprocess 輸出,斷言 NEXT/LAST 解析正確;
-        「n/a 欄位」「非 hermes unit 排除」「systemctl 不存在」邊界都測。"""
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=FAKE_LIST_TIMERS_OUTPUT, stderr="")
-        with mock.patch.object(data_stage3.subprocess, "run", return_value=completed):
-            parsed = data_stage3._list_timers_status()
-        self.assertEqual(parsed["hermes-test.timer"]["next"], "Fri 2026-07-24 08:10:00 CST")
-        self.assertEqual(parsed["hermes-test.timer"]["last"], "Wed 2026-07-23 08:10:00 CST")
-        self.assertEqual(parsed["hermes-never.timer"], {"next": "n/a", "last": "n/a"})
-        self.assertNotIn("other-app.timer", parsed)
-        # systemctl 不存在 → {}
-        with mock.patch.object(data_stage3.subprocess, "run", side_effect=FileNotFoundError):
-            self.assertEqual(data_stage3._list_timers_status(), {})
-        # 輸出為空 → {}
-        empty = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-        with mock.patch.object(data_stage3.subprocess, "run", return_value=empty):
-            self.assertEqual(data_stage3._list_timers_status(), {})
-
     def test_next_last_trigger_mapped_into_rows(self):
+        """§4.4 DoD 第 3 項(對映半):快照 timers 的 NEXT/LAST 進表格、
+        n/a → 從未觸發(list-timers 原始輸出解析在 test_data_systemd_wsl.py)。"""
         self._write_timer("hermes-test", "*-*-* 08:10:00", "hermes-test.service")
         self._write_timer("hermes-never", "*-*-* 07:00:00", "hermes-never.service")
-        fake_status = {
-            "hermes-test.timer": {"pid": "-", "last_exit": "active/waiting", "load": "loaded"},
-            "hermes-never.timer": {"pid": "-", "last_exit": "active/waiting", "load": "loaded"},
-        }
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=FAKE_LIST_TIMERS_OUTPUT, stderr="")
-        with mock.patch.object(data, "get_systemd_status", return_value=fake_status), \
-             mock.patch.object(data_stage3.subprocess, "run", return_value=completed):
-            rows = {r["job_name"]: r for r in data_stage3.get_cron_schedule_table()}
+        self.set_systemd_snapshot(
+            status="ok",
+            units={
+                "hermes-test.timer": {"pid": "-", "last_exit": "active/waiting", "load": "loaded"},
+                "hermes-never.timer": {"pid": "-", "last_exit": "active/waiting", "load": "loaded"},
+            },
+            timers={
+                "hermes-test.timer": {"next": "Fri 2026-07-24 08:10:00 CST",
+                                      "last": "Wed 2026-07-23 08:10:00 CST"},
+                "hermes-never.timer": {"next": "n/a", "last": "n/a"},
+            },
+        )
+        rows = {r["job_name"]: r for r in data_stage3.get_cron_schedule_table()}
         self.assertEqual(rows["hermes-test"]["next_trigger"], "Fri 2026-07-24 08:10:00 CST")
         self.assertEqual(rows["hermes-test"]["last_trigger"], "Wed 2026-07-23 08:10:00 CST")
         self.assertEqual(rows["hermes-never"]["last_trigger"], "從未觸發")
@@ -605,13 +614,11 @@ class ScheduleTableNativeCronTests(Stage3TestBase):
         """§4.4 DoD 第 2 項(兩路徑獨立退化):store 不存在 → 路徑 B 空,
         路徑 A 照常;LOCALAPPDATA 未設同樣安全。"""
         data_stage3.SYSTEMD_UNIT_DIR = REPO_SYSTEMD_DIR
-        with mock.patch.object(data, "get_systemd_status", return_value={}):
-            rows = data_stage3.get_cron_schedule_table()
+        rows = data_stage3.get_cron_schedule_table()
         self.assertEqual([r for r in rows if r["source"] == "hermes-native"], [])
         self.assertEqual(len([r for r in rows if r["source"] == "systemd"]), 6)
         data_stage3.HERMES_HOME = None
-        with mock.patch.object(data, "get_systemd_status", return_value={}):
-            rows = data_stage3.get_cron_schedule_table()
+        rows = data_stage3.get_cron_schedule_table()
         self.assertEqual([r for r in rows if r["source"] == "hermes-native"], [])
         self.assertEqual(len([r for r in rows if r["source"] == "systemd"]), 6)
 
@@ -750,13 +757,16 @@ class Stage3ImportGuardTests(unittest.TestCase):
     """data_stage3.py 的 import 集合鎖白名單——不含任何已知寫入模組;
     HermesSessionAdapter 走 importlib 檔案路徑載入,不在 import 語句裡。"""
 
+    # 2026-07-28 收緊:systemd 快照換源後 data_stage3 不再直接 import
+    # subprocess/data——wsl 包裹的 spawn 位點集中在 data_systemd_wsl(該模組
+    # 由 test_data_systemd_wsl.py + webui_security_check.py 第 10 項鎖定)。
     ALLOWED = {
-        "importlib.util", "json", "os", "re", "subprocess",
-        "datetime", "pathlib", "yaml", "data", "redact",
+        "importlib.util", "json", "os", "re",
+        "datetime", "pathlib", "yaml", "data_systemd_wsl", "redact",
     }
     FORBIDDEN = {
         "db", "hermes.db", "bridge_dispatch", "hermes.bridge_dispatch",
-        "cron", "cron.jobs", "shutil", "adapter",
+        "cron", "cron.jobs", "shutil", "adapter", "subprocess",
     }
 
     def test_imports_whitelisted(self):

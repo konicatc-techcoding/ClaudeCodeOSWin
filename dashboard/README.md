@@ -25,7 +25,7 @@ Localhost-only、read-only 的系統狀態檢視。不提供任何修改/刪除/
 
 ## 內容
 
-- **總覽**：Worker／三個 adapter 的常駐服務狀態（本環境用 `systemctl --user` 查詢，見 `data.py` 的 `get_systemd_status()`；`get_launchd_status()` 是 macOS legacy）、adapter 設定狀態、五種 job 狀態統計、五個 domain 的狀態
+- **總覽**：Worker／三個 adapter 的常駐服務狀態（本 Streamlit 版用裸 `systemctl --user` 查詢，見 `data.py` 的 `get_systemd_status()`——只在 WSL/Linux 內執行時有效，維持 deprecated 零改動；新 webui 的 `/api/systemd-status` 已於 2026-07-28 換源至 `data_systemd_wsl.py`，Windows 側經 `wsl -d` 查詢且不喚醒 distro。`get_launchd_status()` 是 macOS legacy）、adapter 設定狀態、五種 job 狀態統計、五個 domain 的狀態
 - **Jobs**：可篩選的最近 job 列表；貼 job id 看完整內容 + 對應的 log
 - **成本**：總成本／平均成本／依 source 分組
 - **Memory**：inbox 的 pending/processed/failed 數量、正本檔案清單

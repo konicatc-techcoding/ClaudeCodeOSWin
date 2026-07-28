@@ -26,7 +26,21 @@ export type CostSummary = {
   by_source: { source: string; total: number; n: number }[];
 };
 
-export type SystemdStatus = Record<string, { pid: string; last_exit: string; load?: string }>;
+// /api/systemd-status:2026-07-28 起由 dashboard/data_systemd_wsl.py 供數
+// (Windows 側經 `wsl -d Ubuntu` 的唯讀快照;distro 未運作絕不喚醒)。
+// 三分支誠實狀態:"ok"=查得到(單元不在 units 裡才是真的「未安裝」);
+// "wsl_down"=WSL distro 未運作(未探測);"unavailable"=無法查詢。
+export type SystemdUnitInfo = { pid: string; last_exit: string; load?: string };
+
+export type SystemdStatusPayload = {
+  status: "ok" | "wsl_down" | "unavailable";
+  status_text: string;
+  reason: string | null;
+  checked_at: string;
+  distro: { name: string; running: boolean | null; detail: string };
+  units: Record<string, SystemdUnitInfo> | null;
+  timers: Record<string, { next: string; last: string }> | null;
+};
 
 export type InboxCounts = { pending: number; processed: number; failed: number };
 

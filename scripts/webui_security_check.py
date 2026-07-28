@@ -25,7 +25,11 @@ P3 追加(2026-07-24,docs/webui-pty-terminal-proposal.md;只追加、不放寬
 只追加、不放寬既有 1–9 項的任何判準):
   10. 常駐狀態燈號唯讀       — UI 元件零按鈕/零點擊處理器/僅 GET 取數;
       探測資料層 subprocess 位點僅兩個凍結唯讀查詢常數,無任何
-      systemd/wsl 寫入動詞(寫入部分未核准,零程式碼)
+      systemd/wsl 寫入動詞(寫入部分未核准,零程式碼)。
+      2026-07-28 追加(只加嚴):systemd 快照資料層 data_systemd_wsl.py
+      (/api/systemd-status 與排程表換源修正)同判準鎖定——subprocess
+      位點恰為兩處凍結唯讀查詢常數(list-units/list-timers)、守門複用
+      data_resident._distro_state(distro 未運作不喚醒)、無寫入動詞
 
 追加(2026-07-24,docs/webui-update-button-proposal.md §3 唯讀升級預檢;
 只追加、不放寬既有 1–10 項的任何判準):
@@ -64,6 +68,7 @@ VITE_CONFIG = WEBUI / "vite.config.ts"
 PTY_SERVER = WEBUI / "scripts" / "pty-server.mjs"
 RESIDENT_COMPONENT = WEBUI / "src" / "ResidentStatus.tsx"
 DATA_RESIDENT = REPO_ROOT / "dashboard" / "data_resident.py"
+DATA_SYSTEMD_WSL = REPO_ROOT / "dashboard" / "data_systemd_wsl.py"
 UPDATE_COMPONENT = WEBUI / "src" / "views" / "UpdatePrecheck.tsx"
 DATA_UPDATE = REPO_ROOT / "dashboard" / "data_update.py"
 SERVICE_COMPONENT = WEBUI / "src" / "ServiceControl.tsx"
@@ -471,11 +476,16 @@ def check_pty_server(pty: str, launcher: str, bridge: str) -> tuple[bool, list[s
     return ok, details
 
 
-def check_resident_readonly(component: str, data_resident: str) -> tuple[bool, list[str]]:
+def check_resident_readonly(component: str, data_resident: str,
+                            data_systemd_wsl: str) -> tuple[bool, list[str]]:
     """追加第 10 項:背景常駐狀態燈號(唯讀)——燈號元件與唯讀資料層不得存在
     任何操作入口。寫入部分已於 2026-07-27(v1.1)核准,但操作入口**集中在
     ServiceControl.tsx + bridge 第二群組**(第 12 項檢查);本項判準不變:
-    燈號元件與 data_resident.py 維持零寫入面(讀寫分離)。只追加,不影響 1–9 項。"""
+    燈號元件與 data_resident.py 維持零寫入面(讀寫分離)。只追加,不影響 1–9 項。
+
+    2026-07-28 追加 (d)(只加嚴,既有 (a)(b)(c) 判準原封不動):systemd 快照
+    資料層 data_systemd_wsl.py(/api/systemd-status 與排程表由裸 systemctl
+    換源至 WSL 包裹的修正)以同一套判準鎖定 spawn 面封閉。"""
     details: list[str] = []
     ok = True
 
@@ -517,6 +527,39 @@ def check_resident_readonly(component: str, data_resident: str) -> tuple[bool, l
         details.append(f"data_resident.py 出現寫入動詞字面值: {found}")
     else:
         details.append("data_resident.py 無任何 systemd/wsl 寫入動詞字面值")
+
+    # (d) systemd 快照資料層(data_systemd_wsl.py,2026-07-28 只加嚴追加):
+    #     subprocess 位點枚舉封閉(恰為兩處凍結唯讀查詢常數)、守門複用
+    #     data_resident._distro_state(distro 未運作不喚醒)、無寫入動詞。
+    wsl_sites = re.findall(r"subprocess\.run\(\s*(\w+)", data_systemd_wsl)
+    if sorted(set(wsl_sites)) == ["WSL_LIST_TIMERS_COMMAND", "WSL_LIST_UNITS_COMMAND"] \
+            and len(wsl_sites) == 2:
+        details.append("data_systemd_wsl.py subprocess 位點恰為兩處凍結常數"
+                       "(list-units / list-timers)")
+    else:
+        ok = False
+        details.append(f"data_systemd_wsl.py subprocess 位點與預期不符: {wsl_sites}")
+    if '"list-units"' in data_systemd_wsl and '"list-timers"' in data_systemd_wsl \
+            and '"--output=json"' in data_systemd_wsl:
+        details.append("data_systemd_wsl.py 探測指令皆為唯讀查詢形式"
+                       "(list-units/list-timers,timers 凍結為 --output=json——"
+                       "文字版右對齊單空格會切壞解析,2026-07-28 定案)")
+    else:
+        ok = False
+        details.append("data_systemd_wsl.py 凍結探測指令常數內容與預期不符"
+                       "(timers 須為 --output=json)")
+    if "_distro_state()" in data_systemd_wsl and "避免喚醒" in data_systemd_wsl:
+        details.append("data_systemd_wsl.py 守門複用 data_resident._distro_state:"
+                       "distro 非 Running 不下任何 wsl -d(不喚醒)")
+    else:
+        ok = False
+        details.append("data_systemd_wsl.py 未找到 distro 不喚醒守門(應複用 _distro_state)")
+    wsl_found = [verb for verb in write_verbs if verb in data_systemd_wsl]
+    if wsl_found:
+        ok = False
+        details.append(f"data_systemd_wsl.py 出現寫入動詞字面值: {wsl_found}")
+    else:
+        details.append("data_systemd_wsl.py 無任何 systemd/wsl 寫入動詞字面值")
     return ok, details
 
 
@@ -805,7 +848,7 @@ def main() -> int:
         pass
 
     missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG, PTY_SERVER,
-                                RESIDENT_COMPONENT, DATA_RESIDENT,
+                                RESIDENT_COMPONENT, DATA_RESIDENT, DATA_SYSTEMD_WSL,
                                 UPDATE_COMPONENT, DATA_UPDATE,
                                 SERVICE_COMPONENT, HERMES_VIEW) if not p.exists()]
     if missing:
@@ -828,8 +871,9 @@ def main() -> int:
     report.add("audit log(操作記錄落 logs/)", *_two(check_audit_log(bridge)))
     report.add("PTY server 安全(P3:隔離/授權/spawn 邊界/audit 不落 transcript)", *_two(check_pty_server(pty, launcher, bridge)))
     report.add(
-        "常駐狀態燈號唯讀(零操作入口、探測指令凍結、無寫入動詞)",
-        *_two(check_resident_readonly(read(RESIDENT_COMPONENT), read(DATA_RESIDENT))),
+        "常駐狀態燈號唯讀(零操作入口、探測指令凍結、無寫入動詞;含 systemd 快照層)",
+        *_two(check_resident_readonly(read(RESIDENT_COMPONENT), read(DATA_RESIDENT),
+                                      read(DATA_SYSTEMD_WSL))),
     )
     report.add(
         "Hermes 更新升級預檢唯讀(階段一:零執行鈕、git 唯讀模板凍結、無寫入子指令)",
