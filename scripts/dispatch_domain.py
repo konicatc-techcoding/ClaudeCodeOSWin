@@ -17,8 +17,8 @@ delegated domain task 的跨平台 adapter。CoS 分類與整合邏輯不在這�
   - execution=hermes_profile→ 呼叫 Hermes CLI 的 `-z/--oneshot` one-shot 模式，
                                明確帶 --profile（禁止依賴 sticky active_profile）
 
-用法：
-    .venv/Scripts/python.exe scripts/dispatch_domain.py \
+用法（<venv-python> = Windows `.venv/Scripts/python.exe`／Linux(WSL) `.venv/bin/python`）：
+    <venv-python> scripts/dispatch_domain.py \
         --owner engineering --category code_change \
         --prompt-file <path> --execution-id <id> \
         [--capability complex_coding] [--lane hermes-nemocoding] \
@@ -57,8 +57,9 @@ try:
 except ImportError:
     sys.exit(
         "需要 PyYAML，請用專案內的 venv 執行，不要用系統 Python。\n"
-        "  .venv/Scripts/python.exe scripts/dispatch_domain.py ...\n"
-        "（先建立：py -3.11 -m venv .venv && .venv/Scripts/python.exe -m pip install -r scripts/requirements.txt）"
+        "  Windows:     .venv/Scripts/python.exe scripts/dispatch_domain.py ...\n"
+        "  Linux(WSL):  .venv/bin/python scripts/dispatch_domain.py ...\n"
+        "（建立方式見 scripts/requirements.txt 與 route_model.py 開頭說明。）"
     )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -332,12 +333,27 @@ def resolve_hermes_argv_prefix(explicit: Optional[str]) -> list:
     用 shlex.split(posix=False) 解析，Windows 路徑的反斜線不會被誤判成跳脫字元。
     這裡不呼叫 shell，只是把字串拆成 argv 前綴的 token 清單，實際執行仍是
     subprocess.run(argv_list, shell=False)。
+
+    PATH 找不到時的 fallback：headless／非 login shell 呼叫（例如 WSL 側
+    systemd 或 `claude -p` 背景任務的 subprocess）常常沒有載入 login shell 的
+    PATH，而 WSL 上的 hermes CLI 裝在 ~/.local/bin/（login shell 才會加進
+    PATH）。所以 PATH 查無時，明確檢查這一個已知安裝位置——存在就用它；
+    仍然不存在才報錯，且錯誤訊息要指出「查過哪裡」跟「多半是 PATH 問題」，
+    讓呼叫端能分辨「沒安裝」與「PATH 沒帶到」兩種情況（誠實優先，不做
+    更多魔法搜尋）。
     """
     raw = explicit or shutil.which("hermes")
     if not raw:
+        fallback = Path.home() / ".local" / "bin" / "hermes"
+        if fallback.is_file():
+            # 直接回傳單一路徑 token，不經 shlex——路徑含空白也不會被拆壞。
+            return [str(fallback)]
         raise DispatchError(
             "hermes_not_found",
-            "在 PATH 中找不到 hermes 執行檔（未帶 --hermes-bin，且系統 PATH 內沒有 hermes）。",
+            "在 PATH 中找不到 hermes 執行檔，已知安裝位置 "
+            f"{fallback} 也不存在（未帶 --hermes-bin）。若 hermes 其實已安裝，"
+            "多半是非 login shell 的 PATH 沒帶到安裝目錄——請確認 PATH，"
+            "或用 --hermes-bin 明確指定路徑。",
         )
     # shlex.split(posix=False) 用來斷 token（不吃掉反斜線，Windows 路徑安全），
     # 但 posix=False 模式下配對引號會原樣保留在 token 裡，要自己剝掉。
@@ -626,7 +642,7 @@ def main():
                                                        "（含 status=reference 的 lane，例如 Hermes profile）。"
                                                        "例如搭配 --capability complex_coding 使用 "
                                                        "--lane hermes-gptcoding，明確指定走 Hermes 的 "
-                                                       "gptcoding profile：.venv/Scripts/python.exe "
+                                                       "gptcoding profile：<venv-python> "
                                                        "scripts/dispatch_domain.py --owner engineering "
                                                        "--category code_change --capability complex_coding "
                                                        "--lane hermes-gptcoding --prompt-file <path> "

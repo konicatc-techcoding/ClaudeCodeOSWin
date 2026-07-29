@@ -271,10 +271,37 @@ class ResolveHermesBinTests(unittest.TestCase):
         self.assertEqual(prefix, [r"C:\some dir\python.exe", r"C:\some dir\fake_hermes.py"])
 
     def test_missing_from_path_fails_visible(self):
-        with mock.patch("shutil.which", return_value=None):
+        # 把 Path.home 釘到空目錄——這台機器若真的有 ~/.local/bin/hermes，
+        # fallback 會命中，測不到「兩處都找不到」的報錯路徑。
+        empty_home = Path(tempfile.mkdtemp(prefix="empty_home_"))
+        with mock.patch("shutil.which", return_value=None), \
+             mock.patch("dispatch_domain.Path.home", return_value=empty_home):
             with self.assertRaises(dispatch_domain.DispatchError) as ctx:
                 dispatch_domain.resolve_hermes_argv_prefix(None)
         self.assertEqual(ctx.exception.exit_status, "hermes_not_found")
+        # 錯誤訊息要能區分「沒安裝」與「PATH 沒帶到」：指出查過的位置與 PATH 線索。
+        self.assertIn("PATH", ctx.exception.message)
+        self.assertIn(str(empty_home), ctx.exception.message)
+        self.assertIn("--hermes-bin", ctx.exception.message)
+
+    def test_missing_from_path_falls_back_to_local_bin(self):
+        # WSL headless（非 login shell）情境：~/.local/bin 不在 PATH，但 hermes
+        # 實際裝在那裡——PATH 查無時應 fallback 到這個已知安裝位置。
+        fake_home = Path(tempfile.mkdtemp(prefix="fake_home_"))
+        fake_hermes = fake_home / ".local" / "bin" / "hermes"
+        fake_hermes.parent.mkdir(parents=True)
+        fake_hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+        with mock.patch("shutil.which", return_value=None), \
+             mock.patch("dispatch_domain.Path.home", return_value=fake_home):
+            prefix = dispatch_domain.resolve_hermes_argv_prefix(None)
+        self.assertEqual(prefix, [str(fake_hermes)])
+
+    def test_explicit_override_skips_local_bin_fallback(self):
+        # 帶了 --hermes-bin 就不該再看 PATH 或 fallback 位置。
+        with mock.patch("shutil.which") as mock_which:
+            prefix = dispatch_domain.resolve_hermes_argv_prefix("/opt/custom/hermes")
+        mock_which.assert_not_called()
+        self.assertEqual(prefix, ["/opt/custom/hermes"])
 
 
 class RunSubprocessEncodingTests(unittest.TestCase):
