@@ -9,9 +9,14 @@
 #
 # 同步模型（詳見方案文件）：
 #   Phase 0  前置檢查（路徑、rsync、服務狀態、衝突掃描）
-#   Phase 1  inbox 反向合併：WSL → Windows，只新增、絕不覆蓋/刪除（inbox 只增不改）
-#   Phase 2  inbox 清理：Windows 端已 consolidation 完（進 .processed/.failed）的檔案，
-#            從 WSL inbox 頂層移除，避免下次被當成新件再合併回去
+#   Phase 1  inbox 清理：Windows 端已 consolidation 完（進 .processed/.failed）的檔案，
+#            從 WSL inbox 頂層移除。**必須排在反向合併之前**（2026-07-29 修正）：
+#            合併用的 --ignore-existing 只比對 Windows inbox 頂層、看不到
+#            .processed/.failed 歸檔——若先合併，已消化的檔案會被重新塞回
+#            Windows 頂層，下次 consolidation 變成重複處理
+#   Phase 2  inbox 反向合併：WSL → Windows，只新增、絕不覆蓋/刪除（inbox 只增不改）。
+#            Phase 1 判定要清理的檔案在 dry-run 下尚未實際移除，這裡以 --exclude
+#            一併排除，讓 dry-run 輸出忠實等於 apply 的實際行為
 #   Phase 3  正向同步：Windows → WSL 單向（Windows 是開發正本），帶排除清單 + --delete
 #
 # 冪等：重複執行結果相同。--dry-run 不改任何檔案。
@@ -178,20 +183,13 @@ if [ "$MODE" = "apply" ] && [ "$NO_BACKUP" -ne 1 ]; then
 fi
 
 # ================================================================
-# Phase 1 — inbox 反向合併（WSL → Windows，只新增）
+# Phase 1 — inbox 清理（Windows 端已歸檔者，從 WSL inbox 頂層移除）
+# 必須在反向合併（Phase 2）之前：--ignore-existing 只看 Windows inbox 頂層，
+# 看不到 .processed/.failed 歸檔，先合併會把已消化的檔案重新塞回 Windows。
 # ================================================================
-hr; log "[Phase 1] inbox 反向合併 WSL → Windows（--ignore-existing，絕不覆蓋/刪除）"; hr
-rsync "${DRY[@]}" -rt --ignore-existing --itemize-changes \
-  --exclude='.processed/' --exclude='.failed/' --exclude='.gitkeep' \
-  "$WSL_ROOT/memory/inbox/" "$WIN_ROOT/memory/inbox/" \
-  | sed 's/^/  /' || { log "Phase 1 失敗"; exit 1; }
-log "  (無輸出 = 沒有新 inbox 檔案需要合併)"
-
-# ================================================================
-# Phase 2 — inbox 清理（Windows 端已歸檔者，從 WSL inbox 頂層移除）
-# ================================================================
-hr; log "[Phase 2] inbox 清理（已進 Windows .processed/.failed 的檔案）"; hr
+hr; log "[Phase 1] inbox 清理（已進 Windows .processed/.failed 的檔案）"; hr
 CLEANED=0
+CLEANUP_EXCLUDES=()
 for f in "$WSL_ROOT"/memory/inbox/*; do
   [ -f "$f" ] || continue
   base=$(basename "$f")
@@ -202,10 +200,25 @@ for f in "$WSL_ROOT"/memory/inbox/*; do
     else
       log "  (dry-run) 將移除: memory/inbox/$base"
     fi
+    # dry-run 不實際移除檔案，Phase 2 的 rsync 會照樣看到它們——收集檔名
+    # 讓 Phase 2 明確 --exclude，dry-run 輸出才忠實等於 apply 的實際行為
+    # （apply 時檔案已真的移除，這些 exclude 是無害的 no-op）。
+    CLEANUP_EXCLUDES+=(--exclude="/$base")
     CLEANED=$((CLEANED + 1))
   fi
 done
 [ "$CLEANED" -eq 0 ] && log "  無需清理。"
+
+# ================================================================
+# Phase 2 — inbox 反向合併（WSL → Windows，只新增）
+# ================================================================
+hr; log "[Phase 2] inbox 反向合併 WSL → Windows（--ignore-existing，絕不覆蓋/刪除）"; hr
+rsync "${DRY[@]}" -rt --ignore-existing --itemize-changes \
+  --exclude='.processed/' --exclude='.failed/' --exclude='.gitkeep' \
+  "${CLEANUP_EXCLUDES[@]}" \
+  "$WSL_ROOT/memory/inbox/" "$WIN_ROOT/memory/inbox/" \
+  | sed 's/^/  /' || { log "Phase 2 失敗"; exit 1; }
+log "  (無輸出 = 沒有新 inbox 檔案需要合併)"
 
 # ================================================================
 # Phase 3 — 正向同步（Windows → WSL，單向、含 --delete）

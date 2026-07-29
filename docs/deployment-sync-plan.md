@@ -52,8 +52,8 @@
 | # | 內容 | 方向 | 策略 | 理由 |
 |---|---|---|---|---|
 | 1 | 程式碼 / 設定 / registry / docs / agents 定義 / skills / `hermes/systemd/`（含 `hermes/config/cron_jobs.yaml`、`rss_feeds.yaml`——這兩個是「有哪些排程/來源」的宣告，不是密鑰，**可同步**；`telegram.json` **不在此列**，見第 3 類） | Windows → WSL 單向 | rsync `--delete`（排除清單外全量鏡像） | Windows 是開發正本；WSL 側零本地修改（已驗證）。`--delete` 讓改名/刪除也能傳播，避免部署側殘留舊檔 |
-| 2a | `memory/inbox/` 頂層（新件） | **雙向合併（只新增）** | Phase 1：WSL → Windows `--ignore-existing`，絕不覆蓋、絕不刪除 | inbox 規約是「背景只能新增、不改既有檔」，且檔名帶時間戳唯一，新增檔案雙向合併天然安全 |
-| 2b | `memory/inbox/` 頂層（已歸檔件的清理） | WSL 側移除 | Phase 2：檔名存在於 Windows `.processed/` 或 `.failed/` 者，從 WSL inbox 頂層刪除 | 關閉生命週期：WSL 產生 → 合併到 Windows → consolidation 移入 `.processed/` → 下次同步時從 WSL inbox 移除，否則會被永遠當成「待處理」重複合併 |
+| 2a | `memory/inbox/` 頂層（新件） | **雙向合併（只新增）** | Phase 2：WSL → Windows `--ignore-existing`，絕不覆蓋、絕不刪除 | inbox 規約是「背景只能新增、不改既有檔」，且檔名帶時間戳唯一，新增檔案雙向合併天然安全 |
+| 2b | `memory/inbox/` 頂層（已歸檔件的清理） | WSL 側移除 | Phase 1：檔名存在於 Windows `.processed/` 或 `.failed/` 者，從 WSL inbox 頂層刪除。**必須排在合併之前**（2026-07-29 修正順序）：合併的 `--ignore-existing` 只比對 Windows inbox 頂層、看不到歸檔目錄，先合併會把已消化的檔案重新塞回 Windows 頂層造成重複 consolidation | 關閉生命週期：WSL 產生 → 合併到 Windows → consolidation 移入 `.processed/` → 下次同步時從 WSL inbox 移除，否則會被永遠當成「待處理」重複合併 |
 | 2c | `memory/inbox/.processed/`、`.failed/` | Windows → WSL 單向 | 併入 Phase 3 正向同步 | 歸檔正本在 Windows（consolidation 在 Windows 側跑）；下發讓兩側 inbox 視圖一致，N-gate 只數頂層所以不受影響。體積小，同步成本可忽略 |
 | 2d | `memory/*.md` 正本 | Windows → WSL 單向 | 併入 Phase 3；Phase 0 衝突掃描保護 | 規約：正本只有互動式 session / consolidation pass（都在 Windows 側）能編輯。若掃描發現 WSL 側正本較新且不同（=有人違規改了部署側），**中止並人工裁決**，不自動蓋掉 |
 | 3 | `.venv/` | 不同步 | 排除 | 平台原生（Windows `Scripts\` vs Linux `bin/`），互不相容，各自重建 |
@@ -100,7 +100,7 @@ wsl.exe -d Ubuntu -e bash /mnt/c/Users/razer/dev/ClaudeCodeOSWin/scripts/sync_to
 
 - **Phase 0 前置檢查**：路徑/rsync 存在、`hermes-worker`/`hermes-telegram` 服務狀態（apply 時運行中即中止，除非 `--allow-running`）、衝突掃描（WSL 側較新且內容不同 → 列出並中止 apply，除非 `--force`）。
 - **備份**（僅 apply，可 `--no-backup` 跳過）：`~/backups/ClaudeCodeOSWin-wsl-pre-sync-<ts>.tar.gz`（排除 `.venv`）。
-- **Phase 1** inbox 反向合併；**Phase 2** inbox 歸檔清理；**Phase 3** 正向鏡像——策略如 §2。
+- **Phase 1** inbox 歸檔清理（先清後併，見 §2 類別 2b 的順序理由；dry-run 下 Phase 2 會以 `--exclude` 排除待清檔，確保預演輸出等於 apply 實際行為）；**Phase 2** inbox 反向合併；**Phase 3** 正向鏡像——策略如 §2。
 - 冪等：重複執行收斂到同一狀態。注意 `--apply` 一定從 Windows 發起或在 WSL 內跑 `/mnt/c` 側的腳本副本——腳本本身也是被同步的對象。
 
 ## 5. 同步時機（本階段只建議、不實作排程）
@@ -122,7 +122,7 @@ wsl.exe -d Ubuntu -e bash /mnt/c/Users/razer/dev/ClaudeCodeOSWin/scripts/sync_to
 | 風險 | 緩解 |
 |---|---|
 | 同步中服務正在讀寫檔案（worker 換程式碼到一半） | apply 預設要求 worker/telegram 已停；jobs.db/state 完全排除，不存在 SQLite 半寫問題 |
-| 同步當下 WSL headless job 正好寫入新 inbox 檔 | Phase 3 對 inbox 頂層完全不動（不含在 `--delete` 範圍），新檔安全，下次 Phase 1 回流 |
+| 同步當下 WSL headless job 正好寫入新 inbox 檔 | Phase 3 對 inbox 頂層完全不動（不含在 `--delete` 範圍），新檔安全，下次 Phase 2 回流 |
 | 部分同步的半完成狀態（中途斷電/中斷） | rsync 以檔案為單位原子替換；重跑一次即收斂（冪等）。服務在 apply 期間是停的，不會讀到混合狀態 |
 | `--delete` 誤刪 WSL 側需要的檔案 | 所有 WSL-only 合法檔案都在排除清單（rsync 排除項預設受 `--delete` 保護）；apply 前有 tar 備份 |
 | WSL 側被違規手改、被同步蓋掉 | Phase 0 衝突掃描（內容+mtime）攔截並中止，人工裁決 |
@@ -133,4 +133,4 @@ wsl.exe -d Ubuntu -e bash /mnt/c/Users/razer/dev/ClaudeCodeOSWin/scripts/sync_to
 ## 8. Rollback
 
 - **WSL 側**：解開 apply 前自動產生的 tarball——`tar -C ~/dev -xzf ~/backups/ClaudeCodeOSWin-wsl-pre-sync-<ts>.tar.gz`（`.venv` 不在備份內也不被同步觸碰，無需還原），然後 daemon-reload + 重啟服務。
-- **Windows 側**：同步對 Windows 側唯一的寫入是 Phase 1 的 inbox 新增檔（只增不改），rollback = 刪掉那幾個新檔即可；其餘 Windows 內容完全不被觸碰。
+- **Windows 側**：同步對 Windows 側唯一的寫入是 Phase 2 的 inbox 新增檔（只增不改），rollback = 刪掉那幾個新檔即可；其餘 Windows 內容完全不被觸碰。
