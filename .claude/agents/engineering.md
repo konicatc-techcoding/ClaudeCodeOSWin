@@ -26,6 +26,7 @@ tools: Read, Edit, Write, Bash, Grep, Glob
       [--capability complex_coding] [--lane hermes-nemocoding]
   ```
   不帶 `--lane` 時 Router 會在符合 capability／owner 且 `status: active` 的 lane 裡自動挑一條；要指定用哪條 Hermes profile 才帶 `--lane`。走 Hermes 是「任務內容明顯不適合預設能力時的可選手段」——`engineering` 的 `default_capability` 仍是 `claude_native`，不是預設就要走 Hermes。
+- Hermes 執行檔的解析是平台感知的（2026-07-29 起）：`--hermes-bin` 永遠最優先；WSL（headless）環境優先經 interop 直接執行 Windows 側 hermes.exe（凍結常數 `WINDOWS_HERMES_INTEROP_PATH`，因為五個 lane profile 的憑證只存在 Windows 側，WSL 側 `~/.local/bin/hermes` 是零 profile 空殼），不存在才落回 PATH → `~/.local/bin/hermes` 並在 stderr 誠實註記降級；非 WSL 平台維持 PATH → `~/.local/bin/hermes`。細節見 `scripts/dispatch_domain.py` 檔頭 docstring。
 
 ## v0.1 狀態
 

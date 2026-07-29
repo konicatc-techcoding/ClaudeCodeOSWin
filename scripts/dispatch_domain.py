@@ -17,6 +17,25 @@ delegated domain task 的跨平台 adapter。CoS 分類與整合邏輯不在這�
   - execution=hermes_profile→ 呼叫 Hermes CLI 的 `-z/--oneshot` one-shot 模式，
                                明確帶 --profile（禁止依賴 sticky active_profile）
 
+Hermes 執行檔解析順序（平台感知，2026-07-29 起）：
+  1. --hermes-bin 明確指定——永遠最優先，所有平台一致（不看 PATH、不看
+     fallback 位置）。
+  2. WSL 環境（is_wsl()，判準是 /proc/version 含 'microsoft'）：優先用凍結
+     常數 WINDOWS_HERMES_INTEROP_PATH 指到的 Windows 側 hermes.exe（經 WSL
+     interop 直接執行）——2026-07-29 拍板「憑證單一存放」：五個 lane profile
+     的憑證只存在 Windows 側，不在 WSL 重建 profile；WSL 側 ~/.local/bin/hermes
+     雖存在但零 profile（帶 --profile 一律回 Profile ... does not exist）。
+     該路徑不存在才落回 PATH → ~/.local/bin/hermes，並在 stderr 誠實註記降級
+     （落到 WSL 側 hermes 時明講「其無 lane profile」）。
+  3. 非 WSL 的 Linux 與 Windows：PATH → ~/.local/bin/hermes（維持原邏輯不變）。
+
+改用 Windows 側 hermes（windows_interop=True）時的路徑轉譯（wslpath -w）：
+  - --usage-file 是功能性引數，必須轉成 Windows 視角路徑；轉譯失敗明確以
+    exit_status=wslpath_error 報錯，不靜默。dispatch 自己讀 usage file 時仍用
+    原 WSL 路徑——同一個檔案的兩種視角。
+  - wrapped prompt 的 PROJECT_ROOT 行是資訊性文字，同樣轉成 Windows 視角讓
+    語意對 Windows 側程序成立；轉譯失敗保留原樣並在該行內註記，不擋執行。
+
 用法（<venv-python> = Windows `.venv/Scripts/python.exe`／Linux(WSL) `.venv/bin/python`）：
     <venv-python> scripts/dispatch_domain.py \
         --owner engineering --category code_change \
@@ -72,6 +91,21 @@ LANES_PATH = ROOT / "registry" / "capability_lanes.yaml"
 ROUTE_MODEL_SCRIPT = ROOT / "scripts" / "route_model.py"
 DEFAULT_LOG_DIR = ROOT / "logs" / "dispatch_domain"
 
+# --- WSL → Windows hermes interop（憑證單一存放拍板，2026-07-29）------------
+# 五個 lane profile 的憑證只存在 Windows 側 hermes；WSL 側 ~/.local/bin/hermes
+# 雖然存在但是零 profile 的空殼。因此 WSL（headless）環境優先經 WSL interop
+# 直接執行 Windows 側 hermes.exe（2026-07-29 於 Windows 側實測位置：
+# C:\Users\razer\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes）。
+# 機器特定路徑（razer）刻意寫成凍結常數：本專案為單人單機，sync script 已有
+# 同等先例；路徑集中在這一個常數（全檔唯一出處），日後檢查腳本可直接斷言
+# 這個字面值（比照專案「凍結字面」慣例，見 scripts/webui_security_check.py）。
+WINDOWS_HERMES_INTEROP_PATH = (
+    "/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe"
+)
+
+# WSL 偵測讀的檔案，抽成模組層常數讓測試可以釘到假檔案（不動真實 /proc）。
+_PROC_VERSION_PATH = Path("/proc/version")
+
 DEFAULT_TIMEOUT_SECONDS = 600  # 跟 hermes/worker.py 的 JOB_TIMEOUT_SECONDS 對齊
 # Windows CreateProcess 的 command line 總長度上限約 32,767 字元。hermes -z 的
 # prompt 是直接進 argv（不像 invoke_cos_triage.sh 那樣是「檔案傳到 wrapper，
@@ -111,7 +145,8 @@ class DispatchError(Exception):
 @dataclass
 class ExecutionResult:
     exit_status: str          # success | timeout | profile_not_found | hermes_not_found |
-                               # empty_output | bad_usage_json | nonzero_exit
+                               # empty_output | bad_usage_json | nonzero_exit |
+                               # prompt_too_long | isolation_error | wslpath_error
     result_text: Optional[str]
     usage: Optional[dict]
     provider: Optional[str]
@@ -324,39 +359,72 @@ def execute_native_or_openrouter(lane: dict, capability: str, prompt_path: Path,
     )
 
 
-def resolve_hermes_argv_prefix(explicit: Optional[str]) -> list:
-    """回傳呼叫 hermes 的 argv 前綴（list）。
+def is_wsl() -> bool:
+    """是否在 WSL 內執行。
 
-    --hermes-bin 預設情況下是單一可執行檔路徑（例如指到真正的 hermes.exe，
-    PATH 裡找得到就直接用 'hermes'）；也支援帶多個 token 的命令字串（例如測試
-    時用 '"<python.exe>" "<fake_hermes.py>"' 這種「直譯器＋腳本」形式）——
-    用 shlex.split(posix=False) 解析，Windows 路徑的反斜線不會被誤判成跳脫字元。
-    這裡不呼叫 shell，只是把字串拆成 argv 前綴的 token 清單，實際執行仍是
-    subprocess.run(argv_list, shell=False)。
-
-    PATH 找不到時的 fallback：headless／非 login shell 呼叫（例如 WSL 側
-    systemd 或 `claude -p` 背景任務的 subprocess）常常沒有載入 login shell 的
-    PATH，而 WSL 上的 hermes CLI 裝在 ~/.local/bin/（login shell 才會加進
-    PATH）。所以 PATH 查無時，明確檢查這一個已知安裝位置——存在就用它；
-    仍然不存在才報錯，且錯誤訊息要指出「查過哪裡」跟「多半是 PATH 問題」，
-    讓呼叫端能分辨「沒安裝」與「PATH 沒帶到」兩種情況（誠實優先，不做
-    更多魔法搜尋）。
+    偵測方式選「/proc/version 含 'microsoft'（不分大小寫）」，不用「/mnt/c
+    存在與否」——理由：/mnt/c 取決於 WSL 的 automount 設定（可以關掉），
+    而且任何 Linux 都可能剛好有 /mnt/c 目錄（例如手動 mount），誤判成本較高；
+    /proc/version 帶 microsoft 字樣則是 WSL1/WSL2 kernel 的固定特徵，是
+    Microsoft 文件與社群慣用的判別法。非 Linux 平台直接回 False，不碰檔案。
     """
-    raw = explicit or shutil.which("hermes")
-    if not raw:
-        fallback = Path.home() / ".local" / "bin" / "hermes"
-        if fallback.is_file():
-            # 直接回傳單一路徑 token，不經 shlex——路徑含空白也不會被拆壞。
-            return [str(fallback)]
-        raise DispatchError(
-            "hermes_not_found",
-            "在 PATH 中找不到 hermes 執行檔，已知安裝位置 "
-            f"{fallback} 也不存在（未帶 --hermes-bin）。若 hermes 其實已安裝，"
-            "多半是非 login shell 的 PATH 沒帶到安裝目錄——請確認 PATH，"
-            "或用 --hermes-bin 明確指定路徑。",
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        return "microsoft" in _PROC_VERSION_PATH.read_text(
+            encoding="utf-8", errors="replace"
+        ).lower()
+    except OSError:
+        return False
+
+
+def wslpath_to_windows(path: str) -> str:
+    """用 `wslpath -w` 把 WSL 路徑轉成 Windows 視角路徑。
+
+    失敗（wslpath 不存在、非零結束碼、空輸出、逾時）一律拋
+    DispatchError("wslpath_error", ...)，不靜默退回原路徑——要不要擋執行
+    由呼叫端決定（--usage-file 是功能性引數要擋；PROJECT_ROOT 行是資訊性
+    文字不擋，見 execute_hermes_profile）。
+    """
+    try:
+        proc = subprocess.run(
+            ["wslpath", "-w", path], capture_output=True,
+            encoding="utf-8", errors="replace", timeout=10, shell=False,
         )
-    # shlex.split(posix=False) 用來斷 token（不吃掉反斜線，Windows 路徑安全），
-    # 但 posix=False 模式下配對引號會原樣保留在 token 裡，要自己剝掉。
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise DispatchError("wslpath_error", f"呼叫 wslpath -w {path!r} 失敗：{e}")
+    if proc.returncode != 0:
+        raise DispatchError(
+            "wslpath_error",
+            f"wslpath -w {path!r} 結束碼 {proc.returncode}："
+            f"{(proc.stderr or '').strip() or '無 stderr 內容'}",
+        )
+    converted = (proc.stdout or "").strip()
+    if not converted:
+        raise DispatchError("wslpath_error", f"wslpath -w {path!r} 結束碼 0 但輸出是空的")
+    return converted
+
+
+@dataclass
+class HermesInvocation:
+    """resolve_hermes_invocation() 的結果——argv 前綴＋兩個執行期需要的事實。"""
+
+    argv_prefix: list
+    windows_interop: bool            # True = WSL 內經 interop 呼叫 Windows .exe，
+                                     #        路徑型引數需經 wslpath -w 轉譯
+    degradation_note: Optional[str]  # WSL 內 Windows hermes 不在預期位置時的
+                                     #        誠實降級說明（同步寫到 stderr）
+
+
+def _split_hermes_bin(raw: str) -> list:
+    """把 --hermes-bin 字串拆成 argv 前綴 token 清單。
+
+    支援單一可執行檔路徑，也支援帶多個 token 的命令字串（例如測試時用
+    '"<python.exe>" "<fake_hermes.py>"' 這種「直譯器＋腳本」形式）——用
+    shlex.split(posix=False) 解析，Windows 路徑的反斜線不會被誤判成跳脫字元；
+    posix=False 模式下配對引號會原樣保留在 token 裡，要自己剝掉。這裡不呼叫
+    shell，實際執行仍是 subprocess.run(argv_list, shell=False)。
+    """
     tokens = shlex.split(raw, posix=False)
     prefix = []
     for tok in tokens:
@@ -368,8 +436,89 @@ def resolve_hermes_argv_prefix(explicit: Optional[str]) -> list:
     return prefix
 
 
+def _resolve_from_path_or_local_bin(extra_checked: Optional[str] = None) -> list:
+    """PATH → ~/.local/bin/hermes 的既有解析邏輯（非 WSL 平台的完整順序；
+    WSL 內則是 Windows interop 路徑不存在時的落回段）。
+
+    PATH 找不到時的 fallback：headless／非 login shell 呼叫（例如 WSL 側
+    systemd 或 `claude -p` 背景任務的 subprocess）常常沒有載入 login shell 的
+    PATH，而 WSL 上的 hermes CLI 裝在 ~/.local/bin/（login shell 才會加進
+    PATH）。所以 PATH 查無時，明確檢查這一個已知安裝位置——存在就用它；
+    仍然不存在才報錯，且錯誤訊息要指出「查過哪裡」跟「多半是 PATH 問題」，
+    讓呼叫端能分辨「沒安裝」與「PATH 沒帶到」兩種情況（誠實優先，不做
+    更多魔法搜尋）。extra_checked 用來把「這之前還查過的位置」（WSL 的
+    Windows interop 路徑）帶進錯誤訊息。
+    """
+    found = shutil.which("hermes")
+    if found:
+        return [found]
+    fallback = Path.home() / ".local" / "bin" / "hermes"
+    if fallback.is_file():
+        # 直接回傳單一路徑 token，不經 shlex——路徑含空白也不會被拆壞。
+        return [str(fallback)]
+    checked_prefix = f"預期的 Windows hermes interop 位置 {extra_checked} 不存在、" if extra_checked else ""
+    raise DispatchError(
+        "hermes_not_found",
+        f"{checked_prefix}在 PATH 中找不到 hermes 執行檔，已知安裝位置 "
+        f"{fallback} 也不存在（未帶 --hermes-bin）。若 hermes 其實已安裝，"
+        "多半是非 login shell 的 PATH 沒帶到安裝目錄——請確認 PATH，"
+        "或用 --hermes-bin 明確指定路徑。",
+    )
+
+
+def resolve_hermes_invocation(explicit: Optional[str]) -> HermesInvocation:
+    """解析呼叫 hermes 的方式（平台感知，順序見檔頭 docstring）。
+
+    1. explicit（--hermes-bin）永遠最優先，所有平台一致。
+    2. WSL：凍結常數 WINDOWS_HERMES_INTEROP_PATH（存在才用）→ PATH →
+       ~/.local/bin/hermes，降級時把誠實說明寫進 stderr 與 degradation_note。
+    3. 非 WSL 的 Linux 與 Windows：PATH → ~/.local/bin/hermes（原邏輯不變）。
+
+    windows_interop 旗標統一用「在 WSL 內、且最終解析到的執行檔是 .exe」判定
+    ——不只覆蓋凍結常數路徑，也覆蓋 --hermes-bin 明確指到 /mnt/c/... 的 .exe、
+    或 WSL 把 Windows PATH 附加進來後 which 找到 .exe 的情況；這個旗標決定
+    後續路徑型引數要不要經 wslpath -w 轉譯（見 execute_hermes_profile）。
+    """
+    on_wsl = is_wsl()
+    degradation_note: Optional[str] = None
+
+    if explicit:
+        prefix = _split_hermes_bin(explicit)
+    elif on_wsl:
+        interop = Path(WINDOWS_HERMES_INTEROP_PATH)
+        if interop.is_file():
+            prefix = [str(interop)]
+        else:
+            prefix = _resolve_from_path_or_local_bin(
+                extra_checked=WINDOWS_HERMES_INTEROP_PATH
+            )
+            if prefix[0].lower().endswith(".exe"):
+                degradation_note = (
+                    f"Windows hermes 不在預期位置 {WINDOWS_HERMES_INTEROP_PATH}，"
+                    f"改用 PATH 解析到的另一個 Windows hermes：{prefix[0]}"
+                    "（仍屬 Windows 側，lane profile 憑證應可用，但已偏離凍結常數）。"
+                )
+            else:
+                degradation_note = (
+                    f"Windows hermes 不在預期位置 {WINDOWS_HERMES_INTEROP_PATH}，"
+                    f"落回 WSL 側 hermes（{prefix[0]}）——注意其無 lane profile"
+                    "（五個 lane profile 的憑證只存在 Windows 側，2026-07-29 拍板"
+                    "憑證單一存放），--profile 執行預期會失敗（profile_not_found）。"
+                )
+            sys.stderr.write(degradation_note + "\n")
+    else:
+        prefix = _resolve_from_path_or_local_bin()
+
+    windows_interop = on_wsl and prefix[0].lower().endswith(".exe")
+    return HermesInvocation(
+        argv_prefix=prefix,
+        windows_interop=windows_interop,
+        degradation_note=degradation_note,
+    )
+
+
 def execute_hermes_profile(lane: dict, prompt_text: str, execution_id: str, timeout: int,
-                            hermes_argv_prefix: list, log_dir: Path) -> ExecutionResult:
+                            invocation: HermesInvocation, log_dir: Path) -> ExecutionResult:
     profile = lane["hermes_profile"]
 
     if len(prompt_text) > MAX_HERMES_PROMPT_CHARS:
@@ -400,26 +549,67 @@ def execute_hermes_profile(lane: dict, prompt_text: str, execution_id: str, time
                 returncode=None,
             )
 
+        usage_file = Path(log_dir) / f"{execution_id}.usage.json"
+        usage_file.parent.mkdir(parents=True, exist_ok=True)
+        if usage_file.exists():
+            usage_file.unlink()
+
+        # windows_interop 時的路徑轉譯（wslpath -w）——兩種引數兩種嚴格度：
+        usage_file_arg = str(usage_file)
+        project_root_display = str(ROOT)
+        if invocation.windows_interop:
+            # --usage-file 是功能性引數：Windows 側 hermes 拿到 Linux 路徑會
+            # 寫錯地方或直接失敗，必須轉成 Windows 視角；轉譯失敗明確報錯
+            # （exit_status=wslpath_error），不靜默。注意：轉的是「已存在的
+            # 父目錄」再自己接上檔名——部分版本的 wslpath 對不存在的路徑會
+            # 直接報錯，而 usage file 在執行前刻意不存在（存在與否是
+            # 「hermes 有沒有寫」的訊號，見下方讀取段）。dispatch 自己讀
+            # usage file 時仍用原 WSL 路徑 usage_file——同一個檔案的兩種視角。
+            try:
+                win_dir = wslpath_to_windows(str(usage_file.parent))
+                usage_file_arg = win_dir.rstrip("\\") + "\\" + usage_file.name
+            except DispatchError as e:
+                return ExecutionResult(
+                    exit_status="wslpath_error",
+                    result_text=None, usage=None,
+                    provider=lane.get("provider"), model=None, profile=profile,
+                    detail=f"--usage-file 路徑轉譯失敗（wslpath -w），不送出執行：{e.message}",
+                    returncode=None,
+                )
+            # PROJECT_ROOT 行是 prompt 內的資訊性文字：轉成 Windows 視角讓
+            # 語意對 Windows 側程序成立；轉譯失敗就保留原樣並在行內註記，
+            # 不擋執行（跟上面功能性引數的嚴格度刻意不同）。
+            try:
+                project_root_display = wslpath_to_windows(str(ROOT))
+            except DispatchError as e:
+                project_root_display = (
+                    f"{ROOT}（註：wslpath 轉譯失敗，此為 WSL 視角路徑——{e.message}）"
+                )
+
         wrapped_prompt = (
-            f"PROJECT_ROOT = {ROOT}\n"
+            f"PROJECT_ROOT = {project_root_display}\n"
             "（本次執行已切換到全新的中性暫存目錄，避免自動載入專案根目錄的 AGENTS.md；"
             "如需讀寫專案檔案，請一律使用上述絕對路徑，不要假設目前工作目錄就是專案根目錄。）\n"
             "---\n"
             f"{prompt_text}"
         )
 
-        usage_file = Path(log_dir) / f"{execution_id}.usage.json"
-        usage_file.parent.mkdir(parents=True, exist_ok=True)
-        if usage_file.exists():
-            usage_file.unlink()
-
-        argv = list(hermes_argv_prefix) + [
+        argv = list(invocation.argv_prefix) + [
             "--profile", profile,
             "-z", wrapped_prompt,
-            "--usage-file", str(usage_file),
+            "--usage-file", usage_file_arg,
         ]
 
         try:
+            # 已知風險（windows_interop 情境，誠實記錄、不做過度工程）：
+            # neutral_dir 是 Linux 路徑（/tmp/dispatch_domain_*），由 Linux
+            # 程序 spawn Windows .exe 時，Windows 側程序看到的 cwd 會是
+            # \\wsl.localhost\<distro>\tmp\... 的 UNC 形式；部分 Windows 程式
+            # 對 UNC cwd 支援不佳（典型例子：cmd.exe 會警告並退回
+            # C:\Windows）。中性 cwd 的原始目的（避免 hermes 從 cwd 自動載入
+            # 本 repo 的 AGENTS.md）在 UNC 形式下仍然成立——UNC cwd 下也不會
+            # 有本 repo 的 AGENTS.md。真實行為由主 session 以真 hermes
+            # interop 實測確認後再決定要不要調整。
             proc = run_subprocess(argv, cwd=neutral_dir, timeout=timeout)
         except subprocess.TimeoutExpired:
             return ExecutionResult(
@@ -498,9 +688,9 @@ def execute_lane(lane: dict, capability: str, prompt_path: Path, prompt_text: st
     if execution in ("native", "route_model"):
         return execute_native_or_openrouter(lane, capability, prompt_path, timeout)
     if execution == "hermes_profile":
-        hermes_argv_prefix = resolve_hermes_argv_prefix(hermes_bin_override)
+        invocation = resolve_hermes_invocation(hermes_bin_override)
         return execute_hermes_profile(
-            lane, prompt_text, execution_id, timeout, hermes_argv_prefix, log_dir
+            lane, prompt_text, execution_id, timeout, invocation, log_dir
         )
     raise DispatchError("registry_error", f"lane '{lane.get('id')}' 的 execution='{execution}' 不支援執行。")
 
@@ -649,7 +839,9 @@ def main():
                                                        "--execution-id <id>")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--hermes-bin", default=None,
-                         help="覆蓋 hermes 呼叫命令（預設從 PATH 找 'hermes'）；"
+                         help="覆蓋 hermes 呼叫命令（未帶時平台感知解析：WSL 先看 "
+                              "WINDOWS_HERMES_INTEROP_PATH，其餘平台 PATH → "
+                              "~/.local/bin/hermes，見檔頭 docstring）；"
                               "可以是單一執行檔路徑，也可以是帶多個 token 的命令字串"
                               "（例如測試時用 '\"<python>\" \"<script.py>\"'）")
     parser.add_argument("--log-dir", default=None, help="覆蓋 log／usage 檔輸出目錄（測試用；預設 logs/dispatch_domain）")

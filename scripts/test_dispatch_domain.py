@@ -16,6 +16,10 @@ scripts/dispatch_domain.py 的 deterministic 測試。
   fallback 機制本身仍然是 dispatch_domain.py 的既有功能，改用合成 lane 資料
   測試（見 test_lane_with_fallback_lane_falls_back_and_succeeds），不依賴目前
   registry 是否剛好有 fallback_lane 可觸發。
+- 2026-07-29：hermes 執行檔解析改為平台感知（WSL 優先走 Windows 側 hermes.exe
+  interop，見 dispatch_domain 檔頭 docstring）。WSL 偵測、interop 解析順序、
+  wslpath 轉譯（成功／失敗兩種嚴格度）全部用 mock/fake 覆蓋，不執行真實
+  hermes 也不執行真實 wslpath——真實 interop 端對端由主 session 實測。
 
 執行：.venv/Scripts/python.exe scripts/test_dispatch_domain.py
 """
@@ -57,6 +61,14 @@ _FAKE_HERMES_SRC = textwrap.dedent(r"""
     p.add_argument("-z", "--oneshot", required=True)
     p.add_argument("--usage-file", default=None)
     args = p.parse_args()
+
+    # 測試可攜性：windows_interop 測試用「identity 假譯」時，usage-file 引數是
+    # 「父目錄 + '\\' + 檔名」的 Windows 形式接法；本測試套件也會在 WSL 部署
+    # 複本上跑，Linux 下把反斜線正規化成 os.sep 才能寫進同一個檔案。Windows
+    # 上 os.sep 就是反斜線，等同 no-op；非 interop 測試的路徑沒有反斜線接縫，
+    # 也是 no-op。
+    if args.usage_file:
+        args.usage_file = args.usage_file.replace("\\", os.sep)
 
     marker = os.environ.get("DISPATCH_TEST_MARKER")
     if marker:
@@ -116,9 +128,14 @@ class FakeHermesFixture(unittest.TestCase):
         cls.fake_py = Path(cls.tmp_dir) / "fake_hermes.py"
         cls.fake_py.write_text(_FAKE_HERMES_SRC, encoding="utf-8")
         cls.hermes_argv_prefix = [sys.executable, str(cls.fake_py)]
+        # execute_hermes_profile 直呼測試用：一般（非 interop）invocation。
+        cls.invocation = dispatch_domain.HermesInvocation(
+            argv_prefix=cls.hermes_argv_prefix, windows_interop=False,
+            degradation_note=None,
+        )
 
         # 給 dispatch()／CLI 層級測試用：--hermes-bin 支援「多 token 命令字串」
-        # （見 dispatch_domain.resolve_hermes_argv_prefix），直接用雙引號各自包住
+        # （見 dispatch_domain._split_hermes_bin），直接用雙引號各自包住
         # python 直譯器與腳本路徑——不透過任何 shell／.bat 中介層，prompt 內容
         # 一律由 Python 自己組好 argv list 交給 subprocess.run(shell=False)，
         # 不會有 cmd.exe 轉發 argv 時把內嵌換行弄壞的問題。
@@ -258,17 +275,28 @@ class RegistryResolutionTests(unittest.TestCase):
 
 
 class ResolveHermesBinTests(unittest.TestCase):
+    """非 WSL 平台的解析行為（2026-07-29 平台感知改版後必須維持原邏輯不變）。
+    一律把 is_wsl 釘成 False——本機是 Windows 本來就會回 False，但這套測試也
+    會在 WSL 部署複本上跑，不釘住的話會走到 WSL 分支、測錯對象。"""
+
+    def setUp(self):
+        patcher = mock.patch("dispatch_domain.is_wsl", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_explicit_single_path_override_wins(self):
-        self.assertEqual(
-            dispatch_domain.resolve_hermes_argv_prefix("C:/some/hermes.exe"), ["C:/some/hermes.exe"]
-        )
+        inv = dispatch_domain.resolve_hermes_invocation("C:/some/hermes.exe")
+        self.assertEqual(inv.argv_prefix, ["C:/some/hermes.exe"])
+        # 非 WSL：即使指到 .exe 也不啟用 interop 路徑轉譯。
+        self.assertFalse(inv.windows_interop)
+        self.assertIsNone(inv.degradation_note)
 
     def test_explicit_multi_token_command_is_split(self):
         # Windows 路徑用反斜線，posix=False 不該把它當跳脫字元處理掉。
-        prefix = dispatch_domain.resolve_hermes_argv_prefix(
+        inv = dispatch_domain.resolve_hermes_invocation(
             r'"C:\some dir\python.exe" "C:\some dir\fake_hermes.py"'
         )
-        self.assertEqual(prefix, [r"C:\some dir\python.exe", r"C:\some dir\fake_hermes.py"])
+        self.assertEqual(inv.argv_prefix, [r"C:\some dir\python.exe", r"C:\some dir\fake_hermes.py"])
 
     def test_missing_from_path_fails_visible(self):
         # 把 Path.home 釘到空目錄——這台機器若真的有 ~/.local/bin/hermes，
@@ -277,31 +305,193 @@ class ResolveHermesBinTests(unittest.TestCase):
         with mock.patch("shutil.which", return_value=None), \
              mock.patch("dispatch_domain.Path.home", return_value=empty_home):
             with self.assertRaises(dispatch_domain.DispatchError) as ctx:
-                dispatch_domain.resolve_hermes_argv_prefix(None)
+                dispatch_domain.resolve_hermes_invocation(None)
         self.assertEqual(ctx.exception.exit_status, "hermes_not_found")
         # 錯誤訊息要能區分「沒安裝」與「PATH 沒帶到」：指出查過的位置與 PATH 線索。
         self.assertIn("PATH", ctx.exception.message)
         self.assertIn(str(empty_home), ctx.exception.message)
         self.assertIn("--hermes-bin", ctx.exception.message)
+        # 非 WSL 的錯誤訊息不應扯到 Windows interop 位置（那是 WSL 分支的事）。
+        self.assertNotIn(dispatch_domain.WINDOWS_HERMES_INTEROP_PATH, ctx.exception.message)
 
     def test_missing_from_path_falls_back_to_local_bin(self):
-        # WSL headless（非 login shell）情境：~/.local/bin 不在 PATH，但 hermes
-        # 實際裝在那裡——PATH 查無時應 fallback 到這個已知安裝位置。
+        # 非 login shell 情境：~/.local/bin 不在 PATH，但 hermes 實際裝在那裡
+        # ——PATH 查無時應 fallback 到這個已知安裝位置。
         fake_home = Path(tempfile.mkdtemp(prefix="fake_home_"))
         fake_hermes = fake_home / ".local" / "bin" / "hermes"
         fake_hermes.parent.mkdir(parents=True)
         fake_hermes.write_text("#!/bin/sh\n", encoding="utf-8")
         with mock.patch("shutil.which", return_value=None), \
              mock.patch("dispatch_domain.Path.home", return_value=fake_home):
-            prefix = dispatch_domain.resolve_hermes_argv_prefix(None)
-        self.assertEqual(prefix, [str(fake_hermes)])
+            inv = dispatch_domain.resolve_hermes_invocation(None)
+        self.assertEqual(inv.argv_prefix, [str(fake_hermes)])
+        self.assertFalse(inv.windows_interop)
 
     def test_explicit_override_skips_local_bin_fallback(self):
         # 帶了 --hermes-bin 就不該再看 PATH 或 fallback 位置。
         with mock.patch("shutil.which") as mock_which:
-            prefix = dispatch_domain.resolve_hermes_argv_prefix("/opt/custom/hermes")
+            inv = dispatch_domain.resolve_hermes_invocation("/opt/custom/hermes")
         mock_which.assert_not_called()
-        self.assertEqual(prefix, ["/opt/custom/hermes"])
+        self.assertEqual(inv.argv_prefix, ["/opt/custom/hermes"])
+
+
+class WslDetectionTests(unittest.TestCase):
+    """is_wsl() 的偵測分支。判準是 /proc/version 含 'microsoft'（不分大小寫），
+    刻意不用「/mnt/c 存在」——後者取決於 automount 設定且任何 Linux 都可能剛好
+    有該目錄（理由詳見 dispatch_domain.is_wsl docstring）。"""
+
+    def _fake_proc_version(self, content):
+        f = Path(tempfile.mkdtemp(prefix="proc_")) / "version"
+        f.write_text(content, encoding="utf-8")
+        return f
+
+    def test_non_linux_platform_is_false_without_touching_files(self):
+        with mock.patch.object(dispatch_domain.sys, "platform", "win32"), \
+             mock.patch.object(dispatch_domain, "_PROC_VERSION_PATH") as proc_path:
+            self.assertFalse(dispatch_domain.is_wsl())
+        proc_path.read_text.assert_not_called()
+
+    def test_linux_with_microsoft_kernel_string_is_true(self):
+        fake = self._fake_proc_version(
+            "Linux version 5.15.167.4-microsoft-standard-WSL2 (root@...) ...\n"
+        )
+        with mock.patch.object(dispatch_domain.sys, "platform", "linux"), \
+             mock.patch.object(dispatch_domain, "_PROC_VERSION_PATH", fake):
+            self.assertTrue(dispatch_domain.is_wsl())
+
+    def test_linux_without_microsoft_string_is_false(self):
+        fake = self._fake_proc_version("Linux version 6.8.0-generic (buildd@...) ...\n")
+        with mock.patch.object(dispatch_domain.sys, "platform", "linux"), \
+             mock.patch.object(dispatch_domain, "_PROC_VERSION_PATH", fake):
+            self.assertFalse(dispatch_domain.is_wsl())
+
+    def test_linux_missing_proc_version_is_false_not_crash(self):
+        missing = Path(tempfile.mkdtemp(prefix="proc_")) / "no_such_version"
+        with mock.patch.object(dispatch_domain.sys, "platform", "linux"), \
+             mock.patch.object(dispatch_domain, "_PROC_VERSION_PATH", missing):
+            self.assertFalse(dispatch_domain.is_wsl())
+
+
+class WslResolutionOrderTests(unittest.TestCase):
+    """WSL 分支的解析順序（is_wsl 釘成 True）：
+    --hermes-bin > WINDOWS_HERMES_INTEROP_PATH（存在才用）> PATH > ~/.local/bin。"""
+
+    def setUp(self):
+        patcher = mock.patch("dispatch_domain.is_wsl", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _fake_interop_exe(self):
+        exe = Path(tempfile.mkdtemp(prefix="interop_")) / "hermes.exe"
+        exe.write_text("fake exe\n", encoding="utf-8")
+        return exe
+
+    def test_frozen_constant_literal_is_asserted(self):
+        # 凍結字面斷言（比照專案慣例，見 scripts/webui_security_check.py）：
+        # 機器特定路徑集中在這一個常數，內容不得漂移。
+        self.assertEqual(
+            dispatch_domain.WINDOWS_HERMES_INTEROP_PATH,
+            "/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe",
+        )
+
+    def test_interop_path_exists_wins_over_path_and_local_bin(self):
+        exe = self._fake_interop_exe()
+        with mock.patch.object(dispatch_domain, "WINDOWS_HERMES_INTEROP_PATH", str(exe)), \
+             mock.patch("shutil.which") as mock_which:
+            inv = dispatch_domain.resolve_hermes_invocation(None)
+        mock_which.assert_not_called()
+        self.assertEqual(inv.argv_prefix, [str(exe)])
+        self.assertTrue(inv.windows_interop)
+        self.assertIsNone(inv.degradation_note)
+
+    def test_explicit_hermes_bin_wins_even_when_interop_exists(self):
+        exe = self._fake_interop_exe()
+        with mock.patch.object(dispatch_domain, "WINDOWS_HERMES_INTEROP_PATH", str(exe)), \
+             mock.patch("shutil.which") as mock_which:
+            inv = dispatch_domain.resolve_hermes_invocation("/opt/custom/hermes")
+        mock_which.assert_not_called()
+        self.assertEqual(inv.argv_prefix, ["/opt/custom/hermes"])
+        self.assertFalse(inv.windows_interop)
+
+    def test_explicit_exe_under_wsl_enables_interop_translation(self):
+        # --hermes-bin 明確指到 /mnt/c/... 的 .exe：仍是最優先，且要啟用
+        # windows_interop（路徑型引數的 wslpath 轉譯跟著生效）。
+        inv = dispatch_domain.resolve_hermes_invocation("/mnt/c/elsewhere/hermes.exe")
+        self.assertEqual(inv.argv_prefix, ["/mnt/c/elsewhere/hermes.exe"])
+        self.assertTrue(inv.windows_interop)
+
+    def test_interop_missing_falls_back_to_wsl_hermes_with_honest_note(self):
+        # Windows hermes 不在預期位置 → 落回 WSL 側 hermes，且降級說明要誠實
+        # 講「其無 lane profile」（寫進 degradation_note 與 stderr）。
+        fake_home = Path(tempfile.mkdtemp(prefix="fake_home_"))
+        fake_hermes = fake_home / ".local" / "bin" / "hermes"
+        fake_hermes.parent.mkdir(parents=True)
+        fake_hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+        missing = str(Path(tempfile.mkdtemp(prefix="gone_")) / "hermes.exe")
+        import io
+        fake_stderr = io.StringIO()
+        with mock.patch.object(dispatch_domain, "WINDOWS_HERMES_INTEROP_PATH", missing), \
+             mock.patch("shutil.which", return_value=None), \
+             mock.patch("dispatch_domain.Path.home", return_value=fake_home), \
+             mock.patch.object(dispatch_domain.sys, "stderr", fake_stderr):
+            inv = dispatch_domain.resolve_hermes_invocation(None)
+        self.assertEqual(inv.argv_prefix, [str(fake_hermes)])
+        self.assertFalse(inv.windows_interop)
+        self.assertIn("不在預期位置", inv.degradation_note)
+        self.assertIn("無 lane profile", inv.degradation_note)
+        self.assertIn("無 lane profile", fake_stderr.getvalue())
+
+    def test_interop_missing_and_nothing_else_fails_visible_mentioning_interop_path(self):
+        empty_home = Path(tempfile.mkdtemp(prefix="empty_home_"))
+        missing = str(Path(tempfile.mkdtemp(prefix="gone_")) / "hermes.exe")
+        with mock.patch.object(dispatch_domain, "WINDOWS_HERMES_INTEROP_PATH", missing), \
+             mock.patch("shutil.which", return_value=None), \
+             mock.patch("dispatch_domain.Path.home", return_value=empty_home):
+            with self.assertRaises(dispatch_domain.DispatchError) as ctx:
+                dispatch_domain.resolve_hermes_invocation(None)
+        self.assertEqual(ctx.exception.exit_status, "hermes_not_found")
+        # 錯誤訊息要把「查過哪裡」講全：interop 位置、PATH、~/.local/bin。
+        self.assertIn(missing, ctx.exception.message)
+        self.assertIn("PATH", ctx.exception.message)
+        self.assertIn(str(empty_home), ctx.exception.message)
+
+
+class WslpathTranslationTests(unittest.TestCase):
+    """wslpath_to_windows() 本身：成功回傳 strip 後的輸出；任何失敗一律
+    DispatchError("wslpath_error")，不靜默退回原路徑。"""
+
+    def _completed(self, returncode=0, stdout="", stderr=""):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_success_strips_trailing_newline(self):
+        with mock.patch("subprocess.run",
+                         return_value=self._completed(0, "C:\\Users\\razer\\x\n")) as m:
+            self.assertEqual(
+                dispatch_domain.wslpath_to_windows("/mnt/c/Users/razer/x"),
+                "C:\\Users\\razer\\x",
+            )
+        argv = m.call_args[0][0]
+        self.assertEqual(argv, ["wslpath", "-w", "/mnt/c/Users/razer/x"])
+
+    def test_nonzero_exit_raises_wslpath_error(self):
+        with mock.patch("subprocess.run",
+                         return_value=self._completed(1, "", "wslpath: no such file")):
+            with self.assertRaises(dispatch_domain.DispatchError) as ctx:
+                dispatch_domain.wslpath_to_windows("/tmp/x")
+        self.assertEqual(ctx.exception.exit_status, "wslpath_error")
+        self.assertIn("no such file", ctx.exception.message)
+
+    def test_empty_output_raises_wslpath_error(self):
+        with mock.patch("subprocess.run", return_value=self._completed(0, "  \n")):
+            with self.assertRaises(dispatch_domain.DispatchError) as ctx:
+                dispatch_domain.wslpath_to_windows("/tmp/x")
+        self.assertEqual(ctx.exception.exit_status, "wslpath_error")
+
+    def test_wslpath_binary_missing_raises_wslpath_error(self):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("wslpath")):
+            with self.assertRaises(dispatch_domain.DispatchError) as ctx:
+                dispatch_domain.wslpath_to_windows("/tmp/x")
+        self.assertEqual(ctx.exception.exit_status, "wslpath_error")
 
 
 class RunSubprocessEncodingTests(unittest.TestCase):
@@ -358,7 +548,7 @@ class HermesProfileExecutionTests(FakeHermesFixture):
         marker = self.make_marker()
         lane = {"provider": "hermes", "hermes_profile": "nemocoding"}
         result = dispatch_domain.execute_hermes_profile(
-            lane, "do the thing", "exec-1", 30, self.hermes_argv_prefix, self.log_dir
+            lane, "do the thing", "exec-1", 30, self.invocation, self.log_dir
         )
         self.assertEqual(result.exit_status, "success")
         self.assertEqual(result.result_text, "OK RESPONSE FROM nemocoding")
@@ -375,7 +565,7 @@ class HermesProfileExecutionTests(FakeHermesFixture):
     def test_profile_not_found_is_fail_visible(self):
         lane = {"provider": "hermes", "hermes_profile": "gptcoding"}
         result = dispatch_domain.execute_hermes_profile(
-            lane, "do the thing", "exec-2", 30, self.hermes_argv_prefix, self.log_dir
+            lane, "do the thing", "exec-2", 30, self.invocation, self.log_dir
         )
         self.assertEqual(result.exit_status, "profile_not_found")
         self.assertIn("does not exist", result.detail)
@@ -384,7 +574,7 @@ class HermesProfileExecutionTests(FakeHermesFixture):
     def test_bad_usage_json_is_fail_visible(self):
         lane = {"provider": "hermes", "hermes_profile": "financialresearch"}
         result = dispatch_domain.execute_hermes_profile(
-            lane, "do the thing", "exec-3", 30, self.hermes_argv_prefix, self.log_dir
+            lane, "do the thing", "exec-3", 30, self.invocation, self.log_dir
         )
         self.assertEqual(result.exit_status, "bad_usage_json")
         self.assertIsNone(result.usage)
@@ -393,7 +583,7 @@ class HermesProfileExecutionTests(FakeHermesFixture):
     def test_empty_output_is_fail_visible(self):
         lane = {"provider": "hermes", "hermes_profile": "intelligence"}
         result = dispatch_domain.execute_hermes_profile(
-            lane, "do the thing", "exec-4", 30, self.hermes_argv_prefix, self.log_dir
+            lane, "do the thing", "exec-4", 30, self.invocation, self.log_dir
         )
         self.assertEqual(result.exit_status, "empty_output")
         self.assertIsNone(result.result_text)
@@ -401,7 +591,7 @@ class HermesProfileExecutionTests(FakeHermesFixture):
     def test_timeout_is_fail_visible(self):
         lane = {"provider": "hermes", "hermes_profile": "codereviewer"}
         result = dispatch_domain.execute_hermes_profile(
-            lane, "do the thing", "exec-5", 1, self.hermes_argv_prefix, self.log_dir
+            lane, "do the thing", "exec-5", 1, self.invocation, self.log_dir
         )
         self.assertEqual(result.exit_status, "timeout")
 
@@ -412,7 +602,7 @@ class HermesProfileExecutionTests(FakeHermesFixture):
         # execute_hermes_profile 現在能正確解碼、原樣帶回中文內容。
         lane = {"provider": "hermes", "hermes_profile": "unicodecheck"}
         result = dispatch_domain.execute_hermes_profile(
-            lane, "do the thing", "exec-unicode", 30, self.hermes_argv_prefix, self.log_dir
+            lane, "do the thing", "exec-unicode", 30, self.invocation, self.log_dir
         )
         self.assertEqual(result.exit_status, "success")
         self.assertEqual(
@@ -426,10 +616,105 @@ class HermesProfileExecutionTests(FakeHermesFixture):
         huge_prompt = "x" * (dispatch_domain.MAX_HERMES_PROMPT_CHARS + 1)
         # 故意帶一個不存在的執行檔前綴：如果程式碼真的嘗試呼叫 subprocess，
         # 這裡會因為 FileNotFoundError 而不是我們要驗證的 prompt_too_long。
+        bad_invocation = dispatch_domain.HermesInvocation(
+            argv_prefix=["this-binary-does-not-exist"], windows_interop=False,
+            degradation_note=None,
+        )
         result = dispatch_domain.execute_hermes_profile(
-            lane, huge_prompt, "exec-6", 30, ["this-binary-does-not-exist"], self.log_dir
+            lane, huge_prompt, "exec-6", 30, bad_invocation, self.log_dir
         )
         self.assertEqual(result.exit_status, "prompt_too_long")
+
+    # --- windows_interop 情境（wslpath 轉譯經 mock，不執行真實 wslpath）-----
+
+    def _interop_invocation(self):
+        return dispatch_domain.HermesInvocation(
+            argv_prefix=self.hermes_argv_prefix, windows_interop=True,
+            degradation_note=None,
+        )
+
+    def test_interop_translates_usage_file_arg_and_project_root_line(self):
+        # 轉譯規則：--usage-file 轉的是「已存在的父目錄」再接檔名（部分版本
+        # wslpath 對不存在路徑會報錯）；PROJECT_ROOT 行整段轉。這裡用假譯法
+        # 驗證兩種視角：傳給 hermes 的引數是「轉譯後」形式，dispatch 自己讀
+        # usage file 仍用原路徑。父目錄假譯成自身（本機可寫，fake hermes 才
+        # 寫得進去），ROOT 假譯成固定 Windows 字面以便斷言。
+        marker = self.make_marker()
+        lane = {"provider": "hermes", "hermes_profile": "nemocoding"}
+
+        def fake_wslpath(path):
+            if path == str(ROOT):
+                return r"C:\FAKE\PROJECT\ROOT"
+            return path  # usage-file 父目錄：identity（保持本機可寫）
+
+        with mock.patch.object(dispatch_domain, "wslpath_to_windows",
+                                side_effect=fake_wslpath) as m:
+            result = dispatch_domain.execute_hermes_profile(
+                lane, "do the thing", "exec-interop-1", 30,
+                self._interop_invocation(), self.log_dir,
+            )
+        self.assertEqual(result.exit_status, "success")
+        # usage file 由 dispatch 用原路徑讀回（同一檔案兩種視角）。
+        self.assertEqual(result.usage["model"], "fake-nemo-model")
+        # 兩個轉譯位點都被呼叫：usage-file 父目錄與 ROOT。
+        called_paths = [c.args[0] for c in m.call_args_list]
+        self.assertIn(str(Path(self.log_dir)), called_paths)
+        self.assertIn(str(ROOT), called_paths)
+        # PROJECT_ROOT 行對 Windows 側程序語意成立。
+        marker_data = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertTrue(marker_data["prompt_head"].startswith(
+            "PROJECT_ROOT = C:\\FAKE\\PROJECT\\ROOT"
+        ), marker_data["prompt_head"])
+
+    def test_interop_usage_file_translation_failure_is_fail_visible(self):
+        # --usage-file 是功能性引數：wslpath 失敗必須明確報錯、不送出執行。
+        lane = {"provider": "hermes", "hermes_profile": "nemocoding"}
+        marker = self.make_marker()
+        with mock.patch.object(
+            dispatch_domain, "wslpath_to_windows",
+            side_effect=dispatch_domain.DispatchError("wslpath_error", "wslpath 爆炸"),
+        ):
+            result = dispatch_domain.execute_hermes_profile(
+                lane, "do the thing", "exec-interop-2", 30,
+                self._interop_invocation(), self.log_dir,
+            )
+        self.assertEqual(result.exit_status, "wslpath_error")
+        self.assertIn("--usage-file", result.detail)
+        self.assertIn("wslpath 爆炸", result.detail)
+        self.assertFalse(marker.exists(), "轉譯失敗不該真的 spawn hermes")
+
+    def test_interop_project_root_translation_failure_is_lenient_with_note(self):
+        # PROJECT_ROOT 行是資訊性文字：轉譯失敗保留原樣並註記，不擋執行。
+        marker = self.make_marker()
+        lane = {"provider": "hermes", "hermes_profile": "nemocoding"}
+
+        def fake_wslpath(path):
+            if path == str(ROOT):
+                raise dispatch_domain.DispatchError("wslpath_error", "ROOT 轉譯失敗")
+            return path
+
+        with mock.patch.object(dispatch_domain, "wslpath_to_windows",
+                                side_effect=fake_wslpath):
+            result = dispatch_domain.execute_hermes_profile(
+                lane, "do the thing", "exec-interop-3", 30,
+                self._interop_invocation(), self.log_dir,
+            )
+        self.assertEqual(result.exit_status, "success")
+        marker_data = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertIn(f"PROJECT_ROOT = {ROOT}", marker_data["prompt_head"])
+        self.assertIn("wslpath 轉譯失敗", marker_data["prompt_head"])
+
+    def test_non_interop_invocation_never_calls_wslpath(self):
+        # windows_interop=False（非 WSL、或 WSL 落回本側 hermes）：完全不碰
+        # wslpath，引數與 prompt 都維持原路徑——現行平台行為不變的回歸保證。
+        lane = {"provider": "hermes", "hermes_profile": "nemocoding"}
+        with mock.patch.object(dispatch_domain, "wslpath_to_windows") as m:
+            result = dispatch_domain.execute_hermes_profile(
+                lane, "do the thing", "exec-interop-4", 30,
+                self.invocation, self.log_dir,
+            )
+        m.assert_not_called()
+        self.assertEqual(result.exit_status, "success")
 
 
 class DispatchEndToEndTests(FakeHermesFixture):
