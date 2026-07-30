@@ -562,18 +562,20 @@ class TestEpisodeEventIdHelpers(unittest.TestCase):
     def test_parse_session_level(self):
         parsed = bridge_state.parse_event_id("hermes:20260630_183709_063b4e40")
         self.assertEqual(parsed, {"kind": "session",
-                                  "session_id": "20260630_183709_063b4e40"})
+                                  "session_id": "20260630_183709_063b4e40",
+                                  "source_profile": "default"})
 
     def test_parse_message_level(self):
         parsed = bridge_state.parse_event_id("hermes:sess-1:42")
         self.assertEqual(parsed, {"kind": "message", "session_id": "sess-1",
-                                  "rowid": 42})
+                                  "rowid": 42, "source_profile": "default"})
 
     def test_parse_episode_level_roundtrip(self):
         eid = bridge_state.episode_event_id("sess-1", 100, 120)
         parsed = bridge_state.parse_event_id(eid)
         self.assertEqual(parsed, {"kind": "episode", "session_id": "sess-1",
-                                  "first_message_id": 100, "last_message_id": 120})
+                                  "first_message_id": 100, "last_message_id": 120,
+                                  "source_profile": "default"})
 
     def test_parse_noninteger_colon_tail_is_session_level(self):
         """提案 §2 區分規則逐字：「含 ':' 但無 '..' 且冒號後是整數＝訊息；
@@ -582,13 +584,40 @@ class TestEpisodeEventIdHelpers(unittest.TestCase):
         self.assertEqual(parsed["kind"], "session")
         self.assertEqual(parsed["session_id"], "sess-1:abc")
 
-    def test_parse_rejects_profile_namespace_fail_closed(self):
-        """"hermes/" 前綴（未來 profile namespace）一律拒絕——連
-        hermes/default 也拒（不得默默視為 default，提案 §6.1）。"""
-        for eid in ("hermes/nemocoding:sess-1:1..5", "hermes/default:sess-1",
-                    "hermes/x:sess-1:42"):
+    def test_parse_profile_namespace_roundtrip(self):
+        """A1（2026-07-30）：2.4d §6.1 預留的 "hermes/<profile>:" namespace
+        啟用——三層都可帶 profile 段；episode_event_id 帶 source_profile 時
+        產生 namespaced 形式且 roundtrip 一致。"""
+        eid = bridge_state.episode_event_id("sess-1", 1, 5,
+                                            source_profile="gptcoding")
+        self.assertEqual(eid, "hermes/gptcoding:sess-1:1..5")
+        self.assertEqual(bridge_state.parse_event_id(eid),
+                         {"kind": "episode", "session_id": "sess-1",
+                          "first_message_id": 1, "last_message_id": 5,
+                          "source_profile": "gptcoding"})
+        parsed_msg = bridge_state.parse_event_id("hermes/x1:sess-1:42")
+        self.assertEqual(parsed_msg["kind"], "message")
+        self.assertEqual(parsed_msg["source_profile"], "x1")
+        parsed_sess = bridge_state.parse_event_id("hermes/nemocoding:sess-1")
+        self.assertEqual(parsed_sess["kind"], "session")
+        self.assertEqual(parsed_sess["source_profile"], "nemocoding")
+
+    def test_parse_rejects_explicit_default_namespace_and_bad_profiles(self):
+        """A1 fail-closed 邊界：'hermes/default:' 一律拒絕（canonical 形式是
+        裸 'hermes:'——兩種寫法並存會讓同一 episode 有兩個 event_id、去重
+        破功）；profile 段空白／不合法同樣拒絕。"""
+        for eid in ("hermes/default:sess-1", "hermes/default:sess-1:1..5",
+                    "hermes/:sess-1", "hermes/bad name:sess-1:1..5",
+                    "hermes/-lead:sess-1"):
             with self.assertRaises(ValueError, msg=f"{eid!r} 應被拒"):
                 bridge_state.parse_event_id(eid)
+
+    def test_bare_hermes_prefix_is_always_default(self):
+        """裸 "hermes:" 恆等 default（2.4d §6.1 明文的向後相容規則，
+        不需 migration）——parse 結果一律帶 source_profile='default'。"""
+        for eid in ("hermes:sid-a", "hermes:sid-a:7", "hermes:sid-a:1..3"):
+            self.assertEqual(
+                bridge_state.parse_event_id(eid)["source_profile"], "default")
 
     def test_parse_rejects_unknown_namespace_and_garbage(self):
         for eid in ("rss:foo", "hermes:", "", None, 42):
@@ -891,14 +920,49 @@ class TestCreateEpisode(BridgeStateTestBase):
         self.assertEqual([r[0] for r in rows],
                          ["hermes:sess-ep:100..120", "hermes:sess-ep:121..200"])
 
-    def test_rejects_non_default_profile_fail_closed(self):
-        """提案 §6.1：非 default profile 的 episode 會污染 event_id namespace
-        ——repository 層直接拒絕。"""
-        with self.assertRaises(ValueError):
-            bridge_state.create_episode(
-                **make_episode(source_profile="nemocoding"), db_path=self.db_path)
-        self.assertIsNone(bridge_state.get_cursor(
-            "sess-ep", source_profile="nemocoding", db_path=self.db_path))
+    def test_named_profile_episode_uses_namespace_and_isolated_cursor(self):
+        """A1（取代 2.4d 的「非 default 一律拒絕」）：named profile 的
+        episode 用 "hermes/<profile>:" namespace 建立，與 default 同 sid 的
+        列／cursor 結構性隔離（複合主鍵）；不合法 profile 名仍 fail-closed。"""
+        result = bridge_state.create_episode(
+            **make_episode(source_profile="nemocoding"), db_path=self.db_path)
+        self.assertTrue(result["created"])
+        self.assertEqual(result["row"]["event_id"],
+                         "hermes/nemocoding:sess-ep:100..120")
+        self.assertEqual(result["row"]["event_id_range"],
+                         "hermes/nemocoding:sess-ep:100..120")
+        self.assertEqual(result["row"]["source_profile"], "nemocoding")
+        # 同 sid 的 default episode 並存不衝突（不同 namespace＝不同 event_id）
+        default_result = bridge_state.create_episode(
+            **make_episode(), db_path=self.db_path)
+        self.assertTrue(default_result["created"])
+        self.assertEqual(default_result["row"]["event_id"],
+                         "hermes:sess-ep:100..120")
+        # cursor 各自獨立（複合主鍵 (source_profile, session_id)）
+        named_cur = bridge_state.get_cursor(
+            "sess-ep", source_profile="nemocoding", db_path=self.db_path)
+        default_cur = bridge_state.get_cursor("sess-ep", db_path=self.db_path)
+        self.assertEqual(named_cur["last_captured_message_id"], 120)
+        self.assertEqual(default_cur["last_captured_message_id"], 120)
+        self.assertNotEqual(named_cur["source_profile"],
+                            default_cur["source_profile"])
+        # 不合法 profile 名（含 ':'、'/'、空值）仍 fail-closed
+        for bad in ("", None, "a:b", "a/b", "bad name"):
+            with self.assertRaises(ValueError, msg=f"profile={bad!r} 應被拒"):
+                bridge_state.create_episode(
+                    **make_episode(source_profile=bad, session_id="sess-x"),
+                    db_path=self.db_path)
+
+    def test_named_profile_create_episode_idempotent_on_same_boundary(self):
+        """矩陣 #23 對 named profile 一體適用：撞既有 namespaced event_id →
+        既有列不動、只推該 profile 的 cursor（不碰 default 的 cursor）。"""
+        bridge_state.create_episode(
+            **make_episode(source_profile="gptcoding"), db_path=self.db_path)
+        again = bridge_state.create_episode(
+            **make_episode(source_profile="gptcoding"), db_path=self.db_path)
+        self.assertFalse(again["created"])
+        self.assertIsNone(bridge_state.get_cursor("sess-ep", db_path=self.db_path),
+                          "default 的 cursor 不受 named profile 影響")
 
     def test_rejects_legacy_trigger_and_invalid_enum(self):
         with self.assertRaises(ValueError):
@@ -1047,11 +1111,37 @@ class TestUpsertEpisodeGuard(BridgeStateTestBase):
         self.assertEqual(updated["last_message_id"], 120)
         self.assertEqual(updated["source_content_hash"], "a" * 64)
 
-    def test_upsert_rejects_profile_namespace_event_id(self):
+    def test_upsert_rejects_profile_namespace_mismatch(self):
+        """A1 一致性：event_id 帶 "hermes/<profile>:" 前綴時，profile 段必須
+        等於 source_profile 參數——make_record() 是 default，帶 nemocoding
+        namespace 的 event_id 仍被拒（namespace 與欄位不可能分家）。"""
         with self.assertRaises(ValueError):
             bridge_state.upsert_session_state(
                 **make_record(), event_id="hermes/nemocoding:sess-001",
                 db_path=self.db_path)
+
+    def test_upsert_updates_existing_named_profile_episode_row(self):
+        """A1：named profile episode 列的狀態轉換（importer 路徑）——
+        upsert 帶一致的 (source_profile, event_id) 可更新既有列，episode
+        identity 欄照樣不可洗掉。"""
+        bridge_state.create_episode(
+            **make_episode(source_profile="gptcoding"), db_path=self.db_path)
+        eid = "hermes/gptcoding:sess-ep:100..120"
+        updated = bridge_state.upsert_session_state(
+            session_id="sess-ep",
+            source_profile="gptcoding",
+            session_source="telegram",
+            import_status="to_inbox",
+            memory_type="episodic",
+            useful_chat=True,
+            decision_reason="importer（episode）：落地",
+            imported_inbox_path="memory/inbox/hermes_session_sess-ep_ep100-120.md",
+            event_id=eid, event_id_range=eid,
+            db_path=self.db_path)
+        self.assertEqual(updated["import_status"], "to_inbox")
+        self.assertEqual(updated["source_profile"], "gptcoding")
+        self.assertEqual(updated["episode_seq"], 1)
+        self.assertEqual(updated["first_message_id"], 100)
 
     def test_upsert_rejects_episode_event_id_with_mismatched_session(self):
         bridge_state.create_episode(**make_episode(), db_path=self.db_path)

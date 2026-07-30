@@ -852,13 +852,17 @@ class TestEpisodeSensitiveMixAndCursor(EpisodeImporterTestBase):
 
 
 class TestEpisodeProfileFailClosed(EpisodeImporterTestBase):
-    """矩陣 #27：importer 側非 default profile fail-closed（§6.1，防禦性—
-    —理論上不該出現在佇列裡，因為 create_episode 早已拒絕非 default）。"""
+    """矩陣 #27 的 A1 後繼：named profile 自 2026-07-30 起是合法處理對象，
+    fail-closed 防線改為 **namespace 一致性**——rec 的 source_profile 欄與
+    event_id 的 namespace 前綴不一致（防禦性，create_episode 不可能產生
+    這種列）→ `namespace_mismatch_fail_closed`：不改狀態、不動 cursor、
+    不落地（「不默默混寫 namespace」的原始精神原樣保留）。"""
 
     def _seed_non_default_episode_row(self, sid, first, last):
-        """繞過 create_episode 的 fail-closed 檢查，直接寫一筆非 default
-        profile 的 episode discovered 列——模擬「理論上不該存在」的防禦性
-        情境（唯一能構造這種列的方式）。"""
+        """繞過 create_episode 的一致性保證，直接寫一筆 source_profile=
+        nemocoding 但 event_id 是裸 "hermes:"（default namespace）的 episode
+        discovered 列——模擬「理論上不該存在」的防禦性情境（唯一能構造
+        這種列的方式）。"""
         bridge_state.init_db(self.bridge_db)
         event_id = bridge_state.episode_event_id(sid, first, last)
         now = T1
@@ -879,7 +883,7 @@ class TestEpisodeProfileFailClosed(EpisodeImporterTestBase):
             )
             conn.commit()
 
-    def test_non_default_profile_episode_row_skipped_untouched(self):
+    def test_namespace_mismatch_episode_row_skipped_untouched(self):
         ids = self.add_episode_session("sess_ep_nondefault", OK_MESSAGES)
         first, last = ids[0], ids[-1]
         self._seed_non_default_episode_row("sess_ep_nondefault", first, last)
@@ -887,12 +891,15 @@ class TestEpisodeProfileFailClosed(EpisodeImporterTestBase):
         result = self.run_import()
 
         action = self.action_for(result, "sess_ep_nondefault")
-        self.assertEqual(action["action"], "unsupported_profile_fail_closed")
+        self.assertEqual(action["action"], "namespace_mismatch_fail_closed")
         self.assertEqual(self.all_rows(), rows_before, "不改狀態、不落地")
         self.assertEqual(self.inbox_files(), [])
-        self.assertIsNone(bridge_state.get_cursor("sess_ep_nondefault",
-                                                   db_path=self.bridge_db),
-                          "不動 cursor")
+        for profile in ("default", "nemocoding"):
+            self.assertIsNone(
+                bridge_state.get_cursor("sess_ep_nondefault",
+                                        source_profile=profile,
+                                        db_path=self.bridge_db),
+                f"不動 cursor（profile={profile}）")
 
 
 class TestLegacyAndEpisodeCoexistInQueue(EpisodeImporterTestBase):
@@ -1114,6 +1121,313 @@ class TestStaticAndCli(ImporterTestBase):
                 self.assertRaises(SystemExit) as ctx:
             bridge_importer._build_parser().parse_args([])
         self.assertEqual(ctx.exception.code, 2)
+
+
+# ====================================================================
+# memory-lifecycle A1（2026-07-30）：多 profile episode 匯入＋tool 輸出縮減
+# （docs/memory-lifecycle-proposal.md §2.1 方案 A1、拍板 (a)）
+# ====================================================================
+
+# tool 縮減測試 fixture：前 100 字元保留、TAIL-MARKER 必須被截掉
+_TOOL_HEAD = "T" * 100
+_TOOL_TAIL_MARKER = "TOOL-TAIL-MARKER-MUST-NOT-LAND"
+LONG_TOOL_OUTPUT = _TOOL_HEAD + _TOOL_TAIL_MARKER + "y" * 500
+# user 訊息完整保留驗證：遠超 legacy 500 字元截斷的長度，無敏感內容
+LONG_USER_MESSAGE = "使用者訊息完整保留驗證起點-" + "甲" * 600 + "-使用者訊息完整保留驗證終點"
+
+
+class MultiProfileImporterTestBase(EpisodeImporterTestBase):
+    """A1 匯入測試共用 fixture：可另建 profile db、種 named-profile episode
+    列（走真的 create_episode，hash 用對應 db 現算）、插入帶 tool_name 的
+    tool 訊息。"""
+
+    def make_profile_db(self, filename="profile_state.db") -> Path:
+        path = self.tmp / filename
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.executescript(SEED_SQL.read_text(encoding="utf-8"))
+            conn.commit()
+        return path
+
+    @staticmethod
+    def add_session_to_db(db_path: Path, sid: str, messages, *,
+                          source="telegram", ended=None) -> list[int]:
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO sessions (id, source, model, started_at, ended_at, "
+                "end_reason, message_count, title) VALUES (?,?,?,?,?,?,?,?)",
+                (sid, source, "test-model", 1783600000.0, ended,
+                 "stop" if ended else None, len(messages), None))
+            ts = 1783600000.0
+            ids = []
+            for role, content in messages:
+                cur = conn.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp, "
+                    "active, compacted) VALUES (?,?,?,?,1,0)",
+                    (sid, role, content, ts))
+                ids.append(cur.lastrowid)
+                ts += 1
+            conn.commit()
+        return ids
+
+    def add_tool_result_to_session(self, sid, content, *,
+                                   tool_name="terminal") -> int:
+        """主 db 的既有 session 追加一則 tool 訊息（role='tool'＋tool_name）。"""
+        if not hasattr(self, "_next_ts_by_session"):
+            self._next_ts_by_session = {}
+        ts = self._next_ts_by_session.get(sid, 1783600000.0)
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            cur = conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_name, "
+                "timestamp, active, compacted) VALUES (?,?,?,?,?,1,0)",
+                (sid, "tool", content, tool_name, ts))
+            conn.commit()
+            rowid = cur.lastrowid
+        self._next_ts_by_session[sid] = ts + 1
+        return rowid
+
+    def seed_named_episode(self, profile, sid, first, last, *, db_path,
+                           episode_seq=1, capture_trigger="inactivity",
+                           content_hash=None, seen_at=T1):
+        """種一筆 named-profile episode 列（等同 A1 scanner 切刀的產出）：
+        走真的 create_episode()，hash 用指定 db 的 boundary 內容現算。"""
+        bridge_state.init_db(self.bridge_db)
+        if content_hash is None:
+            with adapter_module.HermesSessionAdapter(db_path=db_path) as ad:
+                export = ad.export_session_range(sid, first, last)
+            content_hash = bridge_state.episode_content_hash(
+                bridge_state.adapter_events_to_hash_input(export["events"]))
+        return bridge_state.create_episode(
+            session_id=sid, source_profile=profile, session_source="telegram",
+            episode_seq=episode_seq, capture_trigger=capture_trigger,
+            first_message_id=first, last_message_id=last,
+            source_content_hash=content_hash,
+            decision_reason="測試種子：A1 named-profile episode",
+            seen_at=seen_at, db_path=self.bridge_db)
+
+    def named_rec(self, profile, sid, first, last) -> dict | None:
+        return bridge_state.get_session_state(
+            bridge_state.episode_event_id(sid, first, last,
+                                          source_profile=profile),
+            db_path=self.bridge_db)
+
+
+class TestA1NamedProfileImport(MultiProfileImporterTestBase):
+    """named profile 的 episode 匯入：profile db 讀取、主 db fallback、
+    敏感 fail-closed／too_short 一條不弱化、找不到 session 的 fail-closed。"""
+
+    def test_named_episode_lands_from_profile_db(self):
+        pdb = self.make_profile_db()
+        ids = self.add_session_to_db(pdb, "sess_lane", OK_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_named_episode("gptcoding", "sess_lane", first, last,
+                                db_path=pdb)
+        result = self.run_import(profile_state_dbs={"gptcoding": pdb})
+
+        files = self.inbox_files()
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].name,
+                         f"hermes_session_sess_lane_ep{first}-{last}.md")
+        body = files[0].read_text(encoding="utf-8")
+        self.assertIn(
+            f'event_id_range: "hermes/gptcoding:sess_lane:{first}..{last}"',
+            body, "frontmatter 帶 namespaced event_id_range")
+        self.assertIn("source_profile: gptcoding", body)
+        rec = self.named_rec("gptcoding", "sess_lane", first, last)
+        self.assertEqual(rec["import_status"], "to_inbox")
+        self.assertEqual(rec["source_profile"], "gptcoding")
+        self.assertEqual(self.action_for(result, "sess_lane")["action"],
+                         "to_inbox")
+
+    def test_named_episode_from_main_db_fallback(self):
+        """主 db 裡 profile_name 非空的 named telegram session：profile db
+        不存在（自動定位落空）→ fallback 主 db，照常落地。"""
+        ids = self.add_episode_session("sess_tg_named", OK_MESSAGES,
+                                       source="telegram")
+        first, last = ids[0], ids[-1]
+        self.seed_named_episode("gptcoding", "sess_tg_named", first, last,
+                                db_path=self.hermes_db)
+        result = self.run_import()  # 不注入 profile_state_dbs——走 fallback
+        self.assertEqual(self.action_for(result, "sess_tg_named")["action"],
+                         "to_inbox")
+        rec = self.named_rec("gptcoding", "sess_tg_named", first, last)
+        self.assertEqual(rec["import_status"], "to_inbox")
+        self.assertEqual(len(self.inbox_files()), 1)
+
+    def test_named_profile_sensitive_fail_closed_not_weakened(self):
+        """A1 硬條件：敏感 fail-closed 對 named profile 一條不弱化——
+        needs_review、不落地、只記類別標籤、全通道零外洩。"""
+        pdb = self.make_profile_db()
+        ids = self.add_session_to_db(pdb, "sess_lane_secret", SECRET_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_named_episode("gptcoding", "sess_lane_secret", first, last,
+                                db_path=pdb)
+        result = self.run_import(profile_state_dbs={"gptcoding": pdb})
+
+        action = self.action_for(result, "sess_lane_secret")
+        self.assertEqual(action["action"], "blocked_sensitive")
+        rec = self.named_rec("gptcoding", "sess_lane_secret", first, last)
+        self.assertEqual(rec["import_status"], "needs_review")
+        self.assertEqual(self.inbox_files(), [], "不落地")
+        for leak_channel in (self.db_dump(), self.last_stdout + self.last_stderr,
+                             self.inbox_text()):
+            for marker in SECRET_MARKERS:
+                self.assertNotIn(marker, leak_channel, "零外洩")
+
+    def test_named_profile_too_short_skipped(self):
+        """min_session_messages 防線（2-msg lane 雜訊）對 named profile
+        原樣生效——A1 前置查證 3 的唯一承重防線不得弱化。"""
+        pdb = self.make_profile_db()
+        ids = self.add_session_to_db(pdb, "sess_lane_short", SHORT_MESSAGES)
+        first, last = ids[0], ids[-1]
+        self.seed_named_episode("nemocoding", "sess_lane_short", first, last,
+                                db_path=pdb)
+        result = self.run_import(profile_state_dbs={"nemocoding": pdb})
+        action = self.action_for(result, "sess_lane_short")
+        self.assertEqual(action["action"], "skipped_exclusion")
+        self.assertEqual(action["label"], "exclusion:too_short")
+        self.assertEqual(self.inbox_files(), [])
+
+    def test_named_episode_session_absent_everywhere_fails_closed(self):
+        """profile db 缺、主 db 也沒有這個 session（db 被清掉等異常）：
+        既有 export fail-closed 路徑——failed、不落地、error_reason 只記
+        階段與例外類別。"""
+        bridge_state.init_db(self.bridge_db)
+        bridge_state.create_episode(
+            session_id="sess_ghost", source_profile="gptcoding",
+            session_source="telegram", episode_seq=1,
+            capture_trigger="inactivity", first_message_id=1,
+            last_message_id=2, source_content_hash="0" * 64,
+            decision_reason="測試種子：來源 db 不存在的 named episode",
+            seen_at=T1, db_path=self.bridge_db)
+        result = self.run_import()
+        action = self.action_for(result, "sess_ghost")
+        self.assertEqual(action["action"], "failed")
+        self.assertEqual(action["label"], "export_error:KeyError")
+        rec = self.named_rec("gptcoding", "sess_ghost", 1, 2)
+        self.assertEqual(rec["import_status"], "failed")
+        self.assertEqual(self.inbox_files(), [])
+
+
+class TestA1ToolOutputTruncation(MultiProfileImporterTestBase):
+    """A1 拍板 (a)：episode 落地檔 tool 輸出縮減——tool_name＋前 N 字元＋
+    [truncated N chars] 標注；user/assistant 完整保留；敏感偵測在縮減前。"""
+
+    def test_tool_truncated_with_annotation_user_assistant_full(self):
+        sid = "sess_tool_trunc"
+        ids = self.add_episode_session(
+            sid, OK_MESSAGES + [("user", LONG_USER_MESSAGE)])
+        tool_id = self.add_tool_result_to_session(
+            sid, LONG_TOOL_OUTPUT, tool_name="terminal")
+        first, last = ids[0], tool_id
+        self.seed_episode(sid, first, last)
+        result = self.run_import(tool_output_max_chars=100)
+        self.assertEqual(self.action_for(result, sid)["action"], "to_inbox")
+
+        body = self.inbox_files()[0].read_text(encoding="utf-8")
+        # tool：tool_name＋前 100 字元＋截斷標注；尾端不得落地
+        self.assertIn("tool（terminal）", body)
+        self.assertIn(_TOOL_HEAD, body)
+        truncated_n = len(LONG_TOOL_OUTPUT) - 100
+        self.assertIn(f"[truncated {truncated_n} chars]", body)
+        self.assertNotIn(_TOOL_TAIL_MARKER, body,
+                         "截斷點之後的 tool 輸出不得寫入 inbox 檔")
+        # user/assistant：完整保留（不受 legacy 500 字元／尾端 30 則截斷影響）
+        self.assertIn(LONG_USER_MESSAGE, body,
+                      "user 訊息必須完整保留（A1 拍板 (a)）")
+        for _, content in OK_MESSAGES:
+            self.assertIn(content, body, "全部 user/assistant 訊息完整保留")
+
+    def test_sensitive_marker_in_truncated_tail_still_detected(self):
+        """敏感偵測對「縮減前的原文」跑——標記藏在會被截掉的 tool 輸出尾端
+        仍必須命中（縮減不是漏檢通道）。"""
+        sid = "sess_tool_secret"
+        ids = self.add_episode_session(sid, OK_MESSAGES)
+        tool_id = self.add_tool_result_to_session(
+            sid, "z" * 200 + f" api key: {FAKE_API_KEY}", tool_name="terminal")
+        first, last = ids[0], tool_id
+        self.seed_episode(sid, first, last)
+        result = self.run_import(tool_output_max_chars=100)
+        action = self.action_for(result, sid)
+        self.assertEqual(action["action"], "blocked_sensitive")
+        self.assertIn("sensitive:api_tokens", action["label"])
+        self.assertEqual(self.inbox_files(), [], "不落地")
+        self.assertNotIn(FAKE_API_KEY,
+                         self.db_dump() + self.last_stdout + self.last_stderr)
+
+    def test_load_tool_output_max_chars(self):
+        cfg = self.tmp / "cfg.yaml"
+        # episodes 區塊缺失 → 預設 500
+        cfg.write_text('cutover: "2026-07-10T00:00:00Z"\n', encoding="utf-8")
+        self.assertEqual(bridge_importer.load_tool_output_max_chars(cfg), 500)
+        # 自訂值
+        cfg.write_text("episodes:\n  tool_output_max_chars: 250\n",
+                       encoding="utf-8")
+        self.assertEqual(bridge_importer.load_tool_output_max_chars(cfg), 250)
+        # 非法值 fail loud
+        for bad in ('"abc"', "0", "-5", "true"):
+            cfg.write_text(f"episodes:\n  tool_output_max_chars: {bad}\n",
+                           encoding="utf-8")
+            with self.assertRaises(ValueError, msg=f"值 {bad} 應被拒"):
+                bridge_importer.load_tool_output_max_chars(cfg)
+        # 設定檔缺失 fail loud（比照 max_import_retries 慣例）
+        with self.assertRaises(FileNotFoundError):
+            bridge_importer.load_tool_output_max_chars(self.tmp / "absent.yaml")
+
+    def test_repo_bridge_yaml_tool_output_max_chars(self):
+        """守住版控正本：episodes.tool_output_max_chars 已寫入且為拍板預設。"""
+        self.assertEqual(bridge_importer.load_tool_output_max_chars(), 500)
+
+
+class TestA1FullFlowScannerToImporter(MultiProfileImporterTestBase):
+    """整合：A1 scanner（主 db profile_name 分流切刀）→ importer（namespaced
+    列匯入落地）全流程走通——把關兩模組介面不漂移。"""
+
+    def test_scan_then_import_named_profile_from_main_db(self):
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute("ALTER TABLE sessions ADD COLUMN profile_name TEXT")
+            conn.commit()
+        ids = self.add_episode_session("sess_flow", OK_MESSAGES,
+                                       source="telegram")
+        first, last = ids[0], ids[-1]
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute("UPDATE sessions SET profile_name='gptcoding' "
+                         "WHERE id='sess_flow'")
+            conn.commit()
+        config = self.tmp / "bridge.yaml"
+        config.write_text(
+            # legacy cutover 與 default episode cutover 都放到未來——
+            # 聚焦 named profile 這條新路徑，不讓 fixture 其他 session 進場
+            'cutover: "2030-01-01T00:00:00Z"\n'
+            "episodes:\n"
+            "  enabled: true\n"
+            '  episode_cutover: "2030-01-01T00:00:00Z"\n'
+            "  inactivity_hours: 1\n"
+            "  profiles:\n"
+            "    gptcoding:\n"
+            '      episode_cutover: "2026-07-01T00:00:00Z"\n',
+            encoding="utf-8")
+
+        scan_result = bridge_scanner.scan(
+            state_db=self.hermes_db, bridge_db=self.bridge_db,
+            config_path=config, inbox_dir=self.inbox,
+            seen_at="2026-07-15T00:00:00Z")  # 訊息後 >1h → inactivity 切刀
+        create_actions = [a for a in scan_result["actions"]
+                          if a["action"] == "create_episode"]
+        self.assertEqual(len(create_actions), 1)
+        self.assertEqual(create_actions[0]["source_profile"], "gptcoding")
+        self.assertEqual(create_actions[0]["event_id"],
+                         f"hermes/gptcoding:sess_flow:{first}..{last}")
+        self.assertEqual(scan_result["named_excluded_from_legacy"], 1)
+
+        result = self.run_import()
+        self.assertEqual(self.action_for(result, "sess_flow")["action"],
+                         "to_inbox")
+        rec = self.named_rec("gptcoding", "sess_flow", first, last)
+        self.assertEqual(rec["import_status"], "to_inbox")
+        body = self.inbox_files()[0].read_text(encoding="utf-8")
+        self.assertIn(f'event_id_range: "hermes/gptcoding:sess_flow:'
+                      f'{first}..{last}"', body)
+        self.assertIn("source_profile: gptcoding", body)
 
 
 if __name__ == "__main__":

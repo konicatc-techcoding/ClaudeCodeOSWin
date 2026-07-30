@@ -1714,6 +1714,406 @@ class TestReconcileCursorRecoveryStability(EpisodeScannerTestBase):
         return path
 
 
+# ====================================================================
+# memory-lifecycle A1（2026-07-30）：多 profile episode capture
+# （docs/memory-lifecycle-proposal.md §2.1 方案 A1；2.4d §6.1 預留路徑啟用）
+# ====================================================================
+
+# named profile 的 per-profile cutover（測試用，晚於 default 的 EP_CUTOVER
+# 兩小時——驗證兩者獨立、pre-cutover 不湧入是 per-profile 判定）
+PROFILE_CUTOVER_DT = EP_CUTOVER_DT.replace(hour=2)
+PROFILE_CUTOVER_ISO = PROFILE_CUTOVER_DT.isoformat().replace("+00:00", "Z")
+PROFILE_CUTOVER_EPOCH = PROFILE_CUTOVER_DT.timestamp()
+
+
+class MultiProfileScannerTestBase(EpisodeScannerTestBase):
+    """A1 測試共用 fixture：主 db 加 profile_name 欄（真實主 db 有、episode
+    測試 DDL 沒有），config 可寫 episodes.profiles 區塊，可另建 profile db。"""
+
+    def setUp(self):
+        super().setUp()
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute("ALTER TABLE sessions ADD COLUMN profile_name TEXT")
+            conn.commit()
+
+    def write_profiles_config(self, profiles: dict | None, *, enabled: bool = True):
+        """profiles：{name: {"episode_cutover": iso 或 None, "state_db": path 或
+        None}}——None cutover 寫成 null（pending 占位，A1 的 per-profile
+        cutover 部署前形狀）。"""
+        out = [
+            'cutover: "2020-01-01T00:00:00Z"',
+            "episodes:",
+            f"  enabled: {'true' if enabled else 'false'}",
+            f'  episode_cutover: "{EP_CUTOVER_ISO}"',
+            f"  inactivity_hours: {self.INACTIVITY_HOURS}",
+        ]
+        if profiles is not None:
+            out.append("  profiles:")
+            for name, entry in profiles.items():
+                out.append(f"    {name}:")
+                cut = entry.get("episode_cutover")
+                out.append("      episode_cutover: "
+                           + (f'"{cut}"' if cut else "null"))
+                if entry.get("state_db"):
+                    out.append(
+                        f'      state_db: "{Path(entry["state_db"]).as_posix()}"')
+        self.config.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+    def set_profile_name(self, sid: str, profile: str):
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            conn.execute("UPDATE sessions SET profile_name=? WHERE id=?",
+                         (profile, sid))
+            conn.commit()
+
+    # ---- 任意 db 的 session/message 建立（profile db 用；不含 profile_name
+    #      欄——profile db 的 profile 辨識以「哪顆 db」為準，不看欄位） ----
+
+    @staticmethod
+    def _make_state_db(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.executescript(_EP_SESSIONS_DDL)
+            conn.executescript(_EP_MESSAGES_DDL)
+            conn.commit()
+        return path
+
+    @staticmethod
+    def _add_session_to(db: Path, sid: str, *, source="cli",
+                        started_at=EP_CUTOVER_EPOCH - 10 * HOUR,
+                        ended_at=None, archived=False):
+        with contextlib.closing(sqlite3.connect(db)) as conn:
+            conn.execute(
+                "INSERT INTO sessions (id, source, started_at, ended_at, "
+                "archived) VALUES (?, ?, ?, ?, ?)",
+                (sid, source, started_at, ended_at, int(archived)))
+            conn.commit()
+
+    @staticmethod
+    def _add_message_to(db: Path, mid: int, sid: str, role: str, content: str,
+                        timestamp: float):
+        with contextlib.closing(sqlite3.connect(db)) as conn:
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, "
+                "timestamp, active) VALUES (?, ?, ?, ?, ?, 1)",
+                (mid, sid, role, content, timestamp))
+            conn.commit()
+
+
+class TestA1ConfigProfiles(MultiProfileScannerTestBase):
+    """episodes.profiles 設定解析：pending 占位合法、非法輸入 fail loud、
+    repo 正本的部署前形狀。"""
+
+    def test_profiles_parsed_with_pending_placeholder(self):
+        self.write_profiles_config({
+            "gptcoding": {"episode_cutover": EP_CUTOVER_ISO},
+            "nemocoding": {"episode_cutover": None},
+        })
+        cfg = bridge_scanner.load_episodes_config(self.config)
+        self.assertEqual(cfg["profiles"]["gptcoding"]["episode_cutover"],
+                         EP_CUTOVER_ISO)
+        self.assertIsNone(cfg["profiles"]["nemocoding"]["episode_cutover"],
+                          "null＝pending 占位（per-profile cutover 部署時才填）")
+
+    def test_profiles_validation_fails_loud(self):
+        # 宣告 default → 拒（default 的 cutover 是頂層欄位，兩處各說各話會漂移）
+        self.write_profiles_config({"default": {"episode_cutover": EP_CUTOVER_ISO}})
+        with self.assertRaises(ValueError):
+            bridge_scanner.load_episodes_config(self.config)
+        # cutover 無法解析 → 拒
+        self.write_profiles_config({"gptcoding": {"episode_cutover": "not-a-date"}})
+        with self.assertRaises(ValueError):
+            bridge_scanner.load_episodes_config(self.config)
+        # profile 名不合法（含空白）→ 拒
+        self.config.write_text(
+            'cutover: "2020-01-01T00:00:00Z"\n'
+            "episodes:\n  enabled: true\n"
+            f'  episode_cutover: "{EP_CUTOVER_ISO}"\n'
+            "  profiles:\n    \"bad name\":\n      episode_cutover: null\n",
+            encoding="utf-8")
+        with self.assertRaises(ValueError):
+            bridge_scanner.load_episodes_config(self.config)
+
+    def test_repo_bridge_yaml_profiles_are_pending_placeholders(self):
+        """守住版控正本：四個 named profile 已列入掃描清單、cutover 全為
+        null 占位（實值由主 session 部署時寫入——本次交付不啟動任何擷取）。"""
+        cfg = bridge_scanner.load_episodes_config()
+        self.assertEqual(
+            set(cfg["profiles"]),
+            {"financialresearch", "gptcoding", "intelligence", "nemocoding"})
+        for name, entry in cfg["profiles"].items():
+            self.assertIsNone(entry["episode_cutover"],
+                              f"{name} 的 cutover 應為部署前 null 占位")
+            self.assertIsNone(entry["state_db"],
+                              f"{name} 生產設定不得寫死 state_db 路徑")
+
+
+class TestA1MainDbProfileSplit(MultiProfileScannerTestBase):
+    """主 db 的 profile_name 分流：default 走裸 namespace、named 走
+    "hermes/<profile>:"，named session 不進 default 的 legacy ended 掃描。"""
+
+    def test_named_session_split_to_namespace_and_excluded_from_legacy(self):
+        self.write_profiles_config({"gptcoding": {"episode_cutover": EP_CUTOVER_ISO}})
+        self.add_session("sess-def")
+        self.add_message(1, "sess-def", "user", "default-1", EP_CUTOVER_EPOCH + HOUR)
+        self.add_message(2, "sess-def", "assistant", "default-2",
+                         EP_CUTOVER_EPOCH + 1.01 * HOUR)
+        self.add_session("sess-gpt", ended_at=EP_CUTOVER_EPOCH + 2 * HOUR)
+        self.add_message(3, "sess-gpt", "user", "gpt-1", EP_CUTOVER_EPOCH + HOUR)
+        self.add_message(4, "sess-gpt", "assistant", "gpt-2",
+                         EP_CUTOVER_EPOCH + 1.5 * HOUR)
+        self.set_profile_name("sess-gpt", "gptcoding")
+
+        result = self.scan()
+        rows = self.rows()
+        self.assertIn("hermes:sess-def:1..2", rows, "default 走裸 namespace")
+        self.assertIn("hermes/gptcoding:sess-gpt:3..4", rows,
+                      "named profile 走 hermes/<profile>: namespace")
+        named = rows["hermes/gptcoding:sess-gpt:3..4"]
+        self.assertEqual(named["source_profile"], "gptcoding")
+        self.assertEqual(named["capture_trigger"], "ended")
+        # named session 不進 default 的 legacy ended 掃描（分流，不誤歸 default）
+        self.assertNotIn("hermes:sess-gpt", rows)
+        self.assertEqual(result["named_excluded_from_legacy"], 1)
+        # cursor 隔離：named 的 cursor 記在 (gptcoding, sid)
+        self.assertEqual(
+            bridge_state.get_cursor("sess-gpt", source_profile="gptcoding",
+                                    db_path=self.bridge_db)
+            ["last_captured_message_id"], 4)
+        self.assertIsNone(self.cursor("sess-gpt"), "default cursor 不被 named 動到")
+
+    def test_pending_cutover_profile_not_captured_and_reported(self):
+        self.write_profiles_config({"gptcoding": {"episode_cutover": None}})
+        self.add_session("sess-gpt2", ended_at=EP_CUTOVER_EPOCH + 2 * HOUR)
+        self.add_message(1, "sess-gpt2", "user", "hi", EP_CUTOVER_EPOCH + HOUR)
+        self.set_profile_name("sess-gpt2", "gptcoding")
+        result = self.scan()
+        self.assertEqual(self.episode_rows(), {}, "pending cutover 不擷取（占位）")
+        self.assertIn("gptcoding", result["profiles_pending_cutover"])
+        self.assertNotIn("hermes:sess-gpt2", self.rows(),
+                         "pending 的 named session 也不落回 default legacy")
+
+    def test_unconfigured_profile_fail_closed(self):
+        self.write_profiles_config({"gptcoding": {"episode_cutover": EP_CUTOVER_ISO}})
+        self.add_session("sess-x", ended_at=EP_CUTOVER_EPOCH + 2 * HOUR)
+        self.add_message(1, "sess-x", "user", "hi", EP_CUTOVER_EPOCH + HOUR)
+        self.set_profile_name("sess-x", "mysteryprofile")
+        result = self.scan()
+        self.assertEqual(self.rows(), {},
+                         "未設定的 profile：不擷取、也不誤歸 default（fail-closed）")
+        self.assertEqual(result["unconfigured_profile_sessions"], 1)
+
+    def test_enabled_false_keeps_pre_a1_bitlevel_behavior(self):
+        """config gate 不變量（矩陣 #19 前半的 A1 延伸）：enabled=false 時
+        不做 profile 分流——named session 照 2.4c 舊行為進 legacy ended 掃描
+        （source_profile=default），零 episode。"""
+        self.write_profiles_config(
+            {"gptcoding": {"episode_cutover": EP_CUTOVER_ISO}}, enabled=False)
+        self.add_session("sess-old", ended_at=EP_CUTOVER_EPOCH + 2 * HOUR)
+        self.add_message(1, "sess-old", "user", "hi", EP_CUTOVER_EPOCH + HOUR)
+        self.set_profile_name("sess-old", "gptcoding")
+        result = self.scan()
+        rows = self.rows()
+        self.assertIn("hermes:sess-old", rows, "enabled=false：維持位元級舊行為")
+        self.assertEqual(rows["hermes:sess-old"]["source_profile"], "default")
+        self.assertEqual(self.episode_rows(), {})
+        self.assertEqual(result["named_excluded_from_legacy"], 0)
+
+
+class TestA1ProfileDbScan(MultiProfileScannerTestBase):
+    """named profile 自己的 profile db：db 歸屬即 profile；per-profile
+    cutover 邊界；db 缺失誠實回報不弄倒整輪；自動定位相對主 db 實路徑。"""
+
+    def test_profile_db_captured_with_namespace_and_per_profile_cutover(self):
+        pdb = self._make_state_db(self.tmp / "gptcoding_state.db")
+        self._add_session_to(pdb, "sess-lane")
+        # msg 1 在 profile cutover 前（但在 default cutover 後——若誤用
+        # default cutover 會湧入）；msg 2、3 在 profile cutover 後
+        self._add_message_to(pdb, 1, "sess-lane", "user", "pre-profile-cutover",
+                             PROFILE_CUTOVER_EPOCH - HOUR)
+        self._add_message_to(pdb, 2, "sess-lane", "user", "lane-1",
+                             PROFILE_CUTOVER_EPOCH + 0.1 * HOUR)
+        self._add_message_to(pdb, 3, "sess-lane", "assistant", "lane-2",
+                             PROFILE_CUTOVER_EPOCH + 0.2 * HOUR)
+        self.write_profiles_config({"gptcoding": {
+            "episode_cutover": PROFILE_CUTOVER_ISO, "state_db": pdb}})
+        self.scan()
+        rows = self.episode_rows()
+        self.assertIn("hermes/gptcoding:sess-lane:2..3", rows,
+                      "per-profile cutover 邊界：pre-cutover 訊息不湧入")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            bridge_state.get_cursor("sess-lane", source_profile="gptcoding",
+                                    db_path=self.bridge_db)
+            ["last_captured_message_id"], 3)
+
+    def test_profile_db_missing_reported_and_scan_continues(self):
+        self.write_profiles_config({"gptcoding": {
+            "episode_cutover": PROFILE_CUTOVER_ISO}})  # 無 override、無實體 db
+        self.add_session("sess-def2")
+        self.add_message(1, "sess-def2", "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        result = self.scan()
+        self.assertEqual(result["profile_dbs_missing"], ["gptcoding"])
+        self.assertIn("hermes:sess-def2:1..1", self.episode_rows(),
+                      "單一 profile db 缺失不得弄倒 default 的擷取")
+
+    def test_profile_db_auto_located_relative_to_main_db(self):
+        """不帶 state_db override 時，profile db 相對主 db 實路徑自動定位
+        （<main db 目錄>/profiles/<name>/state.db——兩平台通用的佈局）。"""
+        pdb = self._make_state_db(
+            self.tmp / "profiles" / "nemocoding" / "state.db")
+        self._add_session_to(pdb, "sess-auto")
+        self._add_message_to(pdb, 1, "sess-auto", "user", "auto-located",
+                             PROFILE_CUTOVER_EPOCH + 0.1 * HOUR)
+        self.write_profiles_config({"nemocoding": {
+            "episode_cutover": PROFILE_CUTOVER_ISO}})
+        result = self.scan()
+        self.assertIn("hermes/nemocoding:sess-auto:1..1", self.episode_rows())
+        self.assertEqual(result["profile_dbs_missing"], [])
+
+
+class TestA1ReconcileNamespaced(ReconcileEpisodeTestBase):
+    """reconcile 的 namespace 分流：namespaced 檔回填 named 列與 (profile,
+    sid) cursor；裸檔恆等 default（既有測試已覆蓋）；自相矛盾 metadata
+    fail-closed。"""
+
+    @staticmethod
+    def _named_episode_text(sid, first, last, profile, *, episode_seq=1,
+                            capture_trigger="inactivity",
+                            profile_field: str | None = "SAME") -> str:
+        """namespaced episode 檔（對齊 adapter._render_frontmatter 的 A1
+        輸出）。profile_field="SAME"＝source_profile 欄與 range namespace
+        一致；None＝省略該欄；其他字串＝刻意寫入不一致值（矛盾情境）。"""
+        field = profile if profile_field == "SAME" else profile_field
+        field_line = f"source_profile: {field}\n" if field is not None else ""
+        return ("---\n"
+                "schema: claudecodeos.inbox.v1\n"
+                "source: hermes-session\n"
+                f"session_id: {sid}\n"
+                f'event_id_range: "hermes/{profile}:{sid}:{first}..{last}"\n'
+                f"{field_line}"
+                f"episode: {episode_seq}\n"
+                f"capture_trigger: {capture_trigger}\n"
+                "created_at: 2026-07-30T00:00:00Z\n"
+                "usefulness: pending\n"
+                "sensitivity: pending\n"
+                "---\n\n"
+                f"# Hermes session 匯入 — {sid}\n\n- 來源：hermes/telegram\n\n內容\n")
+
+    def test_namespaced_processed_file_backfills_named_row_and_cursor(self):
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            "sess-n", 1, 5)
+        (self.processed / name).write_text(
+            self._named_episode_text("sess-n", 1, 5, "gptcoding"),
+            encoding="utf-8")
+        result = self.reconcile(seen_at=T1)
+        eid = "hermes/gptcoding:sess-n:1..5"
+        rows = self.rows()
+        self.assertIn(eid, rows)
+        self.assertEqual(rows[eid]["import_status"], "imported")
+        self.assertEqual(rows[eid]["source_profile"], "gptcoding")
+        named_cursor = bridge_state.get_cursor(
+            "sess-n", source_profile="gptcoding", db_path=self.bridge_db)
+        self.assertEqual(named_cursor["last_captured_message_id"], 5)
+        self.assertIsNone(self.cursor("sess-n"),
+                          "cursor 記在 (gptcoding, sid)，不污染 default")
+        recovery = [a for a in result["actions"]
+                    if a["action"] == "cursor_recovery"]
+        self.assertEqual(recovery[0]["source_profile"], "gptcoding")
+
+    def test_namespaced_file_without_profile_field_still_resolved_by_range(self):
+        """profile 還原以 event_id_range 的 namespace 為準——缺 source_profile
+        欄（舊工具手寫檔）也能正確分流。"""
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            "sess-nf", 2, 4)
+        (self.processed / name).write_text(
+            self._named_episode_text("sess-nf", 2, 4, "intelligence",
+                                     profile_field=None),
+            encoding="utf-8")
+        self.reconcile(seen_at=T1)
+        self.assertIn("hermes/intelligence:sess-nf:2..4", self.rows())
+
+    def test_contradictory_profile_metadata_fail_closed(self):
+        """source_profile 欄與 range namespace 不一致＝檔案自相矛盾——
+        skip_unrecognized（不猜、不寫任何列、不動 cursor）。"""
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            "sess-c", 1, 3)
+        (self.processed / name).write_text(
+            self._named_episode_text("sess-c", 1, 3, "gptcoding",
+                                     profile_field="nemocoding"),
+            encoding="utf-8")
+        result = self.reconcile(seen_at=T1)
+        self.assertEqual(self.rows(), {})
+        for profile in ("default", "gptcoding", "nemocoding"):
+            self.assertIsNone(bridge_state.get_cursor(
+                "sess-c", source_profile=profile, db_path=self.bridge_db))
+        actions = [a["action"] for a in result["actions"]]
+        self.assertIn("skip_unrecognized", actions)
+
+
+class TestA1AdapterWalSymlinkResolve(unittest.TestCase):
+    """WAL sidecar 修正（A1 前置查證 2）：adapter 對 symlink 的 db 路徑先
+    resolve 成實路徑再推 sidecar——snapshot 必須看得到只存在於 -wal、尚未
+    checkpoint 的最新寫入（WSL 部署側 ~/.hermes/state.db 即 symlink）。"""
+
+    def test_db_path_is_resolved_even_without_symlink(self):
+        """Windows 開發側（無 symlink 權限）也能把關 resolve 這一步本身：
+        帶 '..' 的路徑必須被正規化成實路徑——sidecar 推導以它為基準。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            db = tmp / "state.db"
+            with contextlib.closing(sqlite3.connect(db)) as conn:
+                conn.executescript(_EP_SESSIONS_DDL)
+                conn.executescript(_EP_MESSAGES_DDL)
+                conn.commit()
+            indirect = tmp / "sub" / ".." / "state.db"
+            (tmp / "sub").mkdir()
+            adapter = adapter_module.HermesSessionAdapter(db_path=indirect)
+            self.assertEqual(adapter.db_path, db.resolve(),
+                             "db_path 必須是 resolve 後的實路徑")
+
+    def test_snapshot_through_symlink_sees_wal_only_content(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            real_dir = tmp / "real"
+            link_dir = tmp / "link"
+            real_dir.mkdir()
+            link_dir.mkdir()
+            real_db = real_dir / "state.db"
+            link_db = link_dir / "state.db"
+            conn = sqlite3.connect(real_db)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.executescript(_EP_SESSIONS_DDL)
+                conn.executescript(_EP_MESSAGES_DDL)
+                conn.execute(
+                    "INSERT INTO sessions (id, source, started_at) "
+                    "VALUES ('sess-wal', 'cli', 1783600000.0)")
+                conn.execute(
+                    "INSERT INTO messages (id, session_id, role, content, "
+                    "timestamp, active) VALUES (1, 'sess-wal', 'user', "
+                    "'wal-only 內容', 1783600001.0, 1)")
+                conn.commit()
+                # 寫入仍在 -wal（連線未關、未 checkpoint）——sidecar 必須被拷到
+                wal = Path(str(real_db) + "-wal")
+                self.assertTrue(wal.is_file() and wal.stat().st_size > 0,
+                                "前提：資料位於 -wal sidecar")
+                try:
+                    os.symlink(real_db, link_db)
+                except (OSError, NotImplementedError):
+                    self.skipTest("此環境無 symlink 權限（Windows 需開發者模式）"
+                                  "——WSL 部署側為主要目標環境")
+                with adapter_module.HermesSessionAdapter(
+                        db_path=link_db, snapshot=True) as adapter:
+                    self.assertEqual(adapter.db_path, real_db.resolve(),
+                                     "db_path 必須 resolve 成實路徑（sidecar 推導基準）")
+                    sids = [s["session_id"] for s in adapter.list_sessions()]
+                    self.assertIn("sess-wal", sids,
+                                  "snapshot 經 symlink 必須看得到 WAL 內的寫入")
+            finally:
+                conn.close()
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")

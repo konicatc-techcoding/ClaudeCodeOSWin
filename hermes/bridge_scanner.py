@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""hermes/bridge_scanner.py — v0.3.1（Stage 2.3；2.4a cutover 設定化與 watermark；
+"""hermes/bridge_scanner.py — v0.4（Stage 2.3；2.4a cutover 設定化與 watermark；
 2.4d-2 episode 偵測＋manual checkpoint；2.4d-2 複核修正 stale-ended 阻擋
-inactivity 的 blocker，見 `_decide_trigger()`）
+inactivity 的 blocker，見 `_decide_trigger()`；memory-lifecycle A1（2026-07-30）
+多 profile episode capture——bridge.yaml `episodes.profiles` 掃描清單驅動：
+主 db 的 session 依 `profile_name` 欄分流（空＝default、非空＝named profile
+namespace），named profile 另掃各自的 profiles/<name>/state.db；per-profile
+cutover 留空＝pending 不擷取；named-profile session 不進 default 的 legacy
+ended 掃描（僅 episodes.enabled 時分流，enabled=false 維持位元級舊行為））
 
 Stage 2 session bridge 的「偵測與記錄」層：找出 Hermes 新完結的 session，
 把處理狀態寫進 bridge_state.db（經 hermes/bridge_state.py 的 repository API）。
@@ -66,8 +71,11 @@ episode 偵測與 trigger 判斷（提案 §5／§6，`scan` 與 `checkpoint` �
 - cursor 遺失防護（矩陣 #8）：session 無 cursor 記錄但 inbox 已有該 sid 的
   `_ep` 落地檔（代表 recovery／reconcile 沒跑過）→ 拒切、回報「請先跑
   reconcile」，不切出與既有 episode 重疊的 boundary。
-- profile fail-closed（§6.1）：episode 偵測只在 `--source-profile default`
-  下執行；帶其他 profile 且 `episodes.enabled: true` 時 fail loud（exit 1）。
+- profile 邊界（§6.1；A1 起啟用多 profile）：named profile 的擷取由
+  `episodes.profiles` 設定清單驅動（不是 `--source-profile` 旗標）；帶非
+  default 的 `--source-profile` 且 `episodes.enabled: true` 時仍 fail loud
+  （exit 1，矩陣 #27 精神沿用——旗標語義是主 db ended 掃描的標籤，不是
+  episode namespace 選擇器）。
 
 安全預設（硬條件，測試逐條把關）：
 - **預設不得全掃**：--since 與 --all-history 互斥；兩者都不給時走安全預設
@@ -114,6 +122,7 @@ from adapter import (  # noqa: E402
     HermesSessionAdapter,
     HermesSessionReadError,
     has_landed_episode_file,
+    profile_state_db_path,
 )
 
 DEFAULT_INBOX_DIR = ROOT / "memory" / "inbox"
@@ -198,7 +207,7 @@ def _read_frontmatter(path: Path) -> dict:
                 if not line or line.strip() == "---":
                     break
                 for key in ("session_id", "source", "event_id_range",
-                            "episode", "capture_trigger"):
+                            "episode", "capture_trigger", "source_profile"):
                     if line.startswith(key + ":"):
                         fields[key] = line.split(":", 1)[1].strip().strip("\"'")
     except OSError:
@@ -258,7 +267,8 @@ def load_cutover(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> str:
 DEFAULT_INACTIVITY_HOURS = 72
 
 def load_episodes_config(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> dict:
-    """讀取 hermes/config/bridge.yaml 的 episodes 區塊（提案 §1.3／§5.1）。
+    """讀取 hermes/config/bridge.yaml 的 episodes 區塊（提案 §1.3／§5.1；
+    memory-lifecycle A1 加 profiles 掃描清單）。
 
     - 設定檔不存在、或存在但無 episodes 區塊、或 enabled 非 true
       → {"enabled": False, ...}——scanner 維持 2.4c 位元級行為
@@ -269,12 +279,22 @@ def load_episodes_config(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> dic
     - episode_cutover 即使 enabled=false 也一併回傳（可能是 None）：
       manual checkpoint 子指令獨立於 enabled 閘門之外，對無 cursor 的
       session 一樣需要這個值才能決定擷取起點（見 checkpoint()）。
+
+    A1（2026-07-30）新增回傳鍵：
+    - "profiles"：named profile 掃描清單，{name: {"episode_cutover": str|None,
+      "state_db": str|None}}。驗證（fail loud）：profiles 非 mapping、entry 非
+      mapping、profile 名不合法（bridge_state.validate_source_profile，含
+      'default' 重複宣告）、episode_cutover 有值但無法解析——都丟 ValueError。
+      **episode_cutover 為 null／缺失是合法的占位**（per-profile cutover 由
+      部署時寫入）：該 profile 視為 pending，scanner 誠實回報並跳過擷取，
+      不 fail、不影響其他 profile（防歷史湧入的 fail-closed 檔位）。
     """
     import yaml  # lazy import：比照 load_cutover，需要時才要求 pyyaml
 
     path = Path(config_path)
     if not path.is_file():
-        return {"enabled": False, "inactivity_hours": None, "episode_cutover": None}
+        return {"enabled": False, "inactivity_hours": None,
+                "episode_cutover": None, "profiles": {}}
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     episodes = doc.get("episodes") if isinstance(doc, dict) else None
     if not isinstance(episodes, dict):
@@ -289,8 +309,45 @@ def load_episodes_config(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> dic
             )
         _parse_iso_utc(cutover)  # 驗證可解析；解析失敗丟 ValueError
     inactivity_hours = episodes.get("inactivity_hours", DEFAULT_INACTIVITY_HOURS)
+
+    raw_profiles = episodes.get("profiles")
+    profiles: dict[str, dict] = {}
+    if raw_profiles is not None:
+        if not isinstance(raw_profiles, dict):
+            raise ValueError(
+                f"episodes.profiles 必須是 mapping（profile 名 → 設定）：{path}")
+        for name, entry in raw_profiles.items():
+            bridge_state.validate_source_profile(name)  # 不合法名 fail loud
+            if name == bridge_state.DEFAULT_SOURCE_PROFILE:
+                raise ValueError(
+                    f"episodes.profiles 不得宣告 'default'：{path}——default 的 "
+                    "cutover 是頂層 episode_cutover，不在 profiles 清單裡"
+                    "（避免兩處各說各話）")
+            if entry is None:
+                entry = {}
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"episodes.profiles.{name} 必須是 mapping（或 null）：{path}")
+            p_cutover = entry.get("episode_cutover")
+            if p_cutover is not None:
+                if not isinstance(p_cutover, str) or not p_cutover.strip():
+                    raise ValueError(
+                        f"episodes.profiles.{name}.episode_cutover 非法（空字串／"
+                        f"非字串）：{path}——留空請用 null（pending 占位）")
+                _parse_iso_utc(p_cutover)  # 解析失敗 fail loud
+            state_db = entry.get("state_db")
+            if state_db is not None and (not isinstance(state_db, str)
+                                         or not state_db.strip()):
+                raise ValueError(
+                    f"episodes.profiles.{name}.state_db 非法（空字串／非字串）："
+                    f"{path}——生產環境留 null 走自動定位")
+            profiles[name] = {
+                "episode_cutover": p_cutover if isinstance(p_cutover, str) else None,
+                "state_db": state_db if isinstance(state_db, str) else None,
+            }
     return {"enabled": enabled, "inactivity_hours": inactivity_hours,
-            "episode_cutover": cutover if isinstance(cutover, str) else None}
+            "episode_cutover": cutover if isinstance(cutover, str) else None,
+            "profiles": profiles}
 
 
 # 存在性探測（矩陣 #8）與 hash 輸入映射（提案 §4.5）2.4d-3 起收斂為單一
@@ -337,16 +394,21 @@ def _decide_trigger(sess: dict, cutover_dt: datetime, inactivity_hours: float,
 
 def _detect_episodes(
     *, adapter: HermesSessionAdapter, sessions: list[dict], activity_map: dict,
-    episodes_cfg: dict, bridge_db: Path, source_profile: str,
+    episode_cutover: str, inactivity_hours, bridge_db: Path, source_profile: str,
     inbox_dir: Path | str, dry_run: bool, seen_at: str | None,
 ) -> list[dict]:
     """episode 偵測主邏輯（提案 §5／§6）：候選過濾只用 episode_cutover 底線
     （§5.3，不沿用 scan watermark）；逐 session 判斷 trigger、算 eligible、
-    呼叫 create_episode()。呼叫端須已確保 episodes_cfg["enabled"] 為 True
-    且 source_profile == default（profile fail-closed 由呼叫端 scan() 檢查）。
+    呼叫 create_episode()。呼叫端須已確保 episodes enabled 且傳入的
+    episode_cutover 是該 profile 的有效 cutover（A1：per-profile cutover——
+    default 用頂層 episode_cutover，named profile 用 profiles.<name> 的值；
+    cutover pending（null）的 profile 由呼叫端跳過，不會進到這裡）。
+    source_profile（A1 多 profile）：決定 event_id namespace（default＝裸
+    "hermes:"、named＝"hermes/<profile>:"，由 bridge_state 產生）與 cursor
+    的複合主鍵——同 sid 不同 profile 結構性隔離。
     """
-    cutover_dt = _parse_iso_utc(episodes_cfg["episode_cutover"])
-    inactivity_hours = float(episodes_cfg["inactivity_hours"] or DEFAULT_INACTIVITY_HOURS)
+    cutover_dt = _parse_iso_utc(episode_cutover)
+    inactivity_hours = float(inactivity_hours or DEFAULT_INACTIVITY_HOURS)
     now_dt = _parse_iso_utc(seen_at) if seen_at else datetime.now(timezone.utc)
 
     actions: list[dict] = []
@@ -370,6 +432,7 @@ def _detect_episodes(
             actions.append({
                 "action": "cursor_missing_needs_reconcile",
                 "session_id": sid, "trigger": trigger,
+                "source_profile": source_profile,
             })
             continue  # 拒切（矩陣 #8）：不切出與既有 episode 重疊的 boundary
 
@@ -391,12 +454,12 @@ def _detect_episodes(
             bridge_state.adapter_events_to_hash_input(eligible))
         episode_seq = (cursor["last_episode_seq"] + 1) if cursor else 1
         reason = (f"bridge scan episode 偵測：trigger={trigger}，"
-                 f"boundary=[{first_id}..{last_id}]")
+                 f"boundary=[{first_id}..{last_id}]，profile={source_profile}")
 
         action = {
             "action": "create_episode", "session_id": sid, "trigger": trigger,
             "first_message_id": first_id, "last_message_id": last_id,
-            "episode_seq": episode_seq,
+            "episode_seq": episode_seq, "source_profile": source_profile,
         }
         if not dry_run:
             result = bridge_state.create_episode(
@@ -459,8 +522,11 @@ def scan(
     episodes_cfg = load_episodes_config(config_path)
     if episodes_cfg["enabled"] and source_profile != bridge_state.DEFAULT_SOURCE_PROFILE:
         raise ValueError(
-            f"episode capture 本階段僅支援 --source-profile default"
-            f"（得到 {source_profile!r}）——fail-closed 拒絕（提案 §6.1）"
+            f"episode capture 啟用時 --source-profile 只能是 default"
+            f"（得到 {source_profile!r}）——named profile 的擷取由 bridge.yaml 的 "
+            "episodes.profiles 掃描清單驅動（A1），不是這個旗標；用旗標指定"
+            "named profile 會讓「主 db 的 ended 掃描標籤」與「episode namespace」"
+            "語義混淆，fail-closed 拒絕（矩陣 #27 精神沿用）"
         )
 
     bridge_db = Path(bridge_db)
@@ -490,20 +556,91 @@ def scan(
     db_readable = bridge_db.exists()  # dry-run 且 db 不存在時，連檔案都不建立
 
     episode_actions: list[dict] = []
+    profiles_cfg = episodes_cfg["profiles"]
+    profiles_pending_cutover: list[str] = []
+    profile_dbs_missing: list[str] = []
+    unconfigured_profile_sessions = 0
+    named_excluded_from_legacy = 0
     with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
+        main_db_path = adapter.db_path  # 已 resolve 的實路徑（profile db 定位基準）
         sessions = adapter.list_sessions()
         if episodes_cfg["enabled"]:
             activity_map = adapter.list_session_activity()
+            # A1 分流：主 db 的 session 依 profile_name 欄分流——空＝default，
+            # 非空＝named profile（namespace 與 per-profile cutover 各自獨立）。
+            default_sessions: list[dict] = []
+            named_groups: dict[str, list[dict]] = {}
+            for sess in sessions:
+                pname = sess["metadata"].get("profile_name")
+                if not pname:
+                    default_sessions.append(sess)
+                else:
+                    named_groups.setdefault(pname, []).append(sess)
             episode_actions = _detect_episodes(
-                adapter=adapter, sessions=sessions, activity_map=activity_map,
-                episodes_cfg=episodes_cfg, bridge_db=bridge_db,
+                adapter=adapter, sessions=default_sessions,
+                activity_map=activity_map,
+                episode_cutover=episodes_cfg["episode_cutover"],
+                inactivity_hours=episodes_cfg["inactivity_hours"],
+                bridge_db=bridge_db,
                 source_profile=source_profile, inbox_dir=inbox_dir,
                 dry_run=dry_run, seen_at=seen_at,
             )
+            for pname, group in sorted(named_groups.items()):
+                cfg = profiles_cfg.get(pname)
+                if cfg is None:
+                    # fail-closed：未列入掃描清單的 profile 不擷取也不歸給
+                    # default（不污染 namespace）；計數誠實回報。
+                    unconfigured_profile_sessions += len(group)
+                    continue
+                if not cfg["episode_cutover"]:
+                    if pname not in profiles_pending_cutover:
+                        profiles_pending_cutover.append(pname)
+                    continue  # per-profile cutover 尚未寫入（占位）＝不擷取
+                episode_actions += _detect_episodes(
+                    adapter=adapter, sessions=group, activity_map=activity_map,
+                    episode_cutover=cfg["episode_cutover"],
+                    inactivity_hours=episodes_cfg["inactivity_hours"],
+                    bridge_db=bridge_db, source_profile=pname,
+                    inbox_dir=inbox_dir, dry_run=dry_run, seen_at=seen_at,
+                )
+
+    # A1：named profile 各自的 profile db（lane session 落在這裡，2026-07-30
+    # 查證）——逐顆 snapshot 掃描；db 歸屬即 profile（不看 profile_name 欄）。
+    # 只做 episode 偵測，不做 legacy ended 掃描（legacy session-level 的
+    # event_id 無 profile 段，named profile 只走 episode namespace）。
+    if episodes_cfg["enabled"]:
+        for pname, cfg in sorted(profiles_cfg.items()):
+            if not cfg["episode_cutover"]:
+                if pname not in profiles_pending_cutover:
+                    profiles_pending_cutover.append(pname)
+                continue  # pending 占位：誠實回報、不擷取（防歷史湧入）
+            profile_db = (Path(cfg["state_db"]) if cfg["state_db"]
+                          else profile_state_db_path(pname, main_db_path))
+            if not profile_db.is_file():
+                profile_dbs_missing.append(pname)
+                continue  # 誠實回報缺 db，不讓單一 profile 弄倒整輪 scan
+            with HermesSessionAdapter(db_path=profile_db, snapshot=True) as padapter:
+                psessions = padapter.list_sessions()
+                pactivity = padapter.list_session_activity()
+                episode_actions += _detect_episodes(
+                    adapter=padapter, sessions=psessions, activity_map=pactivity,
+                    episode_cutover=cfg["episode_cutover"],
+                    inactivity_hours=episodes_cfg["inactivity_hours"],
+                    bridge_db=bridge_db, source_profile=pname,
+                    inbox_dir=inbox_dir, dry_run=dry_run, seen_at=seen_at,
+                )
 
     actions: list[dict] = []
     candidates = 0
     for sess in sessions:
+        if episodes_cfg["enabled"] and sess["metadata"].get("profile_name"):
+            # A1 分流：named-profile session 不進 default 的 legacy ended 掃描
+            # ——它的內容由對應 namespace 的 episode capture 涵蓋（未設定／
+            # pending 的 profile 則 fail-closed 不擷取，不誤歸 default）。
+            # 只在 episodes.enabled 時分流：enabled=false 維持 2.4c 位元級
+            # 行為（矩陣 #19 前半的 config gate 不變量）。
+            named_excluded_from_legacy += 1
+            continue
         ended = sess["ended_at"]
         if not ended:
             continue  # 未完結（ended_at NULL 或壞值）不撈
@@ -560,6 +697,11 @@ def scan(
             "watermark_after": watermark_after,
             "episodes_enabled": episodes_cfg["enabled"],
             "episode_actions": len(episode_actions),
+            # A1 多 profile 的誠實回報欄（enabled=false 時全部空/0）：
+            "profiles_pending_cutover": sorted(profiles_pending_cutover),
+            "profile_dbs_missing": sorted(profile_dbs_missing),
+            "unconfigured_profile_sessions": unconfigured_profile_sessions,
+            "named_excluded_from_legacy": named_excluded_from_legacy,
             "actions": actions}
 
 
@@ -677,7 +819,14 @@ def checkpoint(
 def _resolve_file_identity(fm: dict, filename: str) -> dict | None:
     """對帳身份判定（提案 §2）：legacy 或 episode，回傳
     {"event_id", "kind", "session_id", "first_message_id", "last_message_id",
-    "basis"}，認不出時回 None。
+    "source_profile", "basis"}，認不出時回 None。
+
+    source_profile（A1 多 profile）：episode 檔的 profile 依 frontmatter
+    還原——`event_id_range` 的 namespace 前綴（"hermes/<profile>:"）優先，
+    其次 `source_profile:` 欄；兩者都有但不一致＝檔案自相矛盾，fail-closed
+    回 None（skip_unrecognized，不猜）。都沒有＝default（裸 "hermes:" 恆等
+    default 的向後相容規則）。legacy 檔一律 default（named profile 不產生
+    legacy 檔）。
 
     **kind 判定的結構性訊號（重要，2.4d-3 判斷細節）**：episode 檔的判別
     不能只看 frontmatter `event_id_range` 是否為 "hermes:<sid>:<first>..<last>"
@@ -711,10 +860,20 @@ def _resolve_file_identity(fm: dict, filename: str) -> dict | None:
                  else "檔名比對（檔案無 frontmatter session_id）")
         return {"event_id": bridge_state.session_event_id(sid), "kind": "legacy",
                 "session_id": sid, "first_message_id": None,
-                "last_message_id": None, "basis": basis}
+                "last_message_id": None,
+                "source_profile": bridge_state.DEFAULT_SOURCE_PROFILE,
+                "basis": basis}
+
+    # episode 的 profile 還原（A1）：frontmatter source_profile 欄（default 檔
+    # 不帶此欄）。event_id_range 的 namespace 前綴會再交叉驗證（見下）。
+    fm_profile = fm.get("source_profile") or bridge_state.DEFAULT_SOURCE_PROFILE
+    try:
+        bridge_state.validate_source_profile(fm_profile)
+    except ValueError:
+        return None  # 檔案聲稱的 profile 名不合法——不猜，交給 skip_unrecognized
 
     # episode：優先 frontmatter event_id_range 還原 boundary（可直接還原
-    # 完整 event_id）；其次檔名 ep 捕獲組。
+    # 完整 event_id，含 namespace）；其次檔名 ep 捕獲組。
     range_raw = fm.get("event_id_range")
     if range_raw:
         try:
@@ -723,18 +882,28 @@ def _resolve_file_identity(fm: dict, filename: str) -> dict | None:
             parsed_range = None
         if (parsed_range and parsed_range["kind"] == "episode"
                 and parsed_range["session_id"] == sid):
+            range_profile = parsed_range["source_profile"]
+            if (fm.get("source_profile")
+                    and range_profile != fm_profile):
+                # 檔案自相矛盾（range namespace 與 source_profile 欄不一致）
+                # ——fail-closed 不猜，交給 skip_unrecognized。
+                return None
             first, last = (parsed_range["first_message_id"],
                            parsed_range["last_message_id"])
-            return {"event_id": bridge_state.episode_event_id(sid, first, last),
+            return {"event_id": bridge_state.episode_event_id(
+                        sid, first, last, source_profile=range_profile),
                     "kind": "episode", "session_id": sid,
                     "first_message_id": first, "last_message_id": last,
+                    "source_profile": range_profile,
                     "basis": "frontmatter event_id_range"}
     if name_is_episode and parsed_name["session_id"] == sid:
         first, last = (parsed_name["first_message_id"],
                        parsed_name["last_message_id"])
-        return {"event_id": bridge_state.episode_event_id(sid, first, last),
+        return {"event_id": bridge_state.episode_event_id(
+                    sid, first, last, source_profile=fm_profile),
                 "kind": "episode", "session_id": sid,
                 "first_message_id": first, "last_message_id": last,
+                "source_profile": fm_profile,
                 "basis": "檔名 ep 捕獲組"}
     # 判定為 episode（frontmatter 有 episode 欄位）卻拿不到可信 boundary數值
     # ——理論上不該發生（episode 檔必有 _ep 檔名或一致的 event_id_range）；
@@ -828,6 +997,7 @@ def reconcile(
                 "session_id": identity["session_id"],
                 "first_message_id": identity["first_message_id"],
                 "last_message_id": identity["last_message_id"],
+                "source_profile": identity["source_profile"],  # A1：per-file 還原
                 "by_status": {},
                 "event_id_range": None,
                 "session_source": None,
@@ -849,11 +1019,13 @@ def reconcile(
 
     # episode_seq 保守估計（缺 frontmatter 時）：同 session 依 first_message_id
     # 排序給序位，只影響可讀性，不影響 boundary 正確性（提案 §3.2）。
-    episode_session_groups: dict[str, list[dict]] = {}
+    # A1：分組 key 帶 source_profile——同 sid 不同 profile 的 cursor 結構性
+    # 隔離（bridge_cursors 複合主鍵），recovery 也必須分開算。
+    episode_session_groups: dict[tuple, list[dict]] = {}
     for entry in entries.values():
         if entry["kind"] == "episode":
             episode_session_groups.setdefault(
-                entry["session_id"], []).append(entry)
+                (entry["source_profile"], entry["session_id"]), []).append(entry)
     for group in episode_session_groups.values():
         ordered = sorted(group, key=lambda e: e["first_message_id"])
         for idx, e in enumerate(ordered, start=1):
@@ -870,9 +1042,10 @@ def reconcile(
     # 該輪 reconcile 裡，metadata 不完整（缺／非法 capture_trigger）的
     # episode 檔所屬 session——用來讓 cursor recovery 對整個 session
     # fail-closed（見 reconcile() docstring「同一 session 的 cursor
-    # recovery 語義」）。value 是不完整檔案的相對路徑清單，讓使用者知道
-    # 要修哪個檔案。
-    metadata_incomplete_sessions: dict[str, list[str]] = {}
+    # recovery 語義」）。key 是 (source_profile, session_id)（A1：與
+    # cursor 複合主鍵同構）；value 是不完整檔案的相對路徑清單，讓使用者
+    # 知道要修哪個檔案。
+    metadata_incomplete_sessions: dict[tuple, list[str]] = {}
 
     actions: list[dict] = [
         {"action": "skip_unrecognized", "path": p} for p in skipped]
@@ -914,7 +1087,8 @@ def reconcile(
             # inbox 實體檔案、不降級成 legacy——見 reconcile() docstring。
             action_name = "episode_metadata_incomplete"
             action_category = metadata_category
-            metadata_incomplete_sessions.setdefault(sid, []).append(
+            metadata_incomplete_sessions.setdefault(
+                (entry["source_profile"], sid), []).append(
                 inbox_path or str(path))
         elif existing is None:
             if is_episode:
@@ -922,7 +1096,7 @@ def reconcile(
                 if not dry_run:
                     bridge_state.create_episode(
                         session_id=sid,
-                        source_profile=source_profile,
+                        source_profile=entry["source_profile"],  # A1：per-file 還原
                         session_source=entry["session_source"] or "unknown",
                         episode_seq=entry["episode_seq"],
                         capture_trigger=entry["capture_trigger"],
@@ -1015,11 +1189,12 @@ def reconcile(
     # 這個 session 整體停止——不得只取其餘合法檔案的 max(last_message_id)
     # 推進（那等於在不確定的資料基礎上假裝 recovery 完整）。其他 session
     # 不受影響，照常 recovery。
-    for sid, group in sorted(episode_session_groups.items()):
-        incomplete_paths = metadata_incomplete_sessions.get(sid)
+    for (entry_profile, sid), group in sorted(episode_session_groups.items()):
+        incomplete_paths = metadata_incomplete_sessions.get((entry_profile, sid))
         if incomplete_paths:
             actions.append({
                 "action": "cursor_recovery_fail_closed", "session_id": sid,
+                "source_profile": entry_profile,
                 "category": "metadata:capture_trigger_missing_or_invalid",
                 "incomplete_paths": sorted(incomplete_paths),
             })
@@ -1036,9 +1211,11 @@ def reconcile(
         if not dry_run:
             result = bridge_state.advance_cursor(
                 sid, max_last, last_episode_seq=max_seq,
-                source_profile=source_profile, seen_at=seen_at, db_path=bridge_db)
+                source_profile=entry_profile,  # A1：per-file 還原的 profile
+                seen_at=seen_at, db_path=bridge_db)
             advanced = result["advanced"]
         actions.append({"action": "cursor_recovery", "session_id": sid,
+                        "source_profile": entry_profile,
                         "last_captured_message_id": max_last,
                         "last_episode_seq": max_seq, "advanced": advanced})
 
@@ -1121,6 +1298,16 @@ def _print_result(result: dict):
         print(f"{prefix}scan 範圍下界：{bound}｜來源：{result['since_source']}")
         print(f"{prefix}episode 偵測：{'啟用' if result['episodes_enabled'] else '關閉'}"
               f"（episodes.enabled，動作 {result['episode_actions']} 筆）")
+        if result.get("profiles_pending_cutover"):
+            print(f"{prefix}named profile 尚未 cutover（占位、暫不擷取）："
+                  + ", ".join(result["profiles_pending_cutover"]))
+        if result.get("profile_dbs_missing"):
+            print(f"{prefix}named profile db 不存在（略過）："
+                  + ", ".join(result["profile_dbs_missing"]))
+        if result.get("unconfigured_profile_sessions"):
+            print(f"{prefix}主 db 有 {result['unconfigured_profile_sessions']} 個 "
+                  "session 屬於未列入 episodes.profiles 的 profile——不擷取、"
+                  "也不歸 default（fail-closed）")
     for action in result["actions"]:
         target = (action.get("event_id") or action.get("path")
                   or action.get("session_id"))
@@ -1131,6 +1318,9 @@ def _print_result(result: dict):
             extra += f"｜依據：{action['basis']}"
         if action.get("trigger"):
             extra += f"｜trigger={action['trigger']}"
+        profile = action.get("source_profile")
+        if profile and profile != "default":
+            extra += f"｜profile={profile}"
         print(f"{prefix}{action['action']:<28} {target}{extra}")
     if not result["actions"]:
         print(f"{prefix}(沒有需要處理的項目)")

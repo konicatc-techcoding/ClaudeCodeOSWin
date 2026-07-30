@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""hermes/bridge_importer.py — v0.1（Stage 2.4c）
+"""hermes/bridge_importer.py — v0.2（Stage 2.4c；2.4d-3 episode 化；
+memory-lifecycle A1 於 2026-07-30 加多 profile episode 匯入——named profile
+的 episode 列（event_id 帶 "hermes/<profile>:" namespace）從對應 profile db
+（或主 db 的 named telegram session）讀 boundary 內容，敏感 fail-closed／
+too_short／去重／--limit 節流一條不弱化；episode 落地檔 tool 輸出縮減
+（拍板 (a)：tool_name＋截斷＋[truncated N chars]，user/assistant 完整保留，
+敏感偵測仍對縮減前原文跑））
 
 Stage 2 session bridge 的「判定與匯入」層：把 bridge_state.db 中
 import_status=discovered 的 session（scanner 的產出）依政策判定送進
@@ -72,6 +78,7 @@ from adapter import (  # noqa: E402
     HermesSessionAdapter,
     HermesSessionReadError,
     InboxAlreadyImportedError,
+    profile_state_db_path,
 )
 
 # Stage 2.4d-3（importer episode 化＋recovery，規格正本：
@@ -89,6 +96,13 @@ DEFAULT_INBOX_DIR = ROOT / "memory" / "inbox"
 DEFAULT_POLICY_PATH = ROOT / "registry" / "consolidation_policy.yaml"
 DEFAULT_BRIDGE_CONFIG = _HERMES_DIR / "config" / "bridge.yaml"
 DEFAULT_MAX_IMPORT_RETRIES = 3
+
+# memory-lifecycle A1 拍板 (a)（2026-07-30）：episode 落地檔的 tool 輸出縮減
+# ——每則 tool 訊息保留 tool_name＋前 N 字元＋標注 [truncated N chars]；
+# user/assistant 完整保留。bridge.yaml episodes.tool_output_max_chars 可調，
+# 欄位缺失時用這個預設。縮減只發生在寫入 inbox 這一步（db 原文不動）；
+# 敏感偵測仍對縮減前的完整原文跑（_full_session_text）。
+DEFAULT_TOOL_OUTPUT_MAX_CHARS = 500
 
 _UNDERSCORE_TEST_RULE = "underscore_prefix_with_test"
 
@@ -197,6 +211,33 @@ def load_max_import_retries(config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> 
     value = (doc or {}).get("max_import_retries", DEFAULT_MAX_IMPORT_RETRIES)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"max_import_retries 必須是非負整數：{value!r}")
+    return value
+
+
+def load_tool_output_max_chars(
+        config_path: Path | str = DEFAULT_BRIDGE_CONFIG) -> int:
+    """讀 bridge 設定檔的 episodes.tool_output_max_chars（A1 拍板 (a) 的
+    episode tool 輸出縮減長度）。
+
+    設定檔不存在 fail loud（比照 max_import_retries 慣例）；欄位缺失（或整個
+    episodes 區塊缺失）採 DEFAULT_TOOL_OUTPUT_MAX_CHARS（500）——縮減長度是
+    呈現參數不是安全底線，合理預設可接受；欄位存在但不是正整數丟 ValueError。
+    """
+    import yaml  # lazy import
+
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"bridge 設定檔不存在：{path}（fail loud；正本為版控的 "
+            "hermes/config/bridge.yaml）"
+        )
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    episodes = (doc or {}).get("episodes")
+    if not isinstance(episodes, dict):
+        return DEFAULT_TOOL_OUTPUT_MAX_CHARS
+    value = episodes.get("tool_output_max_chars", DEFAULT_TOOL_OUTPUT_MAX_CHARS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"episodes.tool_output_max_chars 必須是正整數：{value!r}")
     return value
 
 
@@ -311,16 +352,65 @@ def _find_covering_episode(sid: str, first: int, last: int, *,
 
 # ---------- 匯入主流程 ----------
 
+class _AdapterPool:
+    """A1（多 profile）：episode 列的來源 db 供應器。
+
+    - default → 主 db adapter（呼叫端建好傳入，生命週期由呼叫端管）。
+    - named profile → 候選順序 [profile db, 主 db]：lane session 落在
+      profiles/<name>/state.db（2026-07-30 查證），主 db 裡 profile_name 非空
+      的 telegram session 則仍在主 db——sid 是唯一的，逐候選試
+      export（KeyError＝該 db 沒這個 session，換下一顆）；內容完整性另有
+      hash 重算比對把關（§4.5），不存在「撈錯 db 還靜默落地」的通道。
+    - profile db 路徑：`profile_state_dbs` 顯式覆蓋（測試注入）優先，否則
+      相對主 db 實路徑自動定位（adapter.profile_state_db_path）；db 不存在
+      ＝該 profile 只剩主 db 候選（誠實：export 全數 KeyError 就走既有
+      fail-closed failed 路徑）。
+    - profile adapter lazy 建立、每 profile 至多一顆 snapshot、close() 統一
+      釋放（主 adapter 不在此關——它是呼叫端的 with 資源）。
+    """
+
+    def __init__(self, main_adapter: HermesSessionAdapter,
+                 profile_state_dbs: dict | None = None):
+        self._main = main_adapter
+        self._overrides = dict(profile_state_dbs or {})
+        self._cache: dict[str, HermesSessionAdapter | None] = {}
+
+    def candidates(self, source_profile: str) -> list[HermesSessionAdapter]:
+        if source_profile == bridge_state.DEFAULT_SOURCE_PROFILE:
+            return [self._main]
+        profile_adapter = self._profile_adapter(source_profile)
+        return ([profile_adapter] if profile_adapter is not None else []) + [self._main]
+
+    def _profile_adapter(self, profile: str) -> HermesSessionAdapter | None:
+        if profile not in self._cache:
+            override = self._overrides.get(profile)
+            db = (Path(override) if override
+                  else profile_state_db_path(profile, self._main.db_path))
+            self._cache[profile] = (
+                HermesSessionAdapter(db_path=db, snapshot=True)
+                if db.is_file() else None)
+        return self._cache[profile]
+
+    def close(self):
+        for cached in self._cache.values():
+            if cached is not None:
+                cached.close()
+        self._cache.clear()
+
+
 def _process_one(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
                  inbox_dir: Path, bridge_db: Path, dry_run: bool,
-                 max_retries: int, seen_at: str | None) -> dict:
+                 max_retries: int, seen_at: str | None,
+                 pool: "_AdapterPool",
+                 tool_output_max_chars: int = DEFAULT_TOOL_OUTPUT_MAX_CHARS) -> dict:
     """依 rec 是 episode 列（episode_seq 非 None）還是 legacy 列分派——
     兩條路徑完全獨立（見模組 docstring 的 2.4d-3 說明）。"""
     if rec.get("episode_seq") is not None:
         return _process_one_episode(
             rec, adapter, policy=policy, inbox_dir=inbox_dir,
             bridge_db=bridge_db, dry_run=dry_run,
-            max_retries=max_retries, seen_at=seen_at)
+            max_retries=max_retries, seen_at=seen_at, pool=pool,
+            tool_output_max_chars=tool_output_max_chars)
     return _process_one_legacy(
         rec, adapter, policy=policy, inbox_dir=inbox_dir,
         bridge_db=bridge_db, dry_run=dry_run,
@@ -502,14 +592,20 @@ def _process_one_legacy(rec: dict, adapter: HermesSessionAdapter, *, policy: dic
 
 def _process_one_episode(rec: dict, adapter: HermesSessionAdapter, *, policy: dict,
                          inbox_dir: Path, bridge_db: Path, dry_run: bool,
-                         max_retries: int, seen_at: str | None) -> dict:
+                         max_retries: int, seen_at: str | None,
+                         pool: "_AdapterPool",
+                         tool_output_max_chars: int = DEFAULT_TOOL_OUTPUT_MAX_CHARS) -> dict:
     """episode（boundary 內訊息）匯入路徑——Stage 2.4d-3 新行為（提案 §2／
-    §4.5／§6.1）。與 legacy 路徑差異：
+    §4.5／§6.1；A1 於 2026-07-30 啟用多 profile）。與 legacy 路徑差異：
 
-    1. **profile fail-closed**（§6.1，矩陣 #27）：`source_profile != 'default'`
-       的 episode 列（防禦性，理論上不該存在於佇列裡——create_episode 早已
-       拒絕非 default）→ `unsupported_profile_fail_closed`：不改狀態、不動
-       cursor、不落地。這條檢查在最前面，連 retry 計數都不遞增。
+    1. **namespace 一致性 fail-closed**（A1，取代 2.4d-3 的「非 default 一律
+       拒絕」——named profile 現在是合法的處理對象）：rec 的 event_id 解析出
+       的 profile 必須等於 `rec["source_profile"]`（含裸 "hermes:" ≡ default
+       的相容規則）；不一致（防禦性，create_episode 不可能產生這種列）→
+       `namespace_mismatch_fail_closed`：不改狀態、不動 cursor、不落地。
+       這條檢查在最前面，連 retry 計數都不遞增。named profile 的來源 db 由
+       `pool.candidates()` 決定（profile db 優先、主 db 其次——主 db 裡
+       profile_name 非空的 telegram session 也屬 named namespace）。
     2. **range export**：讀 boundary 內容用 `export_session_range()`，不是
        整個 session。
     3. **hash 重算比對**（§4.5）：export → hash 驗證 → 敏感偵測 → 4.2 排除
@@ -527,15 +623,29 @@ def _process_one_episode(rec: dict, adapter: HermesSessionAdapter, *, policy: di
        轉換都會被寫進錯誤的（甚至不存在的）legacy 列）。
 
     retry／敏感／4.2 排除的狀態機語義與 legacy 完全相同（提案 §4.1：判定
-    範圍縮小到 episode boundary，語義原樣）。
+    範圍縮小到 episode boundary，語義原樣）——A1 對 named profile **一條防線
+    都不弱化**：敏感 fail-closed、too_short、去重、hash 比對全部同一份實作。
+
+    6. **tool 輸出縮減**（A1 拍板 (a)）：落地時 `tool_output_max_chars` 傳給
+       `write_episode_inbox_file()`——user/assistant 完整保留、tool 輸出保留
+       tool_name＋截斷＋`[truncated N chars]` 標注。敏感偵測在這之前、對
+       縮減前的完整原文（`_full_session_text`）跑——縮減不是漏檢通道。
     """
     event_id = rec["event_id"]
     sid = rec["session_id"]
     base = {"event_id": event_id, "session_id": sid}
 
-    if rec["source_profile"] != bridge_state.DEFAULT_SOURCE_PROFILE:
-        return {**base, "action": "unsupported_profile_fail_closed",
-                "label": f"source_profile={rec['source_profile']!r}"}
+    try:
+        parsed = bridge_state.parse_event_id(event_id)
+        namespace_ok = (parsed["kind"] == "episode"
+                        and parsed["source_profile"] == rec["source_profile"])
+    except ValueError:
+        namespace_ok = False
+    if not namespace_ok:
+        return {**base, "action": "namespace_mismatch_fail_closed",
+                "label": (f"source_profile={rec['source_profile']!r} 與 event_id "
+                          "namespace 不一致（或 event_id 不合法）——不改狀態、"
+                          "不動 cursor、不落地")}
 
     if rec["import_status"] == "failed":  # 重試路徑（與 legacy 同語義）
         if rec["retry_count"] >= max_retries:
@@ -565,9 +675,22 @@ def _process_one_episode(rec: dict, adapter: HermesSessionAdapter, *, policy: di
 
     first_id, last_id = rec["first_message_id"], rec["last_message_id"]
 
-    # 1. 讀取 boundary 內容（snapshot 副本，range export——不是整個 session）
+    # 1. 讀取 boundary 內容（snapshot 副本，range export——不是整個 session）。
+    # A1：來源 db 依 profile 決定（pool.candidates：default＝主 db；named＝
+    # profile db 優先、主 db 其次），KeyError（該 db 沒這個 session）換下一
+    # 顆候選，全數落空或其他讀取錯誤 → 既有 fail-closed failed 路徑。
     try:
-        export = adapter.export_session_range(sid, first_id, last_id)
+        export = None
+        last_key_error = None
+        for candidate_adapter in pool.candidates(rec["source_profile"]):
+            try:
+                export = candidate_adapter.export_session_range(
+                    sid, first_id, last_id)
+                break
+            except KeyError as exc:
+                last_key_error = exc
+        if export is None:
+            raise last_key_error or KeyError(sid)
         full_text = _full_session_text(export)
     except Exception as exc:
         reason = (f"匯入失敗（階段：export／讀取 episode boundary 內容；"
@@ -668,7 +791,9 @@ def _process_one_episode(rec: dict, adapter: HermesSessionAdapter, *, policy: di
         path = adapter.write_episode_inbox_file(
             export, inbox_dir, episode_seq=rec["episode_seq"],
             capture_trigger=rec["capture_trigger"],
-            first_message_id=first_id, last_message_id=last_id)
+            first_message_id=first_id, last_message_id=last_id,
+            source_profile=rec["source_profile"],  # A1：namespace 進 frontmatter
+            tool_output_max_chars=tool_output_max_chars)  # A1 拍板 (a) 縮減
     except InboxAlreadyImportedError as exc:
         return {**base, "action": "already_imported_defer_reconcile",
                 "label": _rel_to_root(exc.existing_path)}
@@ -708,6 +833,8 @@ def import_discovered(
     policy_path: Path | str = DEFAULT_POLICY_PATH,
     max_retries: int = DEFAULT_MAX_IMPORT_RETRIES,
     seen_at: str | None = None,
+    profile_state_dbs: dict | None = None,
+    tool_output_max_chars: int = DEFAULT_TOOL_OUTPUT_MAX_CHARS,
 ) -> dict:
     """把 discovered（與重試中的 failed）匯入單位依政策判定送進 memory/inbox/。
 
@@ -721,8 +848,16 @@ def import_discovered(
     - bridge db 不存在＝沒有 scanner 產出可處理：直接回報，**不建立 db 檔**
       （dry-run 與真跑一致——importer 只消費 scanner 的產出，不無中生有）。
     - 佇列＝discovered（依 first_seen_at 排序）＋ failed（自動重試）；
-      --limit 只截斷佇列長度，不改順序。
+      --limit 只截斷佇列長度，不改順序（A1：named profile 的 episode 列同在
+      這條佇列裡，--limit 節流一體適用，不另設通道）。
     - dry_run=True 零寫入：不落地、不動 db、不遞增 retry_count。
+
+    A1（2026-07-30）新增參數：
+    - profile_state_dbs：{profile 名: state.db 路徑} 顯式覆蓋（測試注入用）；
+      預設 None＝named profile 的 db 相對主 db 實路徑自動定位
+      （adapter.profile_state_db_path）。
+    - tool_output_max_chars：episode 落地檔的 tool 輸出縮減長度（拍板 (a)；
+      CLI 從 bridge.yaml episodes.tool_output_max_chars 載入，預設 500）。
     """
     policy = load_guardrail_policy(policy_path)
     if limit is not None and limit <= 0:
@@ -744,11 +879,16 @@ def import_discovered(
     if not inbox_dir.is_dir():
         raise FileNotFoundError(f"inbox 目錄不存在：{inbox_dir}（不代建目錄，避免寫錯地方）")
     with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
-        for rec in queue:
-            result["actions"].append(_process_one(
-                rec, adapter, policy=policy, inbox_dir=inbox_dir,
-                bridge_db=bridge_db, dry_run=dry_run,
-                max_retries=max_retries, seen_at=seen_at))
+        pool = _AdapterPool(adapter, profile_state_dbs)
+        try:
+            for rec in queue:
+                result["actions"].append(_process_one(
+                    rec, adapter, policy=policy, inbox_dir=inbox_dir,
+                    bridge_db=bridge_db, dry_run=dry_run,
+                    max_retries=max_retries, seen_at=seen_at, pool=pool,
+                    tool_output_max_chars=tool_output_max_chars))
+        finally:
+            pool.close()
     counts: dict = {}
     for action in result["actions"]:
         counts[action["action"]] = counts.get(action["action"], 0) + 1
@@ -800,7 +940,8 @@ def _build_parser() -> argparse.ArgumentParser:
                             "讀不到即整批不跑，絕不默認放行）")
     p_imp.add_argument("--config", default=str(DEFAULT_BRIDGE_CONFIG),
                        help=f"bridge 設定檔（預設 {DEFAULT_BRIDGE_CONFIG}；"
-                            "提供 max_import_retries）")
+                            "提供 max_import_retries 與 episodes."
+                            "tool_output_max_chars）")
     return parser
 
 
@@ -816,10 +957,12 @@ def _cli(argv=None) -> int:
                  else bridge_state.DEFAULT_DB_PATH)
     try:
         max_retries = load_max_import_retries(Path(args.config))
+        tool_output_max_chars = load_tool_output_max_chars(Path(args.config))
         result = import_discovered(
             dry_run=args.dry_run, limit=args.limit, state_db=args.state_db,
             bridge_db=bridge_db, inbox_dir=Path(args.inbox),
-            policy_path=Path(args.policy), max_retries=max_retries)
+            policy_path=Path(args.policy), max_retries=max_retries,
+            tool_output_max_chars=tool_output_max_chars)
     except (ValueError, FileNotFoundError, HermesSessionReadError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1

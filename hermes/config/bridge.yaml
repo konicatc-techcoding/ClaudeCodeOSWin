@@ -46,7 +46,38 @@ max_import_retries: 3
 # - inactivity_hours：已拍板 72（§0.1）——「暫時告一段落」的 checkpoint 門檻，
 #   比「過幾天拿出來繼續用」的復用節奏保守；切早了無資料損失，只是同一主題
 #   分成兩個 episode，consolidation 會再整併。
+# - tool_output_max_chars（memory-lifecycle A1 拍板 (a)，2026-07-30）：episode
+#   落地檔的 tool 輸出縮減——每則 tool 訊息保留 tool_name＋前 N 字元＋標注
+#   `[truncated N chars]`；user/assistant 訊息完整保留。縮減只發生在「寫入
+#   inbox 檔案」這一步，db 原文不動（隨時可回頭重讀）；敏感偵測在縮減前的
+#   完整原文上跑（縮減不是漏檢通道）。欄位缺失時 importer 預設 500。
+# - profiles（memory-lifecycle A1 多 profile 擴充，2026-07-30）：named profile
+#   的 episode capture 掃描清單。分流規則：
+#   * 主 db 的 session 依 profile_name 欄分流——空＝default（沿用上面的
+#     episode_cutover），非空＝對應 named profile（namespace
+#     "hermes/<profile>:<sid>:<first>..<last>"，2.4d §6.1 預留格式啟用；
+#     裸 "hermes:" 恆等 default，不需 migration）；
+#   * 每個 named profile 另掃自己的 profile db（<hermes 資料目錄>/profiles/
+#     <name>/state.db，路徑相對主 db 實路徑自動定位，兩平台通用，不寫死）。
+#   每個 entry 的 episode_cutover 是 **per-profile cutover**（防歷史湧入，
+#   同 §5.1 哲學）：**留空（null）＝該 profile 尚未 cutover，不擷取**（scanner
+#   誠實回報 pending，不 fail、不影響 default 與其他 profile）。實際時刻由
+#   主 session 部署時比照 2.4d-4 runbook 寫入「翻上線當下的精確 UTC 時刻」
+#   （見 docs/memory-lifecycle-proposal.md §7 A1 部署 runbook）。
+#   entry 也接受 state_db 覆蓋（測試／急救用；生產一律留空走自動定位）。
+#   敏感 fail-closed、too_short、去重、--limit 節流全部繼承既有 importer
+#   實作——named profile 不新增任何繞過。
 episodes:
   enabled: true
   episode_cutover: "2026-07-12T06:36:18Z"
   inactivity_hours: 72
+  tool_output_max_chars: 500
+  profiles:
+    financialresearch:
+      episode_cutover: null
+    gptcoding:
+      episode_cutover: null
+    intelligence:
+      episode_cutover: null
+    nemocoding:
+      episode_cutover: null

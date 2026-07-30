@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""hermes/bridge_state.py — v0.2（Stage 2.4d-1）
+"""hermes/bridge_state.py — v0.3（Stage 2.4d-1；memory-lifecycle A1 於
+2026-07-30 啟用 profile namespace：裸 "hermes:" 恆等 default 向後相容，named
+profile 用 "hermes/<profile>:<sid>:<first>..<last>"——2.4d §6.1 預留格式，
+不需 migration；"hermes/default:" 一律拒絕，canonical 形式是裸 "hermes:"）
 
 Stage 2 session bridge 的處理狀態（bookkeeping）SQLite 存取層。
 格式契約正本：registry/bridge_state_schema.yaml（claudecodeos.bridge_state.v2，
@@ -164,12 +167,44 @@ CREATE_CURSOR_TABLE_SQL = f"""
     )
 """
 
-# 本階段唯一支援的 profile（提案 §6.1 fail-closed 邊界）：現行 event_id
-# namespace 無 profile 段，非 default 的 episode 會寫出與 default 無法區分的
-# event_id（namespace 污染），create_episode 一律拒絕。未來擴充格式已預留：
-# "hermes/<profile>:..."——本階段讀到這個前綴同樣一律拒絕（parse_event_id）。
+# profile namespace（2.4d §6.1 預留、memory-lifecycle A1 於 2026-07-30 啟用）：
+# - default profile 的 event_id 維持裸 "hermes:" 前綴（恆等 default，向後相容、
+#   不需 migration——2.4d §6.1 明文）；
+# - named profile 的 episode event_id 用 "hermes/<profile>:<sid>:<first>..<last>"
+#   ——profile 段是 namespace 的一部分，同 boundary 不同 profile 是不同 event_id。
+# - "hermes/default:..." 一律拒絕（canonical 形式是裸 "hermes:"——若兩種寫法
+#   並存，同一 episode 會有兩個 event_id，UNIQUE(event_id) 去重當場破功）。
 DEFAULT_SOURCE_PROFILE = "default"
 PROFILE_NAMESPACE_PREFIX = "hermes/"
+
+# profile 名的合法形式：目錄名／lane 名慣例（英數起頭，英數、-、_ 組成）。
+# 不得含 ':'（event_id 分隔符）與 '/'（namespace 分隔符）——由 regex 天然排除。
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def validate_source_profile(source_profile) -> str:
+    """驗證 source_profile 是合法的 profile 名並原樣回傳（A1 多 profile）。
+
+    fail-closed：非字串、空字串、不符合 _PROFILE_NAME_RE（含 ':' 或 '/' 等）
+    一律 ValueError——寧可拒寫，不可寫出無法解析的 event_id namespace。
+    """
+    if not isinstance(source_profile, str) or not source_profile:
+        raise ValueError(
+            f"source_profile 必須是非空字串，得到 {source_profile!r}")
+    if not _PROFILE_NAME_RE.match(source_profile):
+        raise ValueError(
+            f"source_profile 不合法：{source_profile!r}（僅允許英數起頭，"
+            "英數、'-'、'_' 組成——不得含 ':' 或 '/'，那是 event_id 分隔符）")
+    return source_profile
+
+
+def event_id_namespace(source_profile: str = DEFAULT_SOURCE_PROFILE) -> str:
+    """profile → event_id namespace 前綴段：default → "hermes"；
+    named → "hermes/<profile>"（A1 啟用的 2.4d §6.1 預留格式）。"""
+    validate_source_profile(source_profile)
+    if source_profile == DEFAULT_SOURCE_PROFILE:
+        return "hermes"
+    return f"hermes/{source_profile}"
 
 # episode 內容雜湊（提案 §4.5）的 normalized 欄位——固定清單、與 render
 # 格式解耦（render 改版不會假性 mismatch）。
@@ -197,10 +232,15 @@ def parse_iso_utc(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def session_event_id(session_id: str) -> str:
+def session_event_id(session_id: str,
+                     source_profile: str = DEFAULT_SOURCE_PROFILE) -> str:
     """session 層級去重 key（legacy，pre-2.4d），沿用 adapter 的 event_id 慣例：
-    "hermes:<session_id>"。2.4d 起不再新增這個層級的記錄，但既有列原樣保留。"""
-    return f"hermes:{session_id}"
+    default → "hermes:<session_id>"；named profile →
+    "hermes/<profile>:<session_id>"（A1；實務上 named profile 只有 episode
+    列，session 層級 named 形式僅供 parse 對稱性，scanner 不產生）。"""
+    if source_profile == DEFAULT_SOURCE_PROFILE:
+        return f"hermes:{session_id}"
+    return f"{event_id_namespace(source_profile)}:{session_id}"
 
 
 def _validate_boundary(first_message_id, last_message_id) -> tuple[int, int]:
@@ -218,8 +258,11 @@ def _validate_boundary(first_message_id, last_message_id) -> tuple[int, int]:
     return first_message_id, last_message_id
 
 
-def episode_event_id(session_id: str, first_message_id: int, last_message_id: int) -> str:
-    """episode 層級去重 key："hermes:<sid>:<first>..<last>"（提案 §2）。
+def episode_event_id(session_id: str, first_message_id: int, last_message_id: int,
+                     source_profile: str = DEFAULT_SOURCE_PROFILE) -> str:
+    """episode 層級去重 key（提案 §2；A1 多 profile）：
+    default → "hermes:<sid>:<first>..<last>"；
+    named → "hermes/<profile>:<sid>:<first>..<last>"（2.4d §6.1 預留格式）。
 
     boundary 是穩定值：first/last 在 create_episode 當下固定、之後 immutable
     ——這滿足「event_id 必含穩定 episode boundary」的拍板公理。格式與既有
@@ -228,7 +271,7 @@ def episode_event_id(session_id: str, first_message_id: int, last_message_id: in
     first, last = _validate_boundary(first_message_id, last_message_id)
     if not session_id or ":" in str(session_id) or "/" in str(session_id):
         raise ValueError(f"session_id 不合法（不得含 ':' 或 '/'）：{session_id!r}")
-    return f"hermes:{session_id}:{first}..{last}"
+    return f"{event_id_namespace(source_profile)}:{session_id}:{first}..{last}"
 
 
 _EPISODE_BOUNDS_RE = re.compile(r"^(\d+)\.\.(\d+)$")
@@ -236,31 +279,51 @@ _MESSAGE_ROWID_RE = re.compile(r"^\d+$")
 
 
 def parse_event_id(event_id: str) -> dict:
-    """三層 event_id namespace 的機械判別（提案 §2）。
+    """三層 event_id namespace 的機械判別（提案 §2；A1 加 profile 段）。
 
-    回傳 dict：
-    - session（legacy）："hermes:<sid>"        → {"kind": "session", "session_id"}
-    - 訊息層級："hermes:<sid>:<rowid>"          → {"kind": "message", "session_id", "rowid"}
+    回傳 dict（一律含 "source_profile"——裸 "hermes:" 恆等 default）：
+    - session（legacy）："hermes:<sid>"        → {"kind": "session", "session_id",
+                                                   "source_profile"}
+    - 訊息層級："hermes:<sid>:<rowid>"          → {"kind": "message", "session_id",
+                                                   "rowid", "source_profile"}
     - episode："hermes:<sid>:<first>..<last>"   → {"kind": "episode", "session_id",
-                                                   "first_message_id", "last_message_id"}
+                                                   "first_message_id",
+                                                   "last_message_id", "source_profile"}
+    - 以上三層各自的 named profile 形式："hermes/<profile>:..."（A1 啟用，
+      2.4d §6.1 預留格式）→ 同結構、source_profile=<profile>。
 
     區分規則（照提案逐字實作）：含 ".." ＝ episode；含 ":" 但無 ".." 且冒號後
     是整數 ＝ 訊息；其餘 ＝ session 層級（Hermes sid 不含冒號，無歧義）。
 
-    fail-closed（提案 §6.1）：讀到 "hermes/" 前綴（未來 profile namespace，
-    本階段不啟用）或非 "hermes:" 開頭的值一律丟 ValueError，**不得默默視為
-    default**；含 ".." 但格式不合法（非整數、first > last）同樣拒絕。
+    fail-closed：
+    - "hermes/default:..." 一律拒絕——default 的 canonical 形式是裸 "hermes:"
+      （否則同一 episode 有兩個 event_id，去重破功）；
+    - profile 段空白或不合法（validate_source_profile）拒絕；
+    - 非 "hermes:"／"hermes/<profile>:" 開頭的值一律丟 ValueError；
+    - 含 ".." 但格式不合法（非整數、first > last）同樣拒絕。
     """
     if not isinstance(event_id, str) or not event_id:
         raise ValueError(f"event_id 必須是非空字串，得到 {event_id!r}")
+    source_profile = DEFAULT_SOURCE_PROFILE
     if event_id.startswith(PROFILE_NAMESPACE_PREFIX):
+        profile_part, sep, rest = event_id[len(PROFILE_NAMESPACE_PREFIX):].partition(":")
+        if not sep or not profile_part:
+            raise ValueError(
+                f"event_id {event_id!r} 的 profile namespace 段不完整"
+                "（應為 hermes/<profile>:<sid>...）")
+        if profile_part == DEFAULT_SOURCE_PROFILE:
+            raise ValueError(
+                f"event_id {event_id!r} 用了 'hermes/default:' 前綴——default 的 "
+                "canonical 形式是裸 'hermes:'（兩種寫法並存會讓同一 episode 有兩個 "
+                "event_id、UNIQUE 去重破功），一律拒絕")
+        validate_source_profile(profile_part)  # 不合法 profile 名在此 fail loud
+        source_profile = profile_part
+    elif event_id.startswith("hermes:"):
+        rest = event_id[len("hermes:"):]
+    else:
         raise ValueError(
-            f"event_id {event_id!r} 帶 profile namespace 前綴（'hermes/'）——"
-            "本階段僅支援 default profile，一律 fail-closed 拒絕處理"
-            "（提案 §2、§6.1），不得默默視為 default")
-    if not event_id.startswith("hermes:"):
-        raise ValueError(f"未知的 event_id namespace：{event_id!r}（僅支援 'hermes:' 前綴）")
-    rest = event_id[len("hermes:"):]
+            f"未知的 event_id namespace：{event_id!r}"
+            "（僅支援 'hermes:'／'hermes/<profile>:' 前綴）")
     if not rest:
         raise ValueError(f"event_id 缺 session_id 段：{event_id!r}")
     if ".." in rest:
@@ -269,15 +332,19 @@ def parse_event_id(event_id: str) -> dict:
         if not sid or match is None:
             raise ValueError(
                 f"episode event_id 格式不合法：{event_id!r}"
-                "（應為 hermes:<sid>:<first>..<last>，first/last 為整數）")
+                "（應為 [hermes|hermes/<profile>]:<sid>:<first>..<last>，"
+                "first/last 為整數）")
         first, last = int(match.group(1)), int(match.group(2))
         _validate_boundary(first, last)
         return {"kind": "episode", "session_id": sid,
-                "first_message_id": first, "last_message_id": last}
+                "first_message_id": first, "last_message_id": last,
+                "source_profile": source_profile}
     sid, sep, tail = rest.rpartition(":")
     if sep and sid and _MESSAGE_ROWID_RE.match(tail):
-        return {"kind": "message", "session_id": sid, "rowid": int(tail)}
-    return {"kind": "session", "session_id": rest}
+        return {"kind": "message", "session_id": sid, "rowid": int(tail),
+                "source_profile": source_profile}
+    return {"kind": "session", "session_id": rest,
+            "source_profile": source_profile}
 
 
 def is_episode_event_id(event_id: str) -> bool:
@@ -467,7 +534,9 @@ def upsert_session_state(
       upsert 只能**更新**既有 episode 列（importer 的狀態轉換路徑），且刻意
       不把五個 episode 欄放進 INSERT/UPDATE 清單：episode 的 identity 欄位
       不可能被 upsert 洗掉（immutability，提案 §4.4）。
-    - "hermes/" 前綴（未來 profile namespace）一律 fail-closed 拒絕（§6.1）。
+    - A1（2026-07-30）："hermes/<profile>:" 前綴啟用——但 event_id 的 profile
+      段必須與 source_profile 參數一致（namespace 與欄位不可能分家）；
+      "hermes/default:" 仍一律拒絕（canonical 形式是裸 "hermes:"）。
 
     回傳 upsert 後的完整列（dict）。
     """
@@ -481,20 +550,23 @@ def upsert_session_state(
         )
 
     if event_id is None:
-        event_id = session_event_id(session_id)
-    if event_id.startswith(PROFILE_NAMESPACE_PREFIX):
-        raise ValueError(
-            f"event_id {event_id!r} 帶 'hermes/' profile namespace 前綴——"
-            "本階段 fail-closed 拒絕（提案 §6.1）")
+        event_id = session_event_id(session_id, source_profile)
     episode_parsed = None
-    if is_episode_event_id(event_id):
-        episode_parsed = parse_event_id(event_id)  # 格式不合法會在這裡 fail loud
-        if episode_parsed["kind"] != "episode":
-            raise ValueError(f"event_id {event_id!r} 含 '..' 但非合法 episode 格式")
-        if episode_parsed["session_id"] != session_id:
+    if event_id.startswith(PROFILE_NAMESPACE_PREFIX) or is_episode_event_id(event_id):
+        parsed = parse_event_id(event_id)  # 格式不合法（含 hermes/default:）在這裡 fail loud
+        if parsed["source_profile"] != source_profile:
+            raise ValueError(
+                f"不一致寫入被拒（A1 namespace 一致性）：event_id 的 profile="
+                f"{parsed['source_profile']!r} != 參數 source_profile="
+                f"{source_profile!r}——namespace 與欄位必須由同一組值產生")
+        if parsed["session_id"] != session_id:
             raise ValueError(
                 f"不一致寫入被拒（矩陣 #24）：event_id 的 session_id="
-                f"{episode_parsed['session_id']!r} != 參數 session_id={session_id!r}")
+                f"{parsed['session_id']!r} != 參數 session_id={session_id!r}")
+        if is_episode_event_id(event_id):
+            if parsed["kind"] != "episode":
+                raise ValueError(f"event_id {event_id!r} 含 '..' 但非合法 episode 格式")
+            episode_parsed = parsed
     now = seen_at or _now_iso()
 
     with _lock, _db(db_path) as conn:
@@ -840,8 +912,11 @@ def create_episode(
     （只前進語義：cursor 已在更前面時連 cursor 都不動）。這是重掃／recovery
     後重切同一刀的安全路徑。
 
-    fail-closed（提案 §6.1）：source_profile != 'default' 一律拒絕——現行
-    event_id namespace 無 profile 段，非 default 的 episode 會污染 namespace。
+    profile namespace（A1，2026-07-30 啟用 2.4d §6.1 預留格式）：
+    source_profile 可為任何合法 profile 名（validate_source_profile 把關）；
+    default 的 event_id 維持裸 "hermes:"（向後相容、不需 migration），named
+    profile 產生 "hermes/<profile>:<sid>:<first>..<last>"。cursor 本來就以
+    (source_profile, session_id) 為主鍵，不同 profile 結構性隔離。
 
     條件必填（提案 §1.2）：episode 列的五個新欄全必填；capture_trigger 必須是
     ended/archived/inactivity/manual（'legacy' 保留給 migration 回填的
@@ -861,11 +936,7 @@ def create_episode(
 
     回傳 {"created": bool, "row": dict, "cursor": dict}。
     """
-    if source_profile != DEFAULT_SOURCE_PROFILE:
-        raise ValueError(
-            f"episode capture 本階段僅支援 source_profile='{DEFAULT_SOURCE_PROFILE}'"
-            f"（得到 {source_profile!r}）——fail-closed 拒絕（提案 §6.1）：現行 "
-            "event_id namespace 無 profile 段，非 default 會寫出無法區分的 event_id")
+    validate_source_profile(source_profile)  # A1：合法 profile 名才可寫入
     _validate_enum("import_status", import_status)
     _validate_enum("memory_type", memory_type)
     _validate_enum("capture_trigger", capture_trigger)
@@ -891,7 +962,8 @@ def create_episode(
         raise ValueError(
             "import_status 為 to_inbox/imported 時 imported_inbox_path 必填（schema 約束）")
 
-    event_id = episode_event_id(session_id, first_message_id, last_message_id)
+    event_id = episode_event_id(session_id, first_message_id, last_message_id,
+                                source_profile=source_profile)
     if event_id_range is None:
         event_id_range = event_id
     elif event_id_range != event_id:

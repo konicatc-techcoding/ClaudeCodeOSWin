@@ -242,3 +242,66 @@ C-a 索引分層升格、歸檔制汰選+豁免清單)。理由:G2/G3 互為依�
    步驟 1.5 補一句)。
 5. **「每 episode 前置摘要步」暫緩?** 暫緩=蒸餾點維持在 consolidation
    (現狀,零新增模型呼叫);待 A1 上線後若 consolidation 消化不了再議。
+
+---
+
+## 7. A1 部署 Runbook(multi-profile cutover;比照 2.4d §8.1 格式)
+
+**狀態**:A1 實作完成(2026-07-30,`engineering`)——bridge 三件組+adapter
+的多 profile 支援、event_id namespace(`hermes/<profile>:<sid>:<first>..<last>`,
+裸 `hermes:` 恆等 default 向後相容、不需 migration)、WAL sidecar 修正
+(adapter 對 db 路徑先 resolve symlink 再推 sidecar,單點修正涵蓋所有呼叫端)、
+tool 輸出縮減(拍板 (a):`episodes.tool_output_max_chars: 500`,user/assistant
+完整保留、敏感偵測在縮減前原文上跑)。`hermes/config/bridge.yaml` 的
+`episodes.profiles` 四個 named profile 已列入、**episode_cutover 全為 null
+占位**——占位=pending,scanner 誠實回報並跳過擷取,零湧入。本節是把占位
+換成實值(啟用擷取)的部署順序**唯一正本**,由主 session 執行,必須依序、
+不得跳步:
+
+1. **確認 scanner 不會在窗口內被觸發**:現行排程模型是每日一次
+   (08:05 HermesBridgeDaily/對應 systemd timer),避開該時段執行即常態
+   成立(§5 既有判斷);若要保險,暫停排程,完成後恢復。確認無執行中的
+   scanner/importer 程序。
+2. **Windows 開發側 bridge 全套測試綠燈**(A1 交付時已跑,見 STATUS/
+   交付紀錄;若程式碼有後續改動需重跑)。
+3. **`scripts/sync_to_wsl.sh` dry-run → apply**:下發 A1 程式碼與
+   bridge.yaml(此時 profiles cutover 仍為 null 占位——下發本身不啟用
+   任何擷取,這是與 2.4d-4 相同的「先下發、後翻開關」順序)。
+4. **無 schema migration**:A1 不需要 migrate(2.4d §6.1 明文:裸
+   `hermes:` 恆等 default;`bridge_cursors` 主鍵 `(source_profile,
+   session_id)` 天然支援)。部署側跑一次 `bridge_scanner.py reconcile`,
+   對健康 db 應為 no-op,順帶驗證新程式碼在部署側可執行。
+5. **WSL 側驗證 profile db 可達**:
+   `python3 -c "import sys; sys.path.insert(0,'hermes/session_adapter'); from adapter import profile_state_db_path; print(profile_state_db_path('gptcoding'))"`
+   ——應印出 `/mnt/c/.../hermes/profiles/gptcoding/state.db` 且檔案存在
+   (經主 db symlink resolve 自動定位;四顆 profile db 都在 Windows 側,
+   2026-07-30 查證)。
+6. **dry-run scan 檢視**:預期輸出「named profile 尚未 cutover(占位、
+   暫不擷取)」列出全部 pending profile、零 named episode 動作、default
+   行為與 A1 前一致。
+7. **逐 profile 寫入 per-profile cutover**:對要啟用的每個 profile,取
+   **當下實際 UTC 時刻**寫入 `episodes.profiles.<name>.episode_cutover`
+   (比照 2.4d-4 步驟 9 拍板:是時刻不是日期概念值——此值之前的訊息永遠
+   不擷取,即使 bridge_state.db 重建也不越過)。**可分批啟用**:留 null 的
+   profile 維持 pending,互不影響。
+8. **再 dry-run scan 一次**:確認已啟用的 profile 零回溯湧入(cutover 前
+   的歷史訊息不得出現在任何 episode 動作裡)。
+9. **sync 下發 cutover 實值到 WSL**,恢復/等待下一個排程窗口,首次真實
+   scan 後檢視:episode 動作的 `profile=` 標記正確、importer(`--limit 10`
+   既有節流)落地檔的 frontmatter 帶 `hermes/<profile>:` event_id_range 與
+   `source_profile:` 欄。fingerprint 檢查:Hermes 主 db 與四顆 profile db
+   零寫入(adapter read-only+snapshot 慣例)。
+10. **觀察一輪 daily-memory-check**:named episode 進 consolidation 的
+    品質——too_short/exclusion 訊號是否足以擋 lane 雜訊(§4 風險表
+    「named profile 雜訊灌進 inbox」的驗證點);不夠再議拍板項 5(摘要步)。
+
+**特別警告(比照 2.4d-4,逐字強調)**:
+
+> **步驟 3(sync)到步驟 7(cutover 寫入)之間,不得讓 scanner 被排程
+> 觸發。** 新程式碼+占位 cutover 的組合是安全的(pending=不擷取),但
+> 若在人工編輯 bridge.yaml 途中(檔案半寫狀態)被觸發,可能 fail loud
+> 中斷該輪 scan——這正是步驟 1 要先確認窗口的理由。
+
+> **per-profile cutover 一旦寫入,不得往前調來「補掃歷史」。** 要回溯
+> 補匯個別 session,用 `checkpoint`(default)或人工 `to-inbox` 路徑
+> 個案處理,不要動 cutover 底線(§5.1 pre-cutover 絕對底線的哲學)。

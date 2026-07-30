@@ -164,6 +164,24 @@ def default_state_db_path() -> Path:
     )
 
 
+def profile_state_db_path(profile: str,
+                          main_db_path: str | Path | None = None) -> Path:
+    """named profile 的 state.db 路徑（memory-lifecycle A1，2026-07-30）。
+
+    Hermes 的 profile db 佈局：`<hermes 資料目錄>/profiles/<name>/state.db`
+    （Windows：%LOCALAPPDATA%/hermes/profiles/...；2026-07-30 查證：四顆
+    profile db 都在 Windows 側，WSL 側只 symlink 了主 db 本體）。
+
+    定位方式刻意**相對於主 db 的實路徑**（resolve symlink 後的 parent）而非
+    另設平台別設定：WSL 部署側 ~/.hermes/state.db resolve 後即得
+    /mnt/c/.../hermes/，profiles/ 子目錄天然跟著對——單一實作兩平台通用，
+    bridge.yaml 不需要寫死任何平台路徑。只推導路徑、不檢查存在性——
+    「configured 但 db 不存在」由呼叫端誠實回報，不在這裡猜。
+    """
+    main = Path(main_db_path) if main_db_path else default_state_db_path()
+    return main.resolve().parent / "profiles" / profile / "state.db"
+
+
 def _file_fingerprint(path: Path) -> tuple:
     """單一檔案的 fingerprint：(存在與否, size, mtime_ns)。
     不存在（或 stat 失敗）→ (False, None, None)。只 stat、不開檔——
@@ -251,6 +269,18 @@ class HermesSessionAdapter:
         self.db_path = Path(db_path) if db_path else default_state_db_path()
         if not self.db_path.is_file():
             raise FileNotFoundError(f"Hermes state.db 不存在：{self.db_path}")
+        # WAL sidecar 修正（2026-07-30，memory-lifecycle A1 前置查證 2）：
+        # WSL 部署側 ~/.hermes/state.db 是 symlink → /mnt/c/... 的實檔，但
+        # sidecar（-wal/-shm）路徑是用「db 路徑字串 + 後綴」拼接推導的——對
+        # symlink 會得到不存在的 symlink 側路徑而漏拷 WAL（snapshot 讀不到
+        # 尚未 checkpoint 的最新寫入）。這裡先 resolve 成實路徑：單點修正，
+        # 之後所有 fingerprint／複製／sidecar 推導（_source_fingerprints、
+        # _copy_and_verify_snapshot）與 profile db 相對定位
+        # （profile_state_db_path）都以實路徑為準。選 adapter 端 resolve 而非
+        # 部署側改吃 /mnt/c 實路徑的理由：一處修正涵蓋所有呼叫端（scanner
+        # scan/checkpoint、importer、CLI、全部 profile db），不需要平台別設定，
+        # 也不會留著「下一個呼叫端再踩一次」的坑。
+        self.db_path = self.db_path.resolve()
         self._snapshot_dir: str | None = None
         self._read_path = self.db_path
         if snapshot:
@@ -358,24 +388,37 @@ class HermesSessionAdapter:
 
     def list_sessions(self, source: str | None = None,
                       since_epoch: float | None = None) -> list[dict]:
-        """回傳 normalized session 摘要（claudecodeos.session.v1）。"""
-        query = (
-            "SELECT id, source, user_id, model, started_at, ended_at, end_reason, "
-            "message_count, title, session_key, chat_id, chat_type, thread_id, "
-            "parent_session_id, archived FROM sessions"
-        )
-        conditions, params = [], []
-        if source:
-            conditions.append("source = ?")
-            params.append(source)
-        if since_epoch is not None:
-            conditions.append("started_at >= ?")
-            params.append(since_epoch)
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY started_at ASC"
+        """回傳 normalized session 摘要（claudecodeos.session.v1）。
+
+        profile_name（memory-lifecycle A1，2026-07-30）：主 db 的 sessions 有
+        `profile_name` 欄標記 named-profile 的 telegram session（2026-07-30
+        查證實例：profile_name='gptcoding'）——bridge_scanner 依此把主 db 的
+        session 分流到對應 profile namespace。欄位存在才 SELECT（測試 fixture
+        與較舊 schema 沒有這欄），缺欄時 metadata.profile_name 一律 None
+        ——additive、既有呼叫端零行為變化。
+        """
         conn = self._connect()
         try:
+            has_profile_col = any(
+                row[1] == "profile_name"
+                for row in conn.execute("PRAGMA table_info(sessions)"))
+            query = (
+                "SELECT id, source, user_id, model, started_at, ended_at, end_reason, "
+                "message_count, title, session_key, chat_id, chat_type, thread_id, "
+                "parent_session_id, archived"
+                + (", profile_name" if has_profile_col else "")
+                + " FROM sessions"
+            )
+            conditions, params = [], []
+            if source:
+                conditions.append("source = ?")
+                params.append(source)
+            if since_epoch is not None:
+                conditions.append("started_at >= ?")
+                params.append(since_epoch)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY started_at ASC"
             rows = conn.execute(query, params).fetchall()
         finally:
             conn.close()
@@ -383,6 +426,8 @@ class HermesSessionAdapter:
 
     @staticmethod
     def _normalize_session(row) -> dict:
+        profile_name = (row["profile_name"]
+                        if "profile_name" in row.keys() else None)
         return {
             "schema": SESSION_SCHEMA,
             "source": SOURCE_NAME,
@@ -402,6 +447,11 @@ class HermesSessionAdapter:
                 "thread_id": row["thread_id"],
                 "parent_session_id": row["parent_session_id"],
                 "archived": bool(row["archived"]),
+                # None＝欄位缺失或未標記；非空字串＝主 db 裡的 named-profile
+                # session（A1 分流訊號——profile db 的 session 不看這欄，
+                # profile 辨識以「哪顆 db」為準，舊資料的 profile_name 有 null
+                # 不可靠，2026-07-30 查證）。
+                "profile_name": profile_name or None,
             },
         }
 
@@ -669,6 +719,14 @@ class HermesSessionAdapter:
         target_event_id = (
             f"hermes:{session_id}:{first_message_id}..{last_message_id}"
             if episode else None)
+        # A1（多 profile）：named profile 檔案的 event_id_range 帶
+        # "hermes/<profile>:" 前綴，但檔名 needle（同 sid＋boundary）不分
+        # profile——sid 是 UUID 等級唯一，同 sid＋同 boundary 就是同一刀。
+        # frontmatter 比對接受裸與 namespaced 兩種形式（suffix 含 sid 與
+        # boundary，不會誤中別的 session 或別的 boundary）。
+        target_range_suffix = (
+            f":{session_id}:{first_message_id}..{last_message_id}"
+            if episode else None)
 
         dirs = [inbox_dir] + [inbox_dir / d for d in self._ARCHIVE_SUBDIRS]
         for directory in dirs:
@@ -682,7 +740,10 @@ class HermesSessionAdapter:
                             and parsed["last_message_id"] == last_message_id):
                         return candidate
                     fm = self._frontmatter_fields(candidate)
-                    if fm.get("event_id_range") == target_event_id:
+                    fm_range = fm.get("event_id_range") or ""
+                    if fm_range == target_event_id or (
+                            fm_range.startswith("hermes/")
+                            and fm_range.endswith(target_range_suffix)):
                         return candidate
                 else:
                     if (parsed and parsed["session_id"] == session_id
@@ -737,6 +798,8 @@ class HermesSessionAdapter:
         first_message_id: int, last_message_id: int,
         force: bool = False, full: bool = False,
         max_excerpt_events: int = 30,
+        source_profile: str = "default",
+        tool_output_max_chars: int | None = None,
     ) -> Path:
         """episode 版本的 `write_inbox_file()`（Stage 2.4d-3，提案 §2）。
 
@@ -752,6 +815,19 @@ class HermesSessionAdapter:
           的 event_id）。
         - force／拒絕寫進來源目錄／找不到 inbox 目錄的行為與 `write_inbox_file`
           一致。
+
+        memory-lifecycle A1（2026-07-30）新增兩個可選參數：
+        - `source_profile`：非 "default" 時 frontmatter 額外帶
+          `source_profile: <name>` 欄，且 `event_id_range` 用
+          "hermes/<profile>:" namespace（2.4d §6.1 預留格式；default 維持裸
+          "hermes:"，位元級不變）。
+        - `tool_output_max_chars`：非 None 時改用 episode 縮減 render（A1
+          拍板 (a)）——user/assistant 訊息**完整保留**（不做 30 則／500 字元
+          截斷），tool 輸出（tool_result 內容、tool_call 的 tool_calls 參數）
+          保留 tool_name＋每則截斷至此字元數並標注 `[truncated N chars]`。
+          縮減只發生在「寫入 inbox 檔案」這一步，db 原文不動；敏感偵測由
+          importer 對縮減前的完整原文執行（_full_session_text），縮減不是
+          漏檢敏感內容的通道。None＝沿用 2.4d-3 的既有 render（向後相容）。
         """
         inbox_dir = Path(inbox_dir)
         if inbox_dir.resolve() == self.db_path.parent.resolve():
@@ -768,11 +844,17 @@ class HermesSessionAdapter:
             if existing is not None:
                 raise InboxAlreadyImportedError(session_id, existing)
 
-        event_id_range = f"hermes:{session_id}:{first_message_id}..{last_message_id}"
+        namespace = ("hermes" if source_profile in (None, "default")
+                     else f"hermes/{source_profile}")
+        event_id_range = (f"{namespace}:{session_id}:"
+                          f"{first_message_id}..{last_message_id}")
         body = self._render_markdown(
             export, max_excerpt_events, full=full,
             episode_seq=episode_seq, capture_trigger=capture_trigger,
-            event_id_range=event_id_range)
+            event_id_range=event_id_range,
+            source_profile=(None if source_profile in (None, "default")
+                            else source_profile),
+            tool_output_max_chars=tool_output_max_chars)
         path = inbox_dir / self.episode_inbox_filename(
             session_id, first_message_id, last_message_id)
         try:
@@ -785,7 +867,8 @@ class HermesSessionAdapter:
     @staticmethod
     def _render_frontmatter(export: dict, *, episode_seq: int | None = None,
                             capture_trigger: str | None = None,
-                            event_id_range: str | None = None) -> list[str]:
+                            event_id_range: str | None = None,
+                            source_profile: str | None = None) -> list[str]:
         """claudecodeos.inbox.v1 frontmatter（docs/memory-taxonomy.md §5）。
         usefulness/sensitivity 固定 pending：adapter 不做內容判斷與敏感偵測，
         不假裝判斷完成——那是落地後呼叫端／consolidation 的責任。
@@ -812,6 +895,10 @@ class HermesSessionAdapter:
                 event_id_range = f"hermes:{session_id}:{min(raw_ids)}..{max(raw_ids)}"
         if event_id_range:
             lines.append(f'event_id_range: "{event_id_range}"')
+        if source_profile is not None:
+            # A1：named profile 檔案的 profile 標記（default 檔不帶此欄——
+            # additive、既有檔案與 default 新檔位元級不變）
+            lines.append(f"source_profile: {source_profile}")
         if episode_seq is not None:
             lines.append(f"episode: {episode_seq}")
         if capture_trigger is not None:
@@ -826,16 +913,28 @@ class HermesSessionAdapter:
         ]
         return lines
 
+    @staticmethod
+    def _truncate_tool_text(text: str, max_chars: int) -> str:
+        """tool 輸出縮減（A1 拍板 (a)）：保留前 max_chars 字元＋標注
+        `[truncated N chars]`（N＝被截去的字元數）。不超長時原樣回傳。"""
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + f"…[truncated {len(text) - max_chars} chars]"
+
     @classmethod
     def _render_markdown(cls, export: dict, max_excerpt_events: int,
                          full: bool = False, *, episode_seq: int | None = None,
                          capture_trigger: str | None = None,
-                         event_id_range: str | None = None) -> str:
+                         event_id_range: str | None = None,
+                         source_profile: str | None = None,
+                         tool_output_max_chars: int | None = None) -> str:
         session = export["session"]
         events = export["events"]
         lines = cls._render_frontmatter(export, episode_seq=episode_seq,
                                         capture_trigger=capture_trigger,
-                                        event_id_range=event_id_range)
+                                        event_id_range=event_id_range,
+                                        source_profile=source_profile)
+        reduced = tool_output_max_chars is not None
         excerpt_note = ("全部，工具呼叫略過" if full
                         else f"最多 {max_excerpt_events} 則，工具呼叫略過")
         lines += [
@@ -851,23 +950,71 @@ class HermesSessionAdapter:
             json.dumps(session, ensure_ascii=False, indent=2),
             "```",
             "",
-            f"## 對話摘錄（只列 message 事件，{excerpt_note}）",
-            "",
         ]
-        # TODO(truncation)：預設摘錄「尾端 30 則 + 每則 500 字元」可能截掉
-        # 有價值的上下文；本次主線是 idempotency，暫以 --full 提供完整匯出，
-        # 更聰明的摘錄策略（依 usefulness 訊號挑段落）留待後續。
-        message_events = [e for e in events if e["type"] == "message"]
-        if not full:
-            message_events = message_events[-max_excerpt_events:]
-        for event in message_events:
-            excerpt = event["content"].strip().replace("\r\n", "\n")
-            if not full and len(excerpt) > 500:
-                excerpt = excerpt[:500] + "…（截斷）"
-            lines.append(f"### [{event['timestamp']}] {event['role']}")
-            lines.append("")
-            lines.append(excerpt or "(空白內容)")
-            lines.append("")
+        if reduced:
+            # A1 拍板 (a) 的 episode 縮減 render：user/assistant 完整保留
+            # （不做則數與字元截斷），tool 輸出保留 tool_name＋每則截斷。
+            # 縮減只影響寫出的 inbox 檔——db 原文不動，敏感偵測在縮減前的
+            # 完整原文上跑（bridge_importer._full_session_text）。
+            lines += [
+                "## 對話摘錄（user/assistant 完整保留；tool 輸出每則截至 "
+                f"{tool_output_max_chars} 字元）",
+                "",
+            ]
+            for event in events:
+                if event["type"] == "meta":
+                    continue
+                content = event["content"].strip().replace("\r\n", "\n")
+                md = event.get("metadata") or {}
+                if event["type"] == "message":
+                    lines.append(f"### [{event['timestamp']}] {event['role']}")
+                    lines.append("")
+                    lines.append(content or "(空白內容)")
+                elif event["type"] == "tool_call":
+                    calls = md.get("tool_calls") or []
+                    names = ", ".join(
+                        (c.get("function") or {}).get("name") or "(unknown)"
+                        for c in calls if isinstance(c, dict)) or "(unknown)"
+                    lines.append(f"### [{event['timestamp']}] {event['role']}"
+                                 f"（tool_call: {names}）")
+                    lines.append("")
+                    if content:
+                        lines.append(content)  # assistant 自身文字完整保留
+                    serialized = json.dumps(calls, ensure_ascii=False) if calls \
+                        else (md.get("tool_calls_raw") or "")
+                    if serialized:
+                        lines.append(cls._truncate_tool_text(
+                            serialized, tool_output_max_chars))
+                    if not content and not serialized:
+                        lines.append("(空白內容)")
+                else:  # tool_result
+                    tool_name = md.get("tool_name") or "(unknown tool)"
+                    lines.append(f"### [{event['timestamp']}] tool（{tool_name}）")
+                    lines.append("")
+                    lines.append(cls._truncate_tool_text(
+                        content, tool_output_max_chars) or "(空白內容)")
+                lines.append("")
+        else:
+            lines += [
+                f"## 對話摘錄（只列 message 事件，{excerpt_note}）",
+                "",
+            ]
+            # TODO(truncation)：預設摘錄「尾端 30 則 + 每則 500 字元」可能截掉
+            # 有價值的上下文；本次主線是 idempotency，暫以 --full 提供完整匯出，
+            # 更聰明的摘錄策略（依 usefulness 訊號挑段落）留待後續。
+            # （episode 匯入路徑自 A1 起改走上面的縮減 render——tool 保留
+            # tool_name＋截斷、user/assistant 完整保留。）
+            message_events = [e for e in events if e["type"] == "message"]
+            if not full:
+                message_events = message_events[-max_excerpt_events:]
+            for event in message_events:
+                excerpt = event["content"].strip().replace("\r\n", "\n")
+                if not full and len(excerpt) > 500:
+                    excerpt = excerpt[:500] + "…（截斷）"
+                lines.append(f"### [{event['timestamp']}] {event['role']}")
+                lines.append("")
+                lines.append(excerpt or "(空白內容)")
+                lines.append("")
         lines.append("---")
         lines.append("由 hermes/session_adapter/adapter.py（read-only importer）產生，")
         lines.append("等待 consolidate-memory skill 整併；來源 session 資料未被修改。")
