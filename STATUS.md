@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-07-29
+**最後更新**:2026-07-30
 
 ---
 
@@ -35,6 +35,14 @@
   gpt-5.6-terra,產出已整併進 memory 正本)。架構拍板:**lane 憑證單一存放
   於 Windows 側 hermes,WSL 經 interop 呼叫 Windows hermes.exe**
   (`scripts/dispatch_domain.py` 平台感知解析 + wslpath 轉譯)。
+- **記憶生命週期已完整閉環(07-30 拍板+落地,提案正本
+  [docs/memory-lifecycle-proposal.md](docs/memory-lifecycle-proposal.md) v1.1)**:
+  進=bridge episode capture 擴充到 **named profile**(A1,已部署、cutover
+  `2026-07-30T09:15:55Z`,tool 輸出縮減至 500 字元/則、敏感偵測在縮減前);
+  用=recall 統計(`scripts/log_recall.py` → `logs/recall_log.jsonl`,決策
+  程序步驟 1.5 埋點);升=高頻條目 MEMORY.md 索引分層;出=90 天零 recall
+  自動歸檔 `memory/.archive/`(豁免:拍板決策/事故教訓/feedback;冷啟動
+  保護=log 覆蓋滿 90 天前不汰選)。檢視掛既有 daily-memory-check,零新排程。
 - **Streamlit 並行觀察期自 2026-07-24 起算**(觀察一個自然使用週期後決定退役;
   期間 `dashboard/app.py` 零改動、標 deprecated)。
 - **Hermes-agent repo 兩側(Windows/WSL)已對齊且防重演已落地**:兩側 HEAD 皆
@@ -47,33 +55,37 @@
 
 ## 2. 上一個 session 做了什麼
 
-(2026-07-29,自上次快照 `0e3761b` 以來共 4 個 commit + 本收尾 commit;
-主軸=把「headless 用非 Claude 模型」從失敗修到端到端通,逐層共修五關。)
+(2026-07-30,自上次快照 `565970c` 以來共 5 個 commit + 本收尾 commit,
+皆已 push;主軸=named profile session 讀取實證 → 記憶生命週期拍板到
+全面落地。)
 
-- **lane 通道前台實測**:gptcoding(gpt-5.6-sol,訂閱內 $0)與 nemocoding
-  (nemotron 免費層)一次通;發現 `OPENROUTER_API_KEY` 實際依賴 profile
-  credential pool 而非呼叫端 shell env。
-- **headless 呼叫鏈五層修復**(`5ddd6e7`/`77de4a8` + WSL 側 settings):
-  (1) intelligence.md 補 Bash 工具+跨平台路徑+route_model 過時描述校正;
-  (2) WSL 部署複本過舊——親自跑 `sync_to_wsl.sh --apply`(停/啟服務由
-  使用者經 webui 服務控制鍵操作,新功能首次實戰);(3) dispatch_domain
-  hermes 解析加 `~/.local/bin` fallback(非 login shell PATH 問題);
-  (4) **架構拍板:WSL 經 interop 呼叫 Windows hermes.exe**(憑證單一存放;
-  平台感知解析+凍結 interop 路徑+wslpath 轉譯,WSL 實測 exit 0);
-  (5) WSL 側 `.claude/settings.json` 加兩條最窄 Bash 白名單(僅
-  dispatch_domain 入口;settings 為 sync 排除項,故直接改 WSL 側)。
-  headless 誤診糾正兩則:WSL venv 其實是好的;「寫不進 memory 正本」是
-  架構防線正常運作,不開權限。
-- **sync script 順序缺口修正**(`36f2c58`):部署前 dry-run 抓到 Phase 1
-  合併會把已 consolidation 的檔案重新塞回 Windows inbox——重排為先清理後
-  合併,dry-run 輸出忠實等於 apply 行為。
-- **Telegram 入口端到端里程碑 + 整併**(`3f11e3b`):使用者從 Telegram 重發
-  原任務,intelligence 經 `hermes-intelligence` lane 以 gpt-5.6-terra 完成
-  研究(12 次 API 呼叫,訂閱內 $0);knowledge 跑 consolidate-memory 把
-  產出整併進正本(新 snapshot + skill-catalog reference,inbox 清空)。
-- **過程中確認的 session resume 行為**:同 thread 24h 內 resume 同一
-  session(`hermes/db.py`),bot 兩度以過時世界觀回覆——已列入 §3 待辦。
-- 測試終值:scripts 96(dispatch_domain 51)、安全檢查 12/12。
+- **named profile session 讀取路徑實證**:跨庫 FTS 定位使用者的 gptcoding
+  Telegram 對話(「Gemini 即時翻譯字幕系統設計」,在 WSL 側主 state.db、
+  `profile_name` 欄標記;live db 用快照複製避鎖),蒸餾入正本
+  `memory/project_live-translate-vmix-caption-design.md`(`986bb1e`,標注
+  設計討論尚未開工)。
+- **記憶生命週期提案+四項拍板**(planning 起草,
+  [memory-lifecycle-proposal](docs/memory-lifecycle-proposal.md) v1.1):
+  汰選=**全自動歸檔**(豁免:拍板決策/事故教訓/feedback;冷啟動保護)、
+  A1 核准+先查證(inactivity 72h 維持)、升格=C-a 索引分層、B1 recall
+  log 核准(接受方向性下限)。關鍵盤點:default profile 的自動蒸餾**本來
+  就存在**,真缺口=named 全漏/recall 零統計/記憶只進不出。
+- **第一批落地**(`105eedb`):`scripts/log_recall.py`(11 測試)+決策程序
+  步驟 1.5 埋點+`consolidation_policy.yaml` `retention:` 區塊+
+  daily-memory-check prompt 第 4 步+SKILL.md retention 指引;已 sync 兩側。
+- **A1 落地**(`55b6639`):bridge 三件組+adapter 多 profile 擴充——
+  namespace `hermes/<profile>:`啟用(裸形式恆等 default 零 migration)、
+  主 db 依 `profile_name` 分流+四顆 profile db 納掃、per-profile cutover、
+  WAL symlink 修正、tool 縮減(500 字元/則,敏感偵測在縮減前)。
+  查證發現:WSL `~/.hermes/state.db` 是 symlink 指向 Windows 主 db(兩側
+  同一顆);lane session 83–94% 是 tool 輸出。
+- **部署中抓到既有 bug 並修**(`b315d71`):reconcile 的 cursor_recovery
+  是無條件空重放,健康與否無從分辨——改為只在 cursor 真落後時動作,
+  「跑兩次第二次歸零」成為機械判準(WSL 實證通過)。
+- **A1 上線**(`8860034`):runbook §7 步驟 1–9 全過,四 profile cutover=
+  `2026-07-30T09:15:55Z`,兩側 dry-run 皆零歷史湧入(49 筆歷史 episode
+  正確被擋)。
+- 測試終值:hermes 483、scripts 107、皆綠。
 
 ## 3. 卡住/未決的問題
 
@@ -98,11 +110,16 @@
   環境在 session 外被修復後,舊 session 仍自信輸出過時結論(bot 兩度以
   已修復/已刪除的舊狀態回覆)。修法方向:Telegram 端 `/reset` 指令清
   thread session、或環境變更時主動失效。待議。
-- **lane session 觀測缺口(07-29 新增)**:webui「Hermes Sessions」view
-  只讀預設 profile,**看不到 lane profile(intelligence/gptcoding 等)的
-  session**;lane 執行的完整 transcript 在
-  `%LOCALAPPDATA%\hermes\profiles\<name>\` 的 state.db,目前無現成觀測
-  介面(envelope result 與 usage.json 可得,中間過程要現場挖)。待議。
+- **lane session 觀測缺口(07-29 新增;07-30 已解一半)**:讀取路徑已
+  實證(profile state.db 快照複製+FTS 搜尋,手動可挖)且 A1 上線後
+  named session 會自動進記憶;剩 webui「Hermes Sessions」view 仍只讀
+  預設 profile 的呈現層缺口。待議,優先級降。
+- **A1 首輪觀察待做(07-30 新增,runbook §7 步驟 10)**:明日 08:05 首輪
+  真實掃描後檢視 named episode 的 frontmatter(`hermes/<profile>:`
+  event_id、`source_profile:`)與 consolidation 對 lane 雜訊(tool 縮減後)
+  的抵抗力;不夠再議提案拍板項 5(摘要步)。
+- **retention 冷啟動中**:recall log 自 07-30 起算,覆蓋滿 90 天(約 10 月底)
+  前 retention review 只做升格不汰選——這是設計,不是故障。
 - **keepalive 第二階段(watchdog+toast)拍板暫緩**:殘餘風險=WSL 本身壞掉
   時 tick 靜默重試,只剩 webui 紅燈被動面(知情接受;真發生再升級)。
 - **bridge-scanner/pipeline/notifier 的 systemd 單元**:repo 有、WSL 沒裝
@@ -136,9 +153,11 @@
   亮橙=有客製沒 push,立刻處理;sidebar 常駐燈紅=先查
   `schtasks /query /tn HermesWslKeepAlive`(自癒最壞 15 分鐘,超過就是
   WSL 本身的問題)。
+- **A1 首輪觀察(明日 08:05 後的第一件事)**:見 §3「A1 首輪觀察待做」——
+  下個 session 開場若已過首輪窗口,主動檢視並回報。
 - **lane 通道已全通,可開始真實使用**:前台直接指定(「用 GPT 做 X」),
-  Telegram 入口亦可;累積幾次真實 lane 任務的品質觀察,供日後「依任務
-  類型自動選模型」規則引擎的設計依據。
+  Telegram 入口亦可;named profile 對話現在會自動進記憶(最壞 3 天),
+  累積真實使用觀察,供日後「依任務類型自動選模型」規則引擎的設計依據。
 - 次優先:拍板 telegram-cos-realtime-proposal(**併入 Telegram 出口格式
   缺口一起議**);排程表「未安裝→n/a」小措辭修正;bridge 三單元雙軌
   確認;env 變數移除(使用者手動)。
