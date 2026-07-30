@@ -73,11 +73,14 @@ episodes:
   inactivity_hours: 72
   tool_output_max_chars: 500
   profiles:
+    # per-profile cutover 於 2026-07-30 部署時寫入(runbook §7 步驟 7,
+    # 取翻上線當下 UTC 時刻)。此值之前的訊息永遠不擷取;不得往前調補掃
+    # (要回溯個案用 checkpoint/to-inbox 路徑,見 runbook 特別警告)。
     financialresearch:
-      episode_cutover: null
+      episode_cutover: "2026-07-30T09:15:55Z"
     gptcoding:
-      episode_cutover: null
+      episode_cutover: "2026-07-30T09:15:55Z"
     intelligence:
-      episode_cutover: null
+      episode_cutover: "2026-07-30T09:15:55Z"
     nemocoding:
-      episode_cutover: null
+      episode_cutover: "2026-07-30T09:15:55Z"
