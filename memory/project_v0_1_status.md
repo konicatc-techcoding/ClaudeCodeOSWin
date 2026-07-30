@@ -110,6 +110,14 @@ key 因無任何殘留參照而完全移除。上方 2026-07-04 那條記錄的�
 bulk_research（nemotron）、engineering→complex_coding（GPT-5.5）」對照自此日起
 已不成立，見 commit `b910312`。
 
+**2026-07-29（首次經 hermes lane 端到端完成非 Claude 模型的 domain 任務）**：
+`scripts/dispatch_domain.py` 經 `hermes-intelligence` lane（profile `intelligence`，
+實際 provider/model `openai-codex`/`gpt-5.6-terra`）完成 intelligence domain 的
+market_research 任務（execution_id `ai-agent-research-20260729T120000`、
+exit_status success、cost included 訂閱內、total tokens 359,456／12 api_calls）。
+產出的研究報告已整併為正本 [ai_agent_adoption_landscape_2026-07.md](ai_agent_adoption_landscape_2026-07.md)。
+依 CoS 分派脈絡註記：這是本系統第一次由 Telegram 入口端到端完成非 Claude 模型任務的產出。
+
 尚未動工：
 - Model Router 的 MCP server 版本（目前 script adapter 夠用）
 - Dashboard 要不要開放 Telegram 以外的投遞管道
