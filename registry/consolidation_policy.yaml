@@ -94,4 +94,29 @@ skill_promotion:
   # recall-first 召回並複用達此次數的解法/程序，knowledge 在 consolidation
   # 回報中列為 SKILL.md 候補（升級不自動發生，人在迴路，skill 實作分派 engineering）。
   min_recall_reuse: 3
-  # MVP 階段複用次數由 knowledge 在 consolidation 時人工盤點，無自動計數器。
+  # 2026-07-30 起計數來源＝logs/recall_log.jsonl（memory-lifecycle 提案 B1），
+  # 取代先前「knowledge 人工盤點」的 MVP 做法；log 為 best-effort 下限值。
+
+retention:
+  # Memory 生命週期的定期檢視（memory-lifecycle 提案 2026-07-30 拍板）。
+  # 排程載體＝既有 daily-memory-check（不新增 timer）：距上次 review 超過
+  # review_interval_days 時，在整併之外加做一次 retention review，執行者 knowledge。
+  review_interval_days: 30
+  # 汰選：stale_threshold_days 內零 recall（依 logs/recall_log.jsonl 統計，
+  # 兩側 log 併集）→ 直接歸檔 memory/.archive/（搬檔＋自 MEMORY.md 索引移除），
+  # review 報告列出已歸檔清單供使用者事後知悉。拍板檔位＝全自動歸檔
+  # （不逐項詢問；可搬回，git 歷史為最終保險）。
+  stale_threshold_days: 90
+  action: auto_archive          # auto_archive | candidate_list | delete（拍板＝auto_archive）
+  archive_dir: memory/.archive
+  # 冷啟動保護：recall log 覆蓋天數不足 stale_threshold_days 前不做汰選
+  # （log 是方向性下限，零 recall 可能只是沒被記到）。
+  cold_start_guard: true
+  # 豁免清單（永不進汰選候選）：
+  exempt:
+    - substantive_decision      # 拍板決策
+    - incident_lesson           # 安全/事故教訓
+    - feedback_all              # feedback_* 全型別（低頻但關鍵的行為糾正）
+  # 升格（C-a）：高頻 recall 條目在 MEMORY.md 索引置前/標注「高頻」區段；
+  # 正本檔不動。CLAUDE.md 常駐僅留給走既有 Semantic→Procedural 程序的行為規則。
+  promotion: index_tiering

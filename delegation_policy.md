@@ -29,6 +29,8 @@ CoS 收到任何任務時，依序執行：
 
     **為什麼要強制且可稽核**：跟這份政策存在的理由同源（見「為什麼需要這份政策」）——模型會用「這任務我直接從頭想比較快」的合理直覺跳過查記憶。把 recall 做成必講的一行，讓「有沒有查、查到什麼」變成可預期、可稽核，而不是取決於當下模型想不想查。
 
+    **recall 統計落地（2026-07-30 起，memory-lifecycle 提案 B1）**：講出 recall 結果那一行之後，執行 `scripts/log_recall.py` 把這次結果 append 進 `logs/recall_log.jsonl`（`--entry interactive|headless --result hit_skill|hit_memory|miss [--hit-ids ...] [--task-hint ...]`；同時命中 skill 與 memory 時 result 擇主要者、hit-ids 全列）。此統計餵給 retention review（升格/汰選依據，見 `registry/consolidation_policy.yaml` 的 `retention:` 區塊）。log 是 best-effort：script 失敗不阻斷任務，繼續往下走即可，但不得因嫌麻煩而略過呼叫。
+
     **與 `orientation_read`／`depends_on` 的關係**：輕量 recall（掃 MEMORY.md 索引 + skill 清單）屬於 `orientation_read` 既有範圍——只用來決定「複用什麼、帶什麼上下文去分派」，一樣受 orientation_read 邊界約束：不能拿召回內容直接把領域的實質工作做掉。若命中的內容需要 `knowledge` 去整併／解讀完整記憶、或要在既有規劃上疊加，就照下方「領域間依賴」先分派 `knowledge` 取上下文——recall-first 本質上就是把「先找 knowledge 補脈絡」推廣到所有任務的前置動作。
 2. **查 Owner**：
    - 屬於 `direct_categories` → CoS 自己處理。

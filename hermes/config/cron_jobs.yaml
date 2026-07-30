@@ -30,4 +30,14 @@ jobs:
       注意：步驟 1–3 的 N-gate 判斷只讀取中繼資料（政策檔、inbox 檔案清單與
       frontmatter），不修改 memory/ 底下任何檔案；只有達門檻後由 knowledge
       執行的整併才會動到檔案。
+
+      4. Retention review（2026-07-30 起，memory-lifecycle 提案）：讀政策檔
+         retention 區塊；若距上次 retention review 超過 review_interval_days
+         （上次時間看 memory/.archive/ 內 review 報告檔的最新日期；目錄或報告
+         不存在＝從未跑過），且 logs/recall_log.jsonl 的覆蓋天數已滿
+         stale_threshold_days（cold_start_guard），則在整併之外分派 knowledge
+         依 consolidate-memory skill 的 retention review 指引執行：統計 recall、
+         高頻條目做 MEMORY.md 索引分層、stale 且非豁免條目自動歸檔
+         memory/.archive/ 並產出 review 報告。條件不滿足時記一行「retention
+         review 未到期/冷啟動保護中」即可，不分派。
     max_attempts: 3
