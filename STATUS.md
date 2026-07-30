@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-07-28
+**最後更新**:2026-07-29
 
 ---
 
@@ -29,6 +29,12 @@
   三天(常駐燈號首次抓到真實事故);現有 TimeTrigger PT15M backstop,死了
   最壞 15 分鐘自動拉回(實測零人工介入復活整條鏈)。提案正本
   [docs/wsl-keepalive-hardening-proposal.md](docs/wsl-keepalive-hardening-proposal.md) v1.1。
+- **非 Claude lane 通道已於兩個入口端到端驗證有效(07-29)**:前台四條 lane
+  皆通(gptcoding/nemocoding 實測);headless(Telegram 入口)經五層修復後
+  首次完成真實非 Claude 任務(intelligence → `hermes-intelligence` lane →
+  gpt-5.6-terra,產出已整併進 memory 正本)。架構拍板:**lane 憑證單一存放
+  於 Windows 側 hermes,WSL 經 interop 呼叫 Windows hermes.exe**
+  (`scripts/dispatch_domain.py` 平台感知解析 + wslpath 轉譯)。
 - **Streamlit 並行觀察期自 2026-07-24 起算**(觀察一個自然使用週期後決定退役;
   期間 `dashboard/app.py` 零改動、標 deprecated)。
 - **Hermes-agent repo 兩側(Windows/WSL)已對齊且防重演已落地**:兩側 HEAD 皆
@@ -41,36 +47,33 @@
 
 ## 2. 上一個 session 做了什麼
 
-(2026-07-27~28,自上次快照 `116c296` 以來共 4 個 commit + 本收尾 commit,
-皆已 push。)
+(2026-07-29,自上次快照 `0e3761b` 以來共 4 個 commit + 本收尾 commit;
+主軸=把「headless 用非 Claude 模型」從失敗修到端到端通,逐層共修五關。)
 
-- **服務控制寫入部分核准+落地**(`65f53ca`):四項拍板(核准實作、宿主併
-  bridge 8787 白名單第二群組、白名單僅 worker/telegram 兩 service 不含 timer、
-  僅服務層級不做 `wsl --terminate`);§2.4 start blocker 經查證解除(keepalive
-  只保 distro,不拉回被 stop 的服務),stop 語意定案並明示於 UI。主 session
-  經 UI 真實 restart 驗證通過(二次確認 → exit=0 → audit → MainPID 320→597
-  → 燈號收斂)。安全檢查新增第 12 項(18 條斷言)。
-- **keepalive 三天靜默停擺被抓到+補強落地**(`872a666`):restart 驗證前置
-  檢查發現 `HermesWslKeepAlive` 自 07-24 事故日起失效(Last Result=1,
-  restart-on-failure 用盡放棄)——常駐燈號紅燈首次抓到真實事故。當日拍板
-  三項(第一階段 A+B 核准 15 分鐘、第二階段 watchdog+toast 暫緩、
-  `wsl --shutdown` 會被復活知情接受),主 session 親自執行 XML 重註冊並
-  實測:`wsl --terminate` → tick 零人工介入復活整條鏈。**兩個 Task Scheduler
-  實測教訓**(已記 README 與 auto-memory):LogonTrigger 的 Repetition 要等
-  下次登入才上膛(backstop 必須掛 TimeTrigger);RestartOnFailure 不保
-  `schtasks /run` 手動實例。
-- **個別服務燈號 + sidebar UI 調整**(`5527ec4`):ServiceControl 每列加
-  個別燈(與聚合燈同源共享 store,單一 30 秒輪詢實測無加倍;暖機黃燈繼承
-  data_resident 判斷)、sidebar 灰字調亮、操作鍵改 inline-SVG 圖示
-  (aria-label 全文保留,二次確認維持全文字)。
-- **總覽頁 systemd 誤報修正**(`2db94c3`):根因=`get_systemd_status()` 跑
-  裸 `systemctl`,Windows 側必失敗 → 全顯「未安裝」。新增
-  `dashboard/data_systemd_wsl.py`(複用 `_distro_state()` 守門不喚醒 distro、
-  凍結常數、三分支誠實狀態);timers 改 `--output=json`(文字版右對齊單空格
-  會把 2+ 空格切欄切壞——教訓已固定為負面測試)。順手修掉
-  `includes("active")` 誤判 `inactive` 的舊 bug。實測總覽四卡全「運作中」、
-  排程表三 timer 真實觸發時間。
-- 測試終值:dashboard 218(+21)、webui 125/125、安全檢查 12/12。
+- **lane 通道前台實測**:gptcoding(gpt-5.6-sol,訂閱內 $0)與 nemocoding
+  (nemotron 免費層)一次通;發現 `OPENROUTER_API_KEY` 實際依賴 profile
+  credential pool 而非呼叫端 shell env。
+- **headless 呼叫鏈五層修復**(`5ddd6e7`/`77de4a8` + WSL 側 settings):
+  (1) intelligence.md 補 Bash 工具+跨平台路徑+route_model 過時描述校正;
+  (2) WSL 部署複本過舊——親自跑 `sync_to_wsl.sh --apply`(停/啟服務由
+  使用者經 webui 服務控制鍵操作,新功能首次實戰);(3) dispatch_domain
+  hermes 解析加 `~/.local/bin` fallback(非 login shell PATH 問題);
+  (4) **架構拍板:WSL 經 interop 呼叫 Windows hermes.exe**(憑證單一存放;
+  平台感知解析+凍結 interop 路徑+wslpath 轉譯,WSL 實測 exit 0);
+  (5) WSL 側 `.claude/settings.json` 加兩條最窄 Bash 白名單(僅
+  dispatch_domain 入口;settings 為 sync 排除項,故直接改 WSL 側)。
+  headless 誤診糾正兩則:WSL venv 其實是好的;「寫不進 memory 正本」是
+  架構防線正常運作,不開權限。
+- **sync script 順序缺口修正**(`36f2c58`):部署前 dry-run 抓到 Phase 1
+  合併會把已 consolidation 的檔案重新塞回 Windows inbox——重排為先清理後
+  合併,dry-run 輸出忠實等於 apply 行為。
+- **Telegram 入口端到端里程碑 + 整併**(`3f11e3b`):使用者從 Telegram 重發
+  原任務,intelligence 經 `hermes-intelligence` lane 以 gpt-5.6-terra 完成
+  研究(12 次 API 呼叫,訂閱內 $0);knowledge 跑 consolidate-memory 把
+  產出整併進正本(新 snapshot + skill-catalog reference,inbox 清空)。
+- **過程中確認的 session resume 行為**:同 thread 24h 內 resume 同一
+  session(`hermes/db.py`),bot 兩度以過時世界觀回覆——已列入 §3 待辦。
+- 測試終值:scripts 96(dispatch_domain 51)、安全檢查 12/12。
 
 ## 3. 卡住/未決的問題
 
@@ -84,7 +87,22 @@
   (b) 白名單**不含 timer**(07-27 拍板),階段二要用 timer 需回
   service-control 提案擴充重審。
 - **一份草案待拍板**:[telegram-cos-realtime-proposal](docs/telegram-cos-realtime-proposal.md)
-  (`/cos` 混合模式)。
+  (`/cos` 混合模式)。**建議議程順帶納入 07-29 新發現的 Telegram 出口
+  格式缺口**(見下項)。
+- **Telegram 出口格式缺口(07-29 新增)**:CoS 輸出 GitHub markdown,
+  Telegram 不渲染,使用者看到原始 `##`/`**` 符號。修法兩層次:便宜版=
+  invoke 包裝層對 Telegram 來源任務指示純文字輸出;完整版=adapter 端
+  markdown→Telegram HTML 轉換。建議併入 telegram-cos-realtime-proposal 拍板。
+- **headless session 記憶無失效機制(07-29 新增,已兩次實際發作)**:
+  同 thread 24h 內 `--resume` 同一 session(`hermes/db.py` sessions 表),
+  環境在 session 外被修復後,舊 session 仍自信輸出過時結論(bot 兩度以
+  已修復/已刪除的舊狀態回覆)。修法方向:Telegram 端 `/reset` 指令清
+  thread session、或環境變更時主動失效。待議。
+- **lane session 觀測缺口(07-29 新增)**:webui「Hermes Sessions」view
+  只讀預設 profile,**看不到 lane profile(intelligence/gptcoding 等)的
+  session**;lane 執行的完整 transcript 在
+  `%LOCALAPPDATA%\hermes\profiles\<name>\` 的 state.db,目前無現成觀測
+  介面(envelope result 與 usage.json 可得,中間過程要現場挖)。待議。
 - **keepalive 第二階段(watchdog+toast)拍板暫緩**:殘餘風險=WSL 本身壞掉
   時 tick 靜默重試,只剩 webui 紅燈被動面(知情接受;真發生再升級)。
 - **bridge-scanner/pipeline/notifier 的 systemd 單元**:repo 有、WSL 沒裝
@@ -99,11 +117,16 @@
   `pip install -e`」**的依賴落後情形,要涵蓋需另案做「依賴同步狀態」欄位。
 - **Streamlit 退役決策**:待並行觀察期(2026-07-24 起)滿一個自然使用週期後拍板。
 - **env 變數清理待使用者手動**:建議移除 `GEMINI_API_KEY`/`GOOGLE_API_KEY`/
-  `ANTHROPIC_API_KEY`(防重撿);`OPENROUTER_API_KEY` 為 nemocoding 必需不可移除。
+  `ANTHROPIC_API_KEY`(防重撿)。`OPENROUTER_API_KEY`:07-29 實測 shell
+  unset 時 nemocoding 仍成功(key 已在 profile credential pool),「不可
+  移除」可能可放寬——但 pool 的 source 標記仍是 `env:OPENROUTER_API_KEY`,
+  未確認 pool 是否會回頭讀 env 前,先保守不動。
 - UI 欄位名稱可能再調整(使用者提出後隨時小改)。
 - 舊項沿用:07-19 排程首次自動觸發結果待確認;「依任務類型自動選模型」規則引擎
   未實作;Hermes UI 設定維護(profile/allowlist 手改 config.yaml);Tavily key
-  明文存放;WSL 部署複本需 `scripts/sync_to_wsl.sh` 手動同步。
+  明文存放;WSL 部署複本需 `scripts/sync_to_wsl.sh` 手動同步(07-29 已實跑
+  兩輪,流程順;注意 `.claude/settings*.json` 是 sync 排除項,WSL 側權限
+  白名單要單獨維護)。
 - (低優先)bridge/PTY 屬安全敏感面,可考慮 `/code-review ultra` 補一道審查。
 
 ## 4. 下一步(可直接執行的第一步)
@@ -113,6 +136,9 @@
   亮橙=有客製沒 push,立刻處理;sidebar 常駐燈紅=先查
   `schtasks /query /tn HermesWslKeepAlive`(自癒最壞 15 分鐘,超過就是
   WSL 本身的問題)。
-- 次優先:排程表「未安裝→n/a」小措辭修正;拍板
-  telegram-cos-realtime-proposal 或確認 bridge 三單元雙軌問題;
-  env 變數移除(使用者手動);確認 07-19 排程首次自動觸發結果。
+- **lane 通道已全通,可開始真實使用**:前台直接指定(「用 GPT 做 X」),
+  Telegram 入口亦可;累積幾次真實 lane 任務的品質觀察,供日後「依任務
+  類型自動選模型」規則引擎的設計依據。
+- 次優先:拍板 telegram-cos-realtime-proposal(**併入 Telegram 出口格式
+  缺口一起議**);排程表「未安裝→n/a」小措辭修正;bridge 三單元雙軌
+  確認;env 變數移除(使用者手動)。
