@@ -1420,6 +1420,129 @@ class TestReconcileCursorRecovery(ReconcileEpisodeTestBase):
         self.assertFalse(self.bridge_db.exists())
 
 
+class TestReconcileCursorRecoveryIdempotence(ReconcileEpisodeTestBase):
+    """2026-07-30 A1 部署驗證發現（runbook §7 步驟 4 暫停的根因）：健康 db
+    重跑 reconcile 不得再列 `cursor_recovery`。
+
+    根因（2.4d-3 起的既有行為，非 A1 namespace 迴歸——見本類最後一測）：
+    recovery 迴圈對每個有落地 episode 檔的 session **無條件** append
+    `cursor_recovery`，而實際的 cursor 前進幾乎總已由 create_episode 的
+    插入路徑在同 transaction 完成（提案 §1.2）——所以該動作幾乎恆是
+    `advanced=False` 的重放，且 advanced 只藏在結果 dict、CLI 輸出看不到：
+    健康 db 連跑兩次會永遠列出同樣的 recovery 動作（部署側 4 筆×2 的現象
+    即此）。修正後：動作只在 cursor 真的落後於落地檔目標（如
+    bridge_cursors 遺失／部分重建）時出現並執行，健康 db 重跑可用
+    「輸出零 cursor_recovery」機械驗證 no-op。"""
+
+    def _wipe_cursors(self):
+        """模擬 bridge_cursors 遺失（部分重建情境——recovery 動作唯一該
+        出現的場合）。"""
+        with contextlib.closing(sqlite3.connect(self.bridge_db)) as conn:
+            conn.execute("DELETE FROM bridge_cursors")
+            conn.commit()
+
+    def test_rerun_on_healthy_db_emits_zero_cursor_recovery(self):
+        """核心重現（對應部署現象）：mock 已歸檔 inbox＋既有 bridge_state，
+        連跑兩次——第二次必須零 cursor_recovery、只剩 last_seen 心跳。"""
+        self._write_episode_file(self.processed, "sess-i1", 1, 5, episode_seq=1)
+        self._write_episode_file(self.failed, "sess-i2", 3, 9, episode_seq=1)
+        first = self.reconcile(seen_at=T1)
+        self.assertEqual(
+            [a for a in first["actions"] if a["action"] == "cursor_recovery"],
+            [], "首跑的 cursor 前進由 create_episode 插入路徑完成（同 "
+                "transaction）——recovery 迴圈不得重放同一件事")
+        self.assertEqual(self.cursor("sess-i1")["last_captured_message_id"], 5)
+        self.assertEqual(self.cursor("sess-i2")["last_captured_message_id"], 9)
+
+        second = self.reconcile(seen_at=T2)
+        self.assertEqual(
+            [a for a in second["actions"] if a["action"] == "cursor_recovery"],
+            [], "健康 db 重跑：零 cursor_recovery（runbook 的 no-op 預期，"
+                "自此可用輸出機械驗證）")
+        self.assertEqual({a["action"] for a in second["actions"]},
+                         {"touch_last_seen"},
+                         "第二次只剩 last_seen 心跳（既有語義，不是狀態變更）")
+        self.assertEqual(self.cursor("sess-i1")["last_captured_message_id"], 5)
+        self.assertEqual(self.cursor("sess-i2")["last_captured_message_id"], 9)
+
+    def test_recovery_emitted_only_when_cursor_actually_lost(self):
+        """recovery 動作唯一該出現的場合：列還在、cursor 遺失（部分重建）
+        ——此時出現一次真寫入（advanced=True），下一輪又歸零。"""
+        self._write_episode_file(self.processed, "sess-i3", 1, 5, episode_seq=1)
+        self.reconcile(seen_at=T1)
+        self._wipe_cursors()
+        self.assertIsNone(self.cursor("sess-i3"))
+        second = self.reconcile(seen_at=T2)
+        rec = [a for a in second["actions"] if a["action"] == "cursor_recovery"]
+        self.assertEqual(len(rec), 1, "cursor 真的遺失：recovery 動作出現")
+        self.assertTrue(rec[0]["advanced"], "而且是真寫入")
+        self.assertEqual(self.cursor("sess-i3")["last_captured_message_id"], 5)
+        third = self.reconcile(seen_at=T2)
+        self.assertEqual(
+            [a for a in third["actions"] if a["action"] == "cursor_recovery"],
+            [], "恢復完成後再重跑：又歸零")
+
+    def test_dry_run_prediction_matches_real_run(self):
+        """dry-run 與真實模式判定一致（插入路徑的 cursor 前進用
+        predicted_cursor 補）：全新目錄 dry-run 不預告 recovery（真跑也不會
+        列）；cursor 遺失時 dry-run 預告、真跑執行、之後兩者都歸零。
+        dry-run 全程零寫入。"""
+        self._write_episode_file(self.processed, "sess-i4", 1, 5, episode_seq=1)
+        dry1 = self.reconcile(dry_run=True)
+        self.assertEqual(
+            [a for a in dry1["actions"] if a["action"] == "cursor_recovery"],
+            [], "將插入的 episode 會自帶 cursor 前進——dry-run 不得預告"
+                "真跑不會發生的動作")
+        self.assertIn("insert_episode_imported",
+                      [a["action"] for a in dry1["actions"]])
+        self.assertFalse(self.bridge_db.exists(), "dry-run 不建檔")
+
+        self.reconcile(seen_at=T1)
+        self._wipe_cursors()
+        dry2 = self.reconcile(dry_run=True)
+        self.assertEqual(
+            len([a for a in dry2["actions"] if a["action"] == "cursor_recovery"]),
+            1, "cursor 遺失：dry-run 預告將要恢復")
+        self.assertIsNone(self.cursor("sess-i4"), "dry-run 不真的恢復")
+        real = self.reconcile(seen_at=T2)
+        self.assertEqual(
+            len([a for a in real["actions"] if a["action"] == "cursor_recovery"]),
+            1)
+        dry3 = self.reconcile(dry_run=True)
+        self.assertEqual(
+            [a for a in dry3["actions"] if a["action"] == "cursor_recovery"],
+            [], "已恢復：dry-run 不再預告")
+
+    def test_namespaced_recovery_idempotent_no_a1_regression(self):
+        """排除部署現象的懷疑方向 1（A1 namespace 迴歸）：named profile 檔的
+        cursor 寫入與重跑比對用同一組 (source_profile, session_id)——健康
+        重跑零 recovery；cursor 遺失時 recovery 寫回同一組 key。"""
+        name = adapter_module.HermesSessionAdapter.episode_inbox_filename(
+            "sess-ni", 1, 5)
+        (self.processed / name).write_text(
+            TestA1ReconcileNamespaced._named_episode_text(
+                "sess-ni", 1, 5, "gptcoding"),
+            encoding="utf-8")
+        self.reconcile(seen_at=T1)
+        second = self.reconcile(seen_at=T2)
+        self.assertEqual(
+            [a for a in second["actions"] if a["action"] == "cursor_recovery"],
+            [], "named profile 檔健康重跑零 cursor_recovery——寫入與比對的 "
+                "(profile, sid) 一致，無 namespace 迴歸")
+        self._wipe_cursors()
+        third = self.reconcile(seen_at=T2)
+        rec = [a for a in third["actions"] if a["action"] == "cursor_recovery"]
+        self.assertEqual(len(rec), 1)
+        self.assertEqual(rec[0]["source_profile"], "gptcoding")
+        cur = bridge_state.get_cursor("sess-ni", source_profile="gptcoding",
+                                      db_path=self.bridge_db)
+        self.assertEqual(cur["last_captured_message_id"], 5)
+        self.assertEqual(
+            [a for a in self.reconcile(seen_at=T2)["actions"]
+             if a["action"] == "cursor_recovery"],
+            [], "恢復後再重跑：歸零")
+
+
 class TestReconcileProfileFailClosed(ReconcileEpisodeTestBase):
     """矩陣 #27：reconcile 側非 default profile fail-closed（§6.1）。"""
 
@@ -1543,7 +1666,11 @@ class TestReconcileEpisodeMetadataFailClosed(ReconcileEpisodeTestBase):
         self.assertEqual(rows["hermes:sess-clean:1..8"]["import_status"], "imported")
         recovery_actions = {a["session_id"]: a["action"] for a in result["actions"]
                            if a["action"] in ("cursor_recovery", "cursor_recovery_fail_closed")}
-        self.assertEqual(recovery_actions["sess-clean"], "cursor_recovery")
+        # 2026-07-30 冪等性修正：乾淨 session 的 cursor 已由 create_episode
+        # 插入路徑推進（上面已斷言 =8），recovery 迴圈不再重放動作——
+        # 這裡只剩壞 session 的 fail-closed 標記。
+        self.assertNotIn("sess-clean", recovery_actions,
+                         "cursor 已由插入路徑到位：不列 cursor_recovery")
         self.assertEqual(recovery_actions["sess-mixed"], "cursor_recovery_fail_closed")
 
     # ---- E：合法 episode（既有行為回歸確認） ----
@@ -1560,9 +1687,12 @@ class TestReconcileEpisodeMetadataFailClosed(ReconcileEpisodeTestBase):
         self.assertEqual(action["action"], "insert_episode_imported")
         cursor = self.cursor("sess-ok")
         self.assertEqual(cursor["last_captured_message_id"], 5)
-        recovery = next(a for a in result["actions"]
-                        if a["action"] == "cursor_recovery" and a["session_id"] == "sess-ok")
-        self.assertEqual(recovery["last_captured_message_id"], 5)
+        # 2026-07-30 冪等性修正：cursor 前進由 create_episode 插入路徑完成
+        # （上一行已斷言值），recovery 迴圈不再對同一件事重放動作。
+        self.assertEqual(
+            [a for a in result["actions"]
+             if a["action"] == "cursor_recovery" and a["session_id"] == "sess-ok"],
+            [])
 
     # ---- F：legacy 無 capture_trigger（不被誤標 metadata incomplete） ----
 
@@ -2013,12 +2143,14 @@ class TestA1ReconcileNamespaced(ReconcileEpisodeTestBase):
         self.assertEqual(rows[eid]["source_profile"], "gptcoding")
         named_cursor = bridge_state.get_cursor(
             "sess-n", source_profile="gptcoding", db_path=self.bridge_db)
-        self.assertEqual(named_cursor["last_captured_message_id"], 5)
+        self.assertEqual(named_cursor["last_captured_message_id"], 5,
+                         "cursor 由 create_episode 插入路徑推進到 (gptcoding, sid)")
         self.assertIsNone(self.cursor("sess-n"),
                           "cursor 記在 (gptcoding, sid)，不污染 default")
-        recovery = [a for a in result["actions"]
-                    if a["action"] == "cursor_recovery"]
-        self.assertEqual(recovery[0]["source_profile"], "gptcoding")
+        # 2026-07-30 冪等性修正：插入路徑已推進 cursor，recovery 不重放
+        self.assertEqual(
+            [a for a in result["actions"] if a["action"] == "cursor_recovery"],
+            [])
 
     def test_namespaced_file_without_profile_field_still_resolved_by_range(self):
         """profile 還原以 event_id_range 的 namespace 為準——缺 source_profile

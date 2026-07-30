@@ -943,7 +943,12 @@ def reconcile(
       .failed，即「有實體檔案」的意思——需求檔／skipped 從不落地，本來就
       不在這裡的掃描範圍內）處理完後，**重建 cursor**：取
       `max(last_message_id)` upsert 進 `bridge_cursors`（只前進不後退，
-      對健康 db 重跑天然 no-op，提案 §3.2）；`last_episode_seq` 優先取
+      對健康 db 重跑天然 no-op，提案 §3.2。**2026-07-30 冪等性修正**：
+      no-op 時不再列 `cursor_recovery` 動作——動作只在 cursor 真的落後於
+      落地檔目標時出現（如 bridge_cursors 遺失／部分重建），健康 db 重跑
+      因此可用「輸出零 cursor_recovery」機械驗證；本輪 create_episode 插入
+      已在同 transaction 推進的 cursor 不重放，dry-run 用 predicted_cursor
+      補「將插入」效果、與真實模式判定一致）；`last_episode_seq` 優先取
       frontmatter `episode` 欄位的最大值，缺 frontmatter 時退回「依
       first_message_id 排序的序位」保守估計（只影響序號可讀性，不影響
       boundary 正確性）。
@@ -1047,6 +1052,15 @@ def reconcile(
     # 知道要修哪個檔案。
     metadata_incomplete_sessions: dict[tuple, list[str]] = {}
 
+    # cursor recovery 冪等性修正（2026-07-30，A1 部署 runbook 步驟 4 發現）：
+    # 本輪由 create_episode 插入（或 dry-run 下「將插入」）的 episode 列，
+    # 其 cursor 前進已在同 transaction 內完成（提案 §1.2 核心不變量）——
+    # recovery 迴圈不需要、也不應該再對這些 session 重放一次動作。這裡
+    # 逐 (source_profile, session_id) 記錄插入路徑會把 cursor 推到哪，
+    # recovery 迴圈據此判斷「cursor 是否真的落後」：dry-run（插入未真的
+    # 發生）與真實模式（cursor 已被插入推進）因此判定一致。
+    predicted_cursor: dict[tuple, tuple] = {}
+
     actions: list[dict] = [
         {"action": "skip_unrecognized", "path": p} for p in skipped]
     for event_id, entry in sorted(entries.items()):
@@ -1093,6 +1107,13 @@ def reconcile(
         elif existing is None:
             if is_episode:
                 action_name = f"insert_episode_{status}"
+                # 插入路徑會（在真實模式）同 transaction 推進 cursor——記下
+                # 推進目標，recovery 迴圈據此免除重放（冪等性修正，見上）。
+                pkey = (entry["source_profile"], sid)
+                prev_last, prev_seq = predicted_cursor.get(pkey, (0, 0))
+                predicted_cursor[pkey] = (
+                    max(prev_last, entry["last_message_id"]),
+                    max(prev_seq, entry["episode_seq"] or 0))
                 if not dry_run:
                     bridge_state.create_episode(
                         session_id=sid,
@@ -1207,6 +1228,23 @@ def reconcile(
                             "session_id": sid, "last_captured_message_id": max_last,
                             "last_episode_seq": max_seq})
             continue
+        # 冪等性修正（2026-07-30，A1 部署驗證發現）：cursor 已在（或超過）
+        # 重建目標＝真 no-op——不執行 advance、不列動作。舊行為對每個有落地
+        # episode 檔的 session 無條件 append `cursor_recovery`（advanced=False
+        # 只藏在結果 dict，CLI 輸出看不到），健康 db 連跑兩次會永遠列出同樣
+        # 的 recovery 動作，「對健康 db 應為 no-op」的部署預期無從用輸出
+        # 驗證。判定基準＝max(db 現值, 本輪插入路徑的推進目標)——真實模式
+        # 下 create_episode 已推進 cursor、dry-run 下用 predicted_cursor 補上
+        # 「將插入」的效果，兩種模式判定一致。get_cursor 是純讀取（db 不存在
+        # 回 None、不建檔），dry-run 依然零寫入。
+        current = bridge_state.get_cursor(
+            sid, source_profile=entry_profile, db_path=bridge_db)
+        cur_last = current["last_captured_message_id"] if current else 0
+        cur_seq = current["last_episode_seq"] if current else 0
+        pred_last, pred_seq = predicted_cursor.get((entry_profile, sid), (0, 0))
+        if max(cur_last, pred_last) >= max_last and \
+                max(cur_seq, pred_seq) >= max_seq:
+            continue  # cursor 不落後於落地檔目標：真 no-op，零動作
         advanced = None
         if not dry_run:
             result = bridge_state.advance_cursor(

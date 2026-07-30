@@ -269,8 +269,14 @@ tool 輸出縮減(拍板 (a):`episodes.tool_output_max_chars: 500`,user/assistan
    任何擷取,這是與 2.4d-4 相同的「先下發、後翻開關」順序)。
 4. **無 schema migration**:A1 不需要 migrate(2.4d §6.1 明文:裸
    `hermes:` 恆等 default;`bridge_cursors` 主鍵 `(source_profile,
-   session_id)` 天然支援)。部署側跑一次 `bridge_scanner.py reconcile`,
-   對健康 db 應為 no-op,順帶驗證新程式碼在部署側可執行。
+   session_id)` 天然支援)。部署側跑 `bridge_scanner.py reconcile` **兩次**,
+   驗證新程式碼可執行且冪等——「no-op」的機械判準(2026-07-30 冪等性修正
+   後):**第二次輸出零 `cursor_recovery`**,只剩 `touch_last_seen`(last_seen
+   心跳,既有語義、不是狀態變更)。第一次若列出 `insert_episode_*` 屬合法
+   (從檔案系統真相回填 db 缺列);`cursor_recovery` 只該在 cursor 真的落後
+   於落地檔目標(如 bridge_cursors 遺失)時出現一次。修正前的舊版對每個有
+   落地檔的 session 每次重跑都無條件列 `cursor_recovery`(實為 no-op 重放,
+   2026-07-30 部署時發現、已修),舊輸出不可作為健康判準。
 5. **WSL 側驗證 profile db 可達**:
    `python3 -c "import sys; sys.path.insert(0,'hermes/session_adapter'); from adapter import profile_state_db_path; print(profile_state_db_path('gptcoding'))"`
    ——應印出 `/mnt/c/.../hermes/profiles/gptcoding/state.db` 且檔案存在
