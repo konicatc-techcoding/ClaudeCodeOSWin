@@ -301,6 +301,30 @@ tool 輸出縮減(拍板 (a):`episodes.tool_output_max_chars: 500`,user/assistan
     品質——too_short/exclusion 訊號是否足以擋 lane 雜訊(§4 風險表
     「named profile 雜訊灌進 inbox」的驗證點);不夠再議拍板項 5(摘要步)。
 
+**驗收紀錄(2026-08-03,步驟 10 完成)**:
+
+- 排程掃描三輪健康;named episode 建立實測正確
+  (`hermes/gptcoding:20260802_113516_3c63ea:5452..5456`,trigger=ended)。
+- **敏感 fail-closed 首次實戰**:測試 session 讀了 consolidation_policy.yaml,
+  tool 輸出引用偵測 pattern 字面 → 自我指涉命中 financial_pii/health_data,
+  needs_review、零外洩(寧可誤攔如設計;該測試件定案整段放棄)。**已知邊界**:
+  引用政策檔的 session 必被誤攔,互動式人工路徑處理。
+- **驗收撞出並修復兩缺口**:(1) importer `--limit` 原掐住判定次數導致佇列
+  發散(積壓 6283 筆),改為只計實質落地,單輪出清;(2) checkpoint 原不
+  profile-aware 會默默落 default namespace,改為 db 歸屬推導+
+  `--source-profile` 交叉驗證 fail loud(實測 `hermes/nemocoding:` 正確)。
+- **too_short 計數語義釐清(修正 07-30 查證的錯誤結論)**:episode 判定的
+  message 數只計實質對話訊息(user+有內容的 assistant),tool 輸出與空
+  assistant 不計——因此**單發 lane 任務(1 問+tools+1 答=2 則)一律
+  too_short 排除,屬正確設計**:其價值已由 envelope 回傳呼叫方,不需重複
+  入庫;A1 的擷取對象是多輪對話(如 36 則的 Telegram 設計討論)。連帶:
+  §4「named 雜訊灌 consolidation」風險對單發 lane 實際不成立(在
+  too_short 就被擋),tool 縮減僅服務通過門檻的多輪對話。拍板項 5
+  (摘要步)維持暫緩,目前無需求證據。
+- **未完項(留給自然流量)**:named episode 落地檔的 frontmatter/tool 縮減
+  實物——render 已有單元測試釘死格式,首個 cutover 後的多輪 named 對話
+  發生時順帶目視即可,不另造測試流量。
+
 **特別警告(比照 2.4d-4,逐字強調)**:
 
 > **步驟 3(sync)到步驟 7(cutover 寫入)之間,不得讓 scanner 被排程

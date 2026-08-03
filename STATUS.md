@@ -127,11 +127,12 @@
   實證(profile state.db 快照複製+FTS 搜尋,手動可挖)且 A1 上線後
   named session 會自動進記憶;剩 webui「Hermes Sessions」view 仍只讀
   預設 profile 的呈現層缺口。待議,優先級降。
-- **A1 驗收待做(runbook §7 步驟 10,測試流量已備)**:08-03 08:05 掃描
-  會首次真實擷取測試 session `20260802_113516_3c63ea`(gptcoding)——
-  之後檢查:inbox 落地檔 frontmatter(`hermes/gptcoding:` event_id_range、
-  `source_profile:`)、tool 縮減生效(500 字元/則+truncated 標注)、
-  consolidation 對 lane 雜訊的抵抗力;不夠再議提案拍板項 5(摘要步)。
+- **A1 驗收已完成(08-03,詳細紀錄見提案 §7 驗收紀錄)**:核心全過;
+  實戰揪出並修復兩缺口(importer limit 佇列發散、checkpoint 非
+  profile-aware);敏感 fail-closed 首次實戰攔截(自我指涉誤攔,已知邊界);
+  釐清 too_short 只計實質對話訊息——**單發 lane 任務不入庫是正確設計**
+  (envelope 已回傳),A1 抓的是多輪 named 對話。唯一留給自然流量的:
+  首個多輪 named episode 落地檔的目視(render 有單測釘格式)。
 - **retention 冷啟動中**:recall log 自 07-30 起算,覆蓋滿 90 天(約 10 月底)
   前 retention review 只做升格不汰選——這是設計,不是故障。
 - **keepalive 第二階段(watchdog+toast)拍板暫緩**:殘餘風險=WSL 本身壞掉
@@ -167,9 +168,8 @@
   亮橙=有客製沒 push,立刻處理;sidebar 常駐燈紅=先查
   `schtasks /query /tn HermesWslKeepAlive`(自癒最壞 15 分鐘,超過就是
   WSL 本身的問題)。
-- **A1 驗收(08-03 08:05 後的第一件事)**:見 §3「A1 驗收待做」——測試
-  episode 屆時已落 inbox,下個 session 開場**主動**攤開 frontmatter 與
-  tool 縮減結果檢查並回報,不等使用者提。
+- **A1 已驗收結案**:日常留意首個多輪 named 對話的 episode 落地檔
+  (frontmatter/tool 縮減目視即可)。
 - **lane 通道已全通,可開始真實使用**:前台直接指定(「用 GPT 做 X」),
   Telegram 入口亦可;named profile 對話現在會自動進記憶(最壞 3 天),
   累積真實使用觀察,供日後「依任務類型自動選模型」規則引擎的設計依據。
