@@ -363,8 +363,12 @@ importer 跑了也只是 no-op，隔天補上）；10 分鐘間隔沿用既有 5
 只是「當日新 episode 延到下一輪才 enqueue」——冪等機制保證不漏不重
 （§4.3）。
 
-執行參數：importer 帶 `--limit 10`（既有旗標——單輪落地上限，異常
-大量湧入時 fail-safe）；enqueuer 帶 `--max-new 5`（§4.4，已拍板）。
+執行參數：importer 帶 `--limit 10`（單輪「實質結果」上限——落地／
+needs_review／failed 等狀態轉換才計數；**2026-08-03 語義修正**：
+too_short／duplicate 等 skip 類零成本判定不佔上限、每輪全量出清。
+舊語義直接截斷佇列、把判定次數也掐在 10，佇列以「每日新進雜訊−10」
+的速度發散（實測積壓 6283 筆）；limit 的本意是 inbox 洪水 fail-safe，
+拍板值 10 不變）；enqueuer 帶 `--max-new 5`（§4.4，已拍板）。
 排程一律不帶範圍／dry-run 參數，比照「排程一律無參數 scan」的既有
 規則，並由 `test_systemd_units.py` 靜態測試守住。
 

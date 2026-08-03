@@ -106,6 +106,21 @@ DEFAULT_TOOL_OUTPUT_MAX_CHARS = 500
 
 _UNDERSCORE_TEST_RULE = "underscore_prefix_with_test"
 
+# --limit 語義修正（2026-08-03，A1 驗收撞出的既有吞吐問題）：limit 的原意是
+# 「單輪實質產出上限」（防 inbox 洪水／異常大量湧入的 fail-safe），但舊實作
+# 直接截斷佇列（queue[:limit]），把「判定次數」也一併掐住——判定出 skip 的
+# 雜訊（too_short／duplicate）是零模型成本的本地操作，被同一個閥門限制會讓
+# 佇列以「每日新進雜訊 − limit」的速度發散（實測：6283 筆積壓）。修正後
+# limit 只計「實質結果」：下列 **skip／no-op 類動作不計數**，佇列裡的雜訊
+# 每輪全量判定出清；達 limit 時停止處理，剩餘記錄原狀留在佇列（不動狀態、
+# 不遞增 retry），下一輪續跑。
+_LIMIT_EXEMPT_ACTIONS = frozenset({
+    "skipped_exclusion",                # too_short／test_session（零成本本地判定）
+    "skipped_duplicate_of_episode",     # legacy 對 episode 的去重 skip
+    "already_imported_defer_reconcile", # 檔案已在，DB 交給 reconcile（無新落地）
+    "namespace_mismatch_fail_closed",   # 防禦性 fail-closed（零寫入）
+})
+
 
 def _rel_to_root(path: Path | str) -> str:
     """repo 內的路徑記相對路徑（posix），repo 外（測試 temp 目錄）記絕對路徑。
@@ -847,9 +862,14 @@ def import_discovered(
     - 政策檔先載（fail loud 整批不跑），才碰任何資料。
     - bridge db 不存在＝沒有 scanner 產出可處理：直接回報，**不建立 db 檔**
       （dry-run 與真跑一致——importer 只消費 scanner 的產出，不無中生有）。
-    - 佇列＝discovered（依 first_seen_at 排序）＋ failed（自動重試）；
-      --limit 只截斷佇列長度，不改順序（A1：named profile 的 episode 列同在
-      這條佇列裡，--limit 節流一體適用，不另設通道）。
+    - 佇列＝discovered（依 first_seen_at 排序）＋ failed（自動重試），FIFO
+      不改順序（A1：named profile 的 episode 列同在這條佇列裡，不另設通道）。
+    - **--limit 語義（2026-08-03 修正，見 _LIMIT_EXEMPT_ACTIONS 註解）**：
+      limit 計的是「實質結果」數（落地 to_inbox、needs_review／failed 等
+      狀態轉換），**skip／no-op 類判定不計數**——雜訊每輪全量出清，佇列
+      不再因 limit 掐住零成本判定而發散。實質結果達 limit 即停止處理，
+      剩餘記錄原狀留在佇列（不動狀態、不遞增 retry、回報 unprocessed 數），
+      下一輪續跑。dry-run 用同一計數規則（預測與真跑一致）。
     - dry_run=True 零寫入：不落地、不動 db、不遞增 retry_count。
 
     A1（2026-07-30）新增參數：
@@ -870,25 +890,35 @@ def import_discovered(
         return result
     queue = bridge_state.list_by_import_status("discovered", db_path=bridge_db)
     queue += bridge_state.list_by_import_status("failed", db_path=bridge_db)
-    if limit is not None:
-        queue = queue[:limit]
     result["queued"] = len(queue)
+    result["substantive"] = 0
+    result["unprocessed"] = 0
     if not queue:
         return result
     inbox_dir = Path(inbox_dir)
     if not inbox_dir.is_dir():
         raise FileNotFoundError(f"inbox 目錄不存在：{inbox_dir}（不代建目錄，避免寫錯地方）")
+    substantive = 0
+    processed = 0
     with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
         pool = _AdapterPool(adapter, profile_state_dbs)
         try:
             for rec in queue:
-                result["actions"].append(_process_one(
+                if limit is not None and substantive >= limit:
+                    break  # 實質結果達上限：剩餘記錄原狀留佇列，下一輪續跑
+                action = _process_one(
                     rec, adapter, policy=policy, inbox_dir=inbox_dir,
                     bridge_db=bridge_db, dry_run=dry_run,
                     max_retries=max_retries, seen_at=seen_at, pool=pool,
-                    tool_output_max_chars=tool_output_max_chars))
+                    tool_output_max_chars=tool_output_max_chars)
+                result["actions"].append(action)
+                processed += 1
+                if action["action"] not in _LIMIT_EXEMPT_ACTIONS:
+                    substantive += 1  # skip／no-op 類不計數（2026-08-03 修正）
         finally:
             pool.close()
+    result["substantive"] = substantive
+    result["unprocessed"] = len(queue) - processed
     counts: dict = {}
     for action in result["actions"]:
         counts[action["action"]] = counts.get(action["action"], 0) + 1
@@ -911,6 +941,9 @@ def _print_result(result: dict):
         print(f"{prefix}(沒有 discovered/failed 需要處理)")
     summary = "、".join(f"{k}={v}" for k, v in sorted(result["counts"].items()))
     tail = "（dry-run，未寫入任何檔案或 db）" if result["dry_run"] else ""
+    if result.get("unprocessed"):
+        tail += (f"（實質結果達 --limit 上限，{result['unprocessed']} 筆原狀"
+                 "留在佇列，下一輪續跑；skip 類判定不佔上限）")
     print(f"{prefix}import 完成：佇列 {result['queued']} 筆"
           + (f"｜{summary}" if summary else "") + tail)
 
@@ -930,7 +963,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("--dry-run", action="store_true",
                        help="零寫入（含 bridge db；不遞增 retry_count），只回報將執行的動作")
     p_imp.add_argument("--limit", type=int, default=None, metavar="N",
-                       help="最多處理 N 筆（預設處理全部）")
+                       help="單輪「實質結果」上限（落地/needs_review/failed 等；"
+                            "2026-08-03 語義修正：too_short/duplicate 等 skip 類"
+                            "判定不計數、每輪全量出清——limit 是 inbox 洪水"
+                            "fail-safe，不是判定次數上限。預設不設上限）")
     p_imp.add_argument("--state-db", default=None,
                        help="Hermes state.db 路徑（預設自動偵測；一律 snapshot 讀 temp 副本）")
     p_imp.add_argument("--inbox", default=str(DEFAULT_INBOX_DIR),

@@ -104,7 +104,11 @@ CLI（exit code：0 成功；1 執行期錯誤——含 bridge.yaml 缺失、非
     python3 hermes/bridge_scanner.py [--bridge-db PATH] reconcile \
         [--dry-run] [--inbox DIR] [--source-profile NAME]
     python3 hermes/bridge_scanner.py [--bridge-db PATH] checkpoint <session_id> \
-        [--dry-run] [--state-db PATH] [--config PATH] [--inbox DIR]
+        [--dry-run] [--state-db PATH] [--config PATH] [--inbox DIR] \
+        [--source-profile NAME]
+    # checkpoint 的 profile 一律自動推導（A1 驗收修正 2026-08-03：profile db
+    # 以 db 歸屬定 profile、主 db 依 profile_name 欄分流，與 scan 一致）；
+    # --source-profile 只做交叉驗證（不一致 fail loud），絕不默默落 default。
 """
 import argparse
 import sys
@@ -707,6 +711,21 @@ def scan(
 
 # ---------- checkpoint（manual trigger，Stage 2.4d-2） ----------
 
+def _derive_checkpoint_profile(adapter_db_path: Path, session: dict) -> str:
+    """checkpoint 的 profile 推導（A1 驗收修正，2026-08-03）——與 scan 的
+    db 歸屬邏輯一致，唯一真相是「哪顆 db＋profile_name 欄」：
+
+    - db 路徑符合 profile db 佈局（`<...>/profiles/<name>/state.db`，以
+      adapter resolve 後的實路徑判定）→ profile＝目錄名 `<name>`（db 歸屬
+      定 profile，不看 profile_name 欄——與 scan 相同）。
+    - 主 db → 依該 session 的 `metadata.profile_name` 分流（空＝default）。
+    """
+    if adapter_db_path.parent.parent.name == "profiles":
+        return adapter_db_path.parent.name
+    return (session["metadata"].get("profile_name")
+            or bridge_state.DEFAULT_SOURCE_PROFILE)
+
+
 def checkpoint(
     session_id: str,
     *,
@@ -716,6 +735,7 @@ def checkpoint(
     seen_at: str | None = None,
     config_path: Path | str = DEFAULT_BRIDGE_CONFIG,
     inbox_dir: Path | str = DEFAULT_INBOX_DIR,
+    source_profile: str | None = None,
 ) -> dict:
     """manual checkpoint（提案 §6 CLI 雛形）：對單一 session 立即切一刀
     （trigger=manual，無視 ended_at／archived／inactivity 門檻），走同一條
@@ -723,33 +743,28 @@ def checkpoint(
     manual 破例**——本函式只建立 discovered episode 列，不觸發 importer
     （§0.1 拍板）。
 
-    - 固定 `source_profile="default"`（CLI 雛形沒有 --source-profile；
-      create_episode() 本身仍會對非 default fail-closed，這裡沒有繞過的
-      code path）。
+    - **profile-aware（A1 驗收修正，2026-08-03——取代 2.4d-2 的「固定
+      default」）**：profile 一律自動推導（`_derive_checkpoint_profile`，
+      與 scan 的 db 歸屬邏輯一致：profile db 以 db 歸屬定 profile、主 db 依
+      session 的 profile_name 欄分流），event_id／cursor／cutover 全部跟著
+      推導結果走——**絕不默默落 default**。`source_profile` 參數（CLI
+      `--source-profile`）是「明確宣告＋交叉驗證」：與推導結果不一致時
+      fail loud（ValueError），不是覆蓋機制——db 歸屬與 profile_name 是
+      唯一真相，人工標籤說了不算。
     - 獨立於 `episodes.enabled` 閘門之外（manual 是人工明確操作，不受
-      自動管線是否開啟影響）；但無 cursor 的 session 仍需要
-      `episodes.episode_cutover` 作為擷取起點，缺失時 fail loud（ValueError）
-      ——與 scan() 的「enabled 但 cutover 缺失才 fail loud」不同：checkpoint
-      任何時候要處理無 cursor session 都需要這個值，不看 enabled。
-    - cursor 遺失防護（矩陣 #8）同 scan：session 無 cursor 但 inbox 已有該
-      sid 的 `_ep` 落地檔 → 回報 `cursor_missing_needs_reconcile`，不切。
+      自動管線是否開啟影響）；但無 cursor 的 session 仍需要 cutover 作為
+      擷取起點，缺失時 fail loud（ValueError）：default 用頂層
+      `episodes.episode_cutover`；named profile 用
+      `episodes.profiles.<name>.episode_cutover`（未宣告或仍為 null 占位
+      → fail loud，不猜、不借 default 的 cutover——per-profile 底線）。
+    - cursor 遺失防護（矩陣 #8）同 scan：session 無 cursor（查的是推導出的
+      (profile, sid)）但 inbox 已有該 sid 的 `_ep` 落地檔 → 回報
+      `cursor_missing_needs_reconcile`，不切。
     - eligible 為空 → 回報 `no_new_messages`（呼叫端 CLI 對應 exit 0，
       非錯誤——「無新訊息、不切」不是失敗）。
     - --dry-run：零寫入（不建 bridge db、不呼叫 create_episode）。
     """
-    source_profile = bridge_state.DEFAULT_SOURCE_PROFILE
     episodes_cfg = load_episodes_config(config_path)
-
-    if not dry_run:
-        bridge_state.ensure_schema(bridge_db)
-
-    cursor = bridge_state.get_cursor(
-        session_id, source_profile=source_profile, db_path=bridge_db)
-
-    if cursor is None and has_landed_episode_file(inbox_dir, session_id):
-        return {"mode": "checkpoint", "dry_run": dry_run,
-                "session_id": session_id,
-                "action": "cursor_missing_needs_reconcile", "created": False}
 
     with HermesSessionAdapter(db_path=state_db, snapshot=True) as adapter:
         try:
@@ -757,6 +772,29 @@ def checkpoint(
         except KeyError as exc:
             raise ValueError(
                 f"Hermes state.db 裡沒有 session：{session_id}") from exc
+        derived_profile = _derive_checkpoint_profile(adapter.db_path,
+                                                     export["session"])
+    if source_profile is not None:
+        bridge_state.validate_source_profile(source_profile)
+        if source_profile != derived_profile:
+            raise ValueError(
+                f"--source-profile {source_profile!r} 與推導結果 "
+                f"{derived_profile!r} 不一致——profile 的唯一真相是 db 歸屬"
+                "（profiles/<name>/state.db）與主 db 的 profile_name 欄，"
+                "人工標籤不得覆蓋（fail loud，絕不錯登 namespace）")
+    profile = derived_profile
+
+    if not dry_run:
+        bridge_state.ensure_schema(bridge_db)
+
+    cursor = bridge_state.get_cursor(
+        session_id, source_profile=profile, db_path=bridge_db)
+
+    if cursor is None and has_landed_episode_file(inbox_dir, session_id):
+        return {"mode": "checkpoint", "dry_run": dry_run,
+                "session_id": session_id, "source_profile": profile,
+                "action": "cursor_missing_needs_reconcile", "created": False}
+
     events = export["events"]  # export_session 預設 include_inactive=False
 
     if cursor is not None:
@@ -764,13 +802,30 @@ def checkpoint(
                    if e["metadata"]["raw_message_id"] >
                    cursor["last_captured_message_id"]]
     else:
-        cutover_raw = episodes_cfg["episode_cutover"]
-        if not cutover_raw:
-            raise ValueError(
-                "checkpoint 需要 hermes/config/bridge.yaml 的 "
-                "episodes.episode_cutover——session 無 cursor 記錄時，"
-                "擷取起點以此為底線，缺失時不猜、不預設全掃（fail loud）"
-            )
+        if profile == bridge_state.DEFAULT_SOURCE_PROFILE:
+            cutover_raw = episodes_cfg["episode_cutover"]
+            if not cutover_raw:
+                raise ValueError(
+                    "checkpoint 需要 hermes/config/bridge.yaml 的 "
+                    "episodes.episode_cutover——session 無 cursor 記錄時，"
+                    "擷取起點以此為底線，缺失時不猜、不預設全掃（fail loud）"
+                )
+        else:
+            entry = episodes_cfg["profiles"].get(profile)
+            if entry is None:
+                raise ValueError(
+                    f"session 屬於 named profile {profile!r}，但它不在 "
+                    "episodes.profiles 掃描清單裡——請先在 "
+                    "hermes/config/bridge.yaml 宣告（無 cursor 的 session 需要 "
+                    "per-profile cutover 作擷取起點；不猜、不借 default 的 "
+                    "cutover，fail loud）")
+            cutover_raw = entry["episode_cutover"]
+            if not cutover_raw:
+                raise ValueError(
+                    f"named profile {profile!r} 的 episode_cutover 仍是 null "
+                    "占位（尚未 cutover）——無 cursor 的 session 擷取起點以 "
+                    "per-profile cutover 為底線，請先依 A1 部署 runbook 寫入"
+                    "實值（fail loud，不猜、不借 default 的 cutover）")
         cutover_dt = _parse_iso_utc(cutover_raw)
         eligible = [e for e in events
                    if e["timestamp"]
@@ -778,7 +833,7 @@ def checkpoint(
 
     if not eligible:
         return {"mode": "checkpoint", "dry_run": dry_run,
-                "session_id": session_id,
+                "session_id": session_id, "source_profile": profile,
                 "action": "no_new_messages", "created": False}
 
     rowids = [e["metadata"]["raw_message_id"] for e in eligible]
@@ -787,18 +842,20 @@ def checkpoint(
         bridge_state.adapter_events_to_hash_input(eligible))
     episode_seq = (cursor["last_episode_seq"] + 1) if cursor else 1
     session_source = export["session"]["session_source"] or "unknown"
-    reason = f"bridge checkpoint（manual）：boundary=[{first_id}..{last_id}]"
+    reason = (f"bridge checkpoint（manual）：boundary=[{first_id}..{last_id}]，"
+              f"profile={profile}")
 
     result = {"mode": "checkpoint", "dry_run": dry_run, "session_id": session_id,
-              "action": "create_episode",
+              "action": "create_episode", "source_profile": profile,
               "first_message_id": first_id, "last_message_id": last_id,
               "episode_seq": episode_seq,
-              "event_id": bridge_state.episode_event_id(session_id, first_id, last_id),
+              "event_id": bridge_state.episode_event_id(
+                  session_id, first_id, last_id, source_profile=profile),
               "created": False}
     if not dry_run:
         created = bridge_state.create_episode(
             session_id=session_id,
-            source_profile=source_profile,
+            source_profile=profile,
             session_source=session_source,
             episode_seq=episode_seq,
             capture_trigger="manual",
@@ -1326,6 +1383,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ckpt.add_argument(
         "--inbox", default=str(DEFAULT_INBOX_DIR),
         help=f"inbox 目錄（預設 {DEFAULT_INBOX_DIR}；cursor 遺失防護探測用）")
+    p_ckpt.add_argument(
+        "--source-profile", default=None,
+        help="明確宣告 session 所屬 profile（A1 驗收修正，2026-08-03）。"
+             "profile 一律自動推導（profile db 以 db 歸屬定 profile、主 db 依 "
+             "profile_name 欄），此旗標只做交叉驗證：與推導結果不一致時 "
+             "fail loud，不是覆蓋機制——絕不默默錯登 namespace")
     return parser
 
 
@@ -1436,7 +1499,8 @@ def _cli(argv=None) -> int:
             result = checkpoint(args.session_id, dry_run=args.dry_run,
                                state_db=args.state_db, bridge_db=bridge_db,
                                config_path=config_path,
-                               inbox_dir=Path(args.inbox))
+                               inbox_dir=Path(args.inbox),
+                               source_profile=args.source_profile)
     except (ValueError, FileNotFoundError, HermesSessionReadError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1

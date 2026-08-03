@@ -577,17 +577,42 @@ class TestDryRunAndLimit(ImporterTestBase):
             self.assertEqual(result["actions"], [])
             self.assertFalse(absent.exists(), "不得建立 bridge db 檔案")
 
-    def test_limit_caps_processing(self):
+    def test_limit_caps_substantive_outcomes(self):
+        """--limit 語義（2026-08-03 修正）：計「實質結果」不截斷佇列——
+        排頭的落地把 limit 用滿後，其餘記錄原狀留佇列（不動狀態）。"""
         self.seed_discovered("sess_ok", seen_at=T1)
         self.seed_discovered("sess_short", seen_at=T2)
         result = self.run_import(limit=1)
-        self.assertEqual(result["queued"], 1)
+        self.assertEqual(result["queued"], 2,
+                         "queued 回報完整佇列長度（不再預先截斷）")
         self.assertEqual([a["session_id"] for a in result["actions"]],
-                         ["sess_ok"], "--limit 依 first_seen_at 順序截斷")
+                         ["sess_ok"], "FIFO：排頭落地即達實質結果上限，停止處理")
+        self.assertEqual(result["substantive"], 1)
+        self.assertEqual(result["unprocessed"], 1)
         self.assertEqual(self.rec("sess_short")["import_status"], "discovered",
-                         "超出 limit 的留在 discovered，下次再處理")
+                         "上限後未處理的記錄原狀留在佇列，下次再處理")
         with self.assertRaises(ValueError):
             self.run_import(limit=0)
+
+    def test_limit_does_not_throttle_skip_judgements(self):
+        """--limit 語義修正的核心（2026-08-03 積壓 6283 筆的根因）：skip 類
+        零成本判定不佔上限——雜訊排在佇列前面也擋不住後面的落地。"""
+        for i in range(5):
+            self._add_noise_session(f"sess_noise_{i}")
+            self.seed_discovered(f"sess_noise_{i}", seen_at=T1)
+        self.seed_discovered("sess_ok", seen_at=T2)  # 排在 5 筆雜訊之後
+        result = self.run_import(limit=1)
+        self.assertEqual(result["counts"],
+                         {"skipped_exclusion": 5, "to_inbox": 1},
+                         "5 筆雜訊全數判定出清＋1 筆落地——雜訊不佔 limit")
+        self.assertEqual(result["substantive"], 1)
+        self.assertEqual(result["unprocessed"], 0)
+        self.assertEqual(self.rec("sess_ok")["import_status"], "to_inbox")
+
+    def _add_noise_session(self, sid):
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            self._add_session(conn, sid, SHORT_MESSAGES)
+            conn.commit()
 
 
 class EpisodeImporterTestBase(ImporterTestBase):
@@ -1376,6 +1401,59 @@ class TestA1ToolOutputTruncation(MultiProfileImporterTestBase):
     def test_repo_bridge_yaml_tool_output_max_chars(self):
         """守住版控正本：episodes.tool_output_max_chars 已寫入且為拍板預設。"""
         self.assertEqual(bridge_importer.load_tool_output_max_chars(), 500)
+
+
+class TestA1LimitBacklogDrain(ImporterTestBase):
+    """--limit 語義修正的驗收情境（2026-08-03 指定）：100 筆雜訊＋3 筆可落地、
+    limit 10 → 全部雜訊被判定 skip、3 筆落地、無殘留 discovered——佇列不再
+    因 skip 類判定佔用 limit 而發散（實測積壓 6283 筆的根因）。"""
+
+    def test_backlog_of_noise_drains_in_single_run(self):
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            for i in range(100):
+                self._add_session(conn, f"sess_noise_{i:03d}", SHORT_MESSAGES)
+            for i in range(3):
+                self._add_session(conn, f"sess_good_{i}", OK_MESSAGES)
+            conn.commit()
+        for i in range(100):
+            self.seed_discovered(f"sess_noise_{i:03d}", seen_at=T1)
+        for i in range(3):
+            self.seed_discovered(f"sess_good_{i}", seen_at=T2)
+
+        result = self.run_import(limit=10)
+        self.assertEqual(result["queued"], 103)
+        self.assertEqual(result["counts"],
+                         {"skipped_exclusion": 100, "to_inbox": 3},
+                         "100 筆雜訊全數判定 skip（不佔 limit）＋3 筆落地")
+        self.assertEqual(result["substantive"], 3, "實質結果只有 3 筆落地")
+        self.assertEqual(result["unprocessed"], 0, "單輪出清，零殘留")
+        self.assertEqual(
+            bridge_state.list_by_import_status("discovered",
+                                               db_path=self.bridge_db),
+            [], "無殘留 discovered——佇列不再發散")
+        self.assertEqual(len(self.inbox_files()), 3, "恰好 3 個落地檔")
+
+    def test_substantive_limit_still_caps_landing_flood(self):
+        """limit 的本意（inbox 洪水 fail-safe）仍然有效：可落地數超過 limit
+        時，超出的原狀留佇列、下一輪續跑。"""
+        with contextlib.closing(sqlite3.connect(self.hermes_db)) as conn:
+            for i in range(4):
+                self._add_session(conn, f"sess_flood_{i}", OK_MESSAGES)
+            conn.commit()
+        for i in range(4):
+            self.seed_discovered(f"sess_flood_{i}", seen_at=T1)
+        result = self.run_import(limit=2)
+        self.assertEqual(result["counts"], {"to_inbox": 2})
+        self.assertEqual(result["substantive"], 2)
+        self.assertEqual(result["unprocessed"], 2)
+        self.assertEqual(len(self.inbox_files()), 2, "落地上限仍被 limit 守住")
+        remaining = bridge_state.list_by_import_status(
+            "discovered", db_path=self.bridge_db)
+        self.assertEqual(len(remaining), 2, "超出上限的原狀留佇列")
+        # 下一輪續跑：清空
+        result2 = self.run_import(limit=2, seen_at=T3)
+        self.assertEqual(result2["counts"], {"to_inbox": 2})
+        self.assertEqual(len(self.inbox_files()), 4)
 
 
 class TestA1FullFlowScannerToImporter(MultiProfileImporterTestBase):

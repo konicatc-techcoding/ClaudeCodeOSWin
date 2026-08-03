@@ -1963,16 +1963,19 @@ class TestA1ConfigProfiles(MultiProfileScannerTestBase):
         with self.assertRaises(ValueError):
             bridge_scanner.load_episodes_config(self.config)
 
-    def test_repo_bridge_yaml_profiles_are_pending_placeholders(self):
-        """守住版控正本：四個 named profile 已列入掃描清單、cutover 全為
-        null 占位（實值由主 session 部署時寫入——本次交付不啟動任何擷取）。"""
+    def test_repo_bridge_yaml_profiles_wellformed(self):
+        """守住版控正本：四個 named profile 已列入掃描清單；cutover 只能是
+        null（pending 占位）或可解析的 UTC 時刻（loader 已 fail loud 把關，
+        能載入即合法——不釘死部署狀態：交付時是 null 占位、2026-07-30 部署
+        後是實值，兩者都合法）；state_db 生產設定一律不得寫死路徑。"""
         cfg = bridge_scanner.load_episodes_config()
         self.assertEqual(
             set(cfg["profiles"]),
             {"financialresearch", "gptcoding", "intelligence", "nemocoding"})
         for name, entry in cfg["profiles"].items():
-            self.assertIsNone(entry["episode_cutover"],
-                              f"{name} 的 cutover 應為部署前 null 占位")
+            if entry["episode_cutover"] is not None:
+                # 實值必須是「時刻」形式（部署 runbook 步驟 7 的拍板語義）
+                bridge_scanner._parse_iso_utc(entry["episode_cutover"])
             self.assertIsNone(entry["state_db"],
                               f"{name} 生產設定不得寫死 state_db 路徑")
 
@@ -2099,6 +2102,103 @@ class TestA1ProfileDbScan(MultiProfileScannerTestBase):
         result = self.scan()
         self.assertIn("hermes/nemocoding:sess-auto:1..1", self.episode_rows())
         self.assertEqual(result["profile_dbs_missing"], [])
+
+
+class TestA1CheckpointProfileAware(MultiProfileScannerTestBase):
+    """A1 驗收修正（2026-08-03）：checkpoint 的 profile 推導與 scan 的 db
+    歸屬邏輯一致（profile db 以 db 歸屬定 profile、主 db 依 profile_name 欄
+    分流），event_id／cursor／cutover 全跟著推導結果走——絕不默默落
+    default；`--source-profile` 只做交叉驗證，不是覆蓋機制。"""
+
+    def _make_profile_session(self, profile="nemocoding", sid="sess-ck"):
+        pdb = self._make_state_db(self.tmp / "profiles" / profile / "state.db")
+        self._add_session_to(pdb, sid)
+        self._add_message_to(pdb, 1, sid, "user", "lane-1",
+                             PROFILE_CUTOVER_EPOCH + 0.1 * HOUR)
+        self._add_message_to(pdb, 2, sid, "assistant", "lane-2",
+                             PROFILE_CUTOVER_EPOCH + 0.2 * HOUR)
+        return pdb
+
+    def test_profile_db_checkpoint_derives_namespaced_event_id(self):
+        """驗收缺口重現＋修正：profile db 路徑的 checkpoint 必須產出
+        namespaced event_id（修正前產出裸 hermes:，錯登 default）。"""
+        pdb = self._make_profile_session()
+        self.write_profiles_config(
+            {"nemocoding": {"episode_cutover": PROFILE_CUTOVER_ISO}})
+        dry = self.checkpoint("sess-ck", state_db=pdb, dry_run=True)
+        self.assertEqual(dry["event_id"], "hermes/nemocoding:sess-ck:1..2",
+                         "dry-run 的 event_id 就必須是 namespaced 形式")
+        self.assertEqual(dry["source_profile"], "nemocoding")
+        self.assertFalse(self.bridge_db.exists(), "dry-run 零寫入")
+
+        real = self.checkpoint("sess-ck", state_db=pdb)
+        eid = "hermes/nemocoding:sess-ck:1..2"
+        self.assertEqual(real["event_id"], eid)
+        self.assertTrue(real["created"])
+        rows = self.rows()
+        self.assertIn(eid, rows)
+        self.assertEqual(rows[eid]["source_profile"], "nemocoding")
+        self.assertEqual(rows[eid]["capture_trigger"], "manual")
+        cur = bridge_state.get_cursor("sess-ck", source_profile="nemocoding",
+                                      db_path=self.bridge_db)
+        self.assertEqual(cur["last_captured_message_id"], 2)
+        self.assertIsNone(self.cursor("sess-ck"),
+                          "default 的 cursor 不被 named checkpoint 污染")
+
+    def test_main_db_profile_name_session_checkpoint_uses_namespace(self):
+        """主 db 的 named session（profile_name 欄非空）：checkpoint 同樣
+        分流到對應 namespace（與 scan 的分流規則一致）。"""
+        self.write_profiles_config(
+            {"gptcoding": {"episode_cutover": PROFILE_CUTOVER_ISO}})
+        self.add_session("sess-tg")
+        self.add_message(1, "sess-tg", "user", "hi",
+                         PROFILE_CUTOVER_EPOCH + 0.1 * HOUR)
+        self.set_profile_name("sess-tg", "gptcoding")
+        result = self.checkpoint("sess-tg")
+        self.assertEqual(result["event_id"], "hermes/gptcoding:sess-tg:1..1")
+        self.assertEqual(result["source_profile"], "gptcoding")
+        self.assertEqual(
+            bridge_state.get_cursor("sess-tg", source_profile="gptcoding",
+                                    db_path=self.bridge_db)
+            ["last_captured_message_id"], 1)
+
+    def test_main_db_default_session_stays_bare(self):
+        """回歸：主 db 的 default session（profile_name 空）維持裸
+        hermes: namespace（既有行為不變）。"""
+        self.add_session("sess-d")
+        self.add_message(1, "sess-d", "user", "hello", EP_CUTOVER_EPOCH + HOUR)
+        result = self.checkpoint("sess-d")
+        self.assertEqual(result["event_id"], "hermes:sess-d:1..1")
+        self.assertEqual(result["source_profile"], "default")
+
+    def test_explicit_source_profile_is_cross_check_not_override(self):
+        pdb = self._make_profile_session()
+        self.write_profiles_config(
+            {"nemocoding": {"episode_cutover": PROFILE_CUTOVER_ISO}})
+        with self.assertRaises(ValueError):
+            self.checkpoint("sess-ck", state_db=pdb, source_profile="gptcoding")
+        self.assertFalse(self.bridge_db.exists(),
+                         "交叉驗證失敗在任何寫入之前 fail loud（連 db 都不建）")
+        ok = self.checkpoint("sess-ck", state_db=pdb,
+                             source_profile="nemocoding")
+        self.assertEqual(ok["event_id"], "hermes/nemocoding:sess-ck:1..2")
+
+    def test_named_without_cursor_requires_profile_cutover(self):
+        """named session 無 cursor 時的擷取起點是 per-profile cutover——
+        未宣告／pending null 都 fail loud，不借 default 的 cutover；
+        cursor 已存在時不需要 cutover（起點由 cursor 決定）。"""
+        pdb = self._make_profile_session(profile="gptcoding", sid="sess-nc")
+        self.write_profiles_config({})  # 未宣告任何 profile
+        with self.assertRaises(ValueError):
+            self.checkpoint("sess-nc", state_db=pdb)
+        self.write_profiles_config({"gptcoding": {"episode_cutover": None}})
+        with self.assertRaises(ValueError):
+            self.checkpoint("sess-nc", state_db=pdb)
+        # cursor 已存在：pending cutover 不擋 manual checkpoint（起點＝cursor）
+        bridge_state.advance_cursor("sess-nc", 1, source_profile="gptcoding",
+                                    db_path=self.bridge_db)
+        result = self.checkpoint("sess-nc", state_db=pdb)
+        self.assertEqual(result["event_id"], "hermes/gptcoding:sess-nc:2..2")
 
 
 class TestA1ReconcileNamespaced(ReconcileEpisodeTestBase):

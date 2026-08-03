@@ -10,7 +10,12 @@
 # ——不需要另寫 wrapper script 或用 systemd 依賴鏈（已否決的替代方案 (c)）。
 #
 # 兩個指令都刻意帶固定旗標，排程一律不得再加其他範圍／dry-run 參數：
-#   --limit 10   importer 單輪落地上限（既有旗標，異常大量湧入時 fail-safe）
+#   --limit 10   importer 單輪「實質結果」上限（落地 to_inbox／needs_review／
+#                failed 等狀態轉換才計數；2026-08-03 語義修正：too_short／
+#                duplicate 等 skip 類零成本判定**不佔上限、每輪全量出清**——
+#                舊語義直接截斷佇列，把判定次數也掐在 10，佇列以每日新進雜訊
+#                −10 的速度發散，實測積壓 6283 筆後修正。limit 的本意是 inbox
+#                洪水 fail-safe，維持 10 不變）
 #   --max-new 5  enqueuer 單次新建 job 數上限（§4.4 成本上限防護，拍板值，
 #                單日 triage 自動成本硬上限 ≈ 5×$0.12 = $0.60）
 #
