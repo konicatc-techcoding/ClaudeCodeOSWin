@@ -12,6 +12,13 @@
   兩端 remote 命名不同:Windows 是 origin/upstream,WSL 是 origin(官方)/
   windows-side)。整體燈取兩組較嚴重者並標示 overall_driver。
   **關鍵回歸**:只比 origin 會把「origin 0/0 但官方落後 16」誤報為綠。
+- **follow role**(2026-08-03,提案 §10.1):re-graft 後 WSL 的 `origin` 是
+  **本機 Windows 路徑**,須被辨識為「應跟隨的權威基準」並**計入整體燈**;
+  語意與 upstream 相反(落後=藍該同步、領先/分歧=橙異常)。含**否定案例**:
+  本機路徑但不是 Windows hermes-agent 一律留在 peer(不得誤升級成權威基準)。
+- **選項 b 拍板**(2026-08-03):follow 存在的 target 上 upstream 降為資訊性
+  (不計入整體燈,照常輸出),整體燈由 follow 獨力驅動——WSL 卡片即 follow
+  三態(綠/藍/橙);無 follow 的 target(Windows)upstream 照常計入,兩向皆測。
 - **不喚醒**(硬性邊界):WSL distro 未 Running 時完全不下 `wsl -d` 指令。
 - 45 秒 TTL 快取;全域容錯(未預期例外 → 兩端灰)。
 - **live 版本字串**(2026-07-25 切片 1 補實作,提案 §3.1 第一項):
@@ -40,7 +47,14 @@ T = data_update  # 短別名
 
 OFFICIAL_URL = "https://github.com/NousResearch/hermes-agent.git"
 PRIVATE_URL = "https://github.com/konicatc-techcoding/hermes-agent-private.git"
+# WSL 端指向 Windows hermes-agent 的本機路徑(2026-07-25 re-graft 後 origin 的
+# 實測值,以唯讀 `git remote -v` 確認過)→ 2026-08-03 起判為 follow role。
 LOCAL_PATH_URL = "/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent"
+# 對應的 Windows 原生路徑(測試一律固定此值,不依賴執行機器的 LOCALAPPDATA)
+WIN_REPO_PATH_STR = "C:/Users/razer/AppData/Local/hermes/hermes-agent"
+# **本機路徑但不是 Windows hermes-agent**——follow 判準的否定案例,須留在 peer
+OTHER_LOCAL_URL = "/home/razer/scratch/hermes-agent"
+OTHER_MOUNT_URL = "/mnt/d/backup/hermes/hermes-agent"
 
 
 class FakeGit:
@@ -153,10 +167,29 @@ WSL_REAL = repo_responses(
         # WSL 的 origin 就是官方(remote 命名與 Windows 不同!)
         "origin": {"url": OFFICIAL_URL, "tip": "c48d53413a", "behind": 160, "ahead": 11,
                    "ancestor_rc": 1, "log": "c12c64f9e custom merge"},
+        # windows-side 指向 Windows repo → follow role(2026-08-03 起計入整體燈)
         "windows-side": {"url": LOCAL_PATH_URL, "tip": "c12c64f9e9", "behind": 0,
                          "ahead": 0, "ancestor_rc": 0},
     },
 )
+
+# 2026-07-25 re-graft 後 WSL 的**現況形態**:origin = 本機 Windows 路徑
+# (follow)、upstream = 官方(diverged)。用於 §10.1 的 follow role 測試。
+def wsl_post_regraft(*, follow_behind=0, follow_ahead=0, follow_ancestor_rc=0,
+                     follow_url=LOCAL_PATH_URL, upstream_behind=295, upstream_ahead=12):
+    return repo_responses(
+        head="970118870", branch="main", porcelain="", remotes=("origin", "upstream"),
+        refs="main 970118870 commit",
+        per_remote={
+            "origin": {"url": follow_url, "tip": "970118870",
+                       "behind": follow_behind, "ahead": follow_ahead,
+                       "ancestor_rc": follow_ancestor_rc,
+                       "log": "abc123 wsl-only commit" if follow_ahead else ""},
+            "upstream": {"url": OFFICIAL_URL, "tip": "760112adb",
+                         "behind": upstream_behind, "ahead": upstream_ahead,
+                         "ancestor_rc": 1, "merge_base": "3910ab28c",
+                         "log": "970118870 custom"},
+        })
 
 
 class UpdateProbeTestCase(unittest.TestCase):
@@ -169,7 +202,9 @@ class UpdateProbeTestCase(unittest.TestCase):
             "probe_units": data_resident._probe_units,
         }
         T._cache = None
-        T.WINDOWS_REPO_PATH = Path("C:/fake/hermes-agent")
+        # 固定成真實形態的路徑(而非 C:/fake/…):follow role 的判準要拿它跟
+        # remote URL 比對,測試不得依賴執行機器的 LOCALAPPDATA。
+        T.WINDOWS_REPO_PATH = Path(WIN_REPO_PATH_STR)
         data_resident._gateway_ready = lambda: {
             "ready": True, "state": "running", "detail": "gateway 就緒"}
         data_resident._distro_state = lambda: (True, "distro 狀態:Running")
@@ -312,6 +347,14 @@ class WhitelistLockTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class RoleDetectionTests(unittest.TestCase):
+    def setUp(self):
+        # 判定會用到 WINDOWS_REPO_PATH;固定住,不依賴執行機器的 LOCALAPPDATA
+        self._orig_path = T.WINDOWS_REPO_PATH
+        T.WINDOWS_REPO_PATH = Path(WIN_REPO_PATH_STR)
+
+    def tearDown(self):
+        T.WINDOWS_REPO_PATH = self._orig_path
+
     def test_official_url_is_upstream_role(self):
         self.assertEqual(T._role_for_url(OFFICIAL_URL), "upstream")
         self.assertEqual(T._role_for_url(OFFICIAL_URL.upper()), "upstream")
@@ -319,9 +362,76 @@ class RoleDetectionTests(unittest.TestCase):
     def test_private_url_is_backup_role(self):
         self.assertEqual(T._role_for_url(PRIVATE_URL), "backup")
 
-    def test_local_path_is_peer_role(self):
-        self.assertEqual(T._role_for_url(LOCAL_PATH_URL), "peer")
+    def test_unknown_or_missing_url_is_peer_role(self):
         self.assertEqual(T._role_for_url(None), "peer")
+        self.assertEqual(T._role_for_url(""), "peer")
+        self.assertEqual(T._role_for_url("https://example.com/someone/hermes-agent.git"),
+                         "peer")
+
+    # --- follow role(2026-08-03,提案 §10.1)---------------------------------
+
+    def test_wsl_mount_path_to_windows_repo_is_follow_role(self):
+        """WSL 的 /mnt/c/… 指向 Windows hermes-agent → follow(不是 peer)。"""
+        self.assertEqual(T._role_for_url(LOCAL_PATH_URL), "follow")
+
+    def test_follow_accepts_equivalent_path_spellings(self):
+        for variant in [
+            LOCAL_PATH_URL,
+            LOCAL_PATH_URL + "/",
+            LOCAL_PATH_URL + "/.git",
+            LOCAL_PATH_URL.upper(),
+            "/mnt/c//Users/razer/AppData/Local/hermes/hermes-agent",
+            "C:\\Users\\razer\\AppData\\Local\\hermes\\hermes-agent",
+            "C:/Users/razer/AppData/Local/hermes/hermes-agent",
+            "file:///C:/Users/razer/AppData/Local/hermes/hermes-agent",
+        ]:
+            self.assertEqual(T._role_for_url(variant), "follow", variant)
+
+    def test_other_local_paths_are_not_promoted_to_follow(self):
+        """**核心否定案例**:是本機路徑,但不是 Windows hermes-agent → 仍是 peer
+        (否則任何本機 remote 都會被誤升級成權威基準,§10.1 明列的約束)。"""
+        for other in [
+            OTHER_LOCAL_URL,
+            OTHER_MOUNT_URL,
+            "/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent-old",
+            "/mnt/c/Users/razer/AppData/Local/hermes",
+            "/mnt/c/Users/other/AppData/Local/hermes/hermes-agent",
+            "../hermes-agent",
+            "/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent/subdir",
+        ]:
+            self.assertEqual(T._role_for_url(other), "peer", other)
+
+    def test_network_urls_are_never_follow(self):
+        """網路型 URL(含 scp 形式 SSH 簡寫)一律不是本機路徑。"""
+        for url in [
+            "https://github.com/NousResearch/hermes-agent.git",
+            "git@github.com:razer/hermes-agent.git",
+            "ssh://host/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent",
+            "https://host/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent",
+        ]:
+            self.assertFalse(T._is_windows_repo_url(url), url)
+
+    def test_follow_impossible_when_localappdata_unset(self):
+        T.WINDOWS_REPO_PATH = None
+        self.assertFalse(T._is_windows_repo_url(LOCAL_PATH_URL))
+        self.assertEqual(T._role_for_url(LOCAL_PATH_URL), "peer")
+
+    def test_official_and_backup_markers_win_over_path_matching(self):
+        """順序固定:URL 標記優先,follow 不會蓋掉 upstream/backup 判定。"""
+        self.assertEqual(T._role_for_url(OFFICIAL_URL), "upstream")
+        self.assertEqual(T._role_for_url(PRIVATE_URL), "backup")
+
+    def test_canonical_path_key_never_raises_on_junk(self):
+        for junk in [None, "", "   ", "\\\\wsl.localhost\\Ubuntu\\home\\x", "::::",
+                     "/mnt/", "/mnt/c", "c:", "\x00", "file://", "a@b:"]:
+            T._canonical_path_key(junk)  # 只要不噴例外即可
+            self.assertIsInstance(T._role_for_url(junk if isinstance(junk, str) else None), str)
+
+    def test_mount_root_maps_to_drive_root(self):
+        self.assertEqual(T._canonical_path_key("/mnt/c/x/y"), "c:/x/y")
+        self.assertEqual(T._canonical_path_key("D:\\x\\y"), "d:/x/y")
+        # 非 /mnt/ 開頭的 posix 路徑維持原樣(不會被誤當成磁碟機)
+        self.assertEqual(T._canonical_path_key("/home/razer/x"), "/home/razer/x")
 
 
 # ---------------------------------------------------------------------------
@@ -475,10 +585,13 @@ class WslDualBasisTests(UpdateProbeTestCase):
         self.assertEqual(up["remote"], "origin")
         self.assertEqual((up["behind"], up["ahead"]), (160, 11))
         self.assertEqual(up["light"], "orange")
-        # windows-side = 本機路徑 → peer,不計入整體燈
-        peer = self._group(end, "peer")
-        self.assertEqual(peer["remote"], "windows-side")
-        self.assertFalse(peer["counts_toward_overall"])
+        # windows-side 指向 Windows hermes-agent → follow(2026-08-03 起計入整體燈)
+        follow = self._group(end, "follow")
+        self.assertEqual(follow["remote"], "windows-side")
+        self.assertTrue(follow["counts_toward_overall"])
+        # 選項 b:follow 存在 → upstream 降為資訊性(照常輸出,不計入整體燈)
+        self.assertFalse(up["counts_toward_overall"])
+        self.assertIsNone(self._group(end, "peer"), "已被辨識的基準不應留在 peer")
         # 無 backup 角色(WSL 沒有私有備份 remote)
         self.assertIsNone(self._group(end, "backup"))
 
@@ -520,14 +633,191 @@ class WslDualBasisTests(UpdateProbeTestCase):
         self.assertFalse(end["queryable"])
 
     def test_no_recognisable_basis_is_gray(self):
+        # 唯一的 remote 是「本機路徑但不是 Windows hermes-agent」→ peer → 無基準
         wsl = repo_responses(
-            head="abc", remotes=("windows-side",), refs="main abc commit",
-            per_remote={"windows-side": {"url": LOCAL_PATH_URL, "tip": "abc",
-                                         "behind": 0, "ahead": 0, "ancestor_rc": 0}})
+            head="abc", remotes=("some-peer",), refs="main abc commit",
+            per_remote={"some-peer": {"url": OTHER_LOCAL_URL, "tip": "abc",
+                                      "behind": 0, "ahead": 0, "ancestor_rc": 0}})
         self._install(FakeGit(wsl=wsl))
         end = T._probe_wsl()
+        self.assertEqual(self._group(end, "peer")["remote"], "some-peer")
         self.assertEqual(end["light"], "gray")
         self.assertIn("無可用的比較基準", end["advice"])
+
+
+# ---------------------------------------------------------------------------
+# follow role:WSL 有沒有跟上 Windows 整合 tip(提案 §10.1,2026-08-03)
+# ---------------------------------------------------------------------------
+
+class FollowRoleTests(UpdateProbeTestCase):
+    """re-graft 後 WSL 的 origin = 本機 Windows 路徑。三種狀態 + 否定案例。"""
+
+    def _wsl(self, **kw) -> dict:
+        self._install(FakeGit(wsl=wsl_post_regraft(**kw)))
+        return T._probe_wsl()
+
+    def test_in_sync_with_windows_tip_is_green_and_counts(self):
+        end = self._wsl()
+        follow = self._group(end, "follow")
+        self.assertEqual(follow["remote"], "origin")
+        self.assertEqual(follow["role_label"], T.ROLE_LABEL["follow"])
+        self.assertTrue(follow["counts_toward_overall"], "follow 組必須計入整體燈")
+        self.assertEqual(follow["light"], "green")
+        self.assertIn("已跟上", follow["summary"])
+        # 選項 b:upstream 降為資訊性 → WSL 整體燈 = follow 燈 = **綠**
+        # (官方組雖為橙,但那是跟隨者的預期常態,不再驅動整體燈)
+        self.assertEqual(self._group(end, "upstream")["light"], "orange")
+        self.assertEqual(end["light"], "green")
+        self.assertEqual(end["overall_driver"], "follow")
+        self.assertTrue(end["advice"].startswith("已跟上 Windows 整合 tip"))
+
+    def test_behind_windows_tip_is_blue_should_sync(self):
+        end = self._wsl(follow_behind=5, follow_ancestor_rc=0)
+        follow = self._group(end, "follow")
+        self.assertEqual(follow["light"], "blue", "落後 = 該同步了(資訊態,非異常)")
+        self.assertTrue(follow["can_ff"])
+        self.assertIn("落後 Windows 整合 tip 5 個 commit", follow["summary"])
+        self.assertIn("該同步了", follow["summary"])
+        # 選項 b:整體燈隨 follow 三態 → 藍
+        self.assertEqual(end["light"], "blue")
+        self.assertEqual(end["overall_driver"], "follow")
+
+    def test_ahead_of_windows_tip_is_orange_anomaly(self):
+        """語意與 upstream 組相反:領先 = 異常(WSL 不該有 Windows 沒有的 commit)。"""
+        end = self._wsl(follow_ahead=2, follow_ancestor_rc=1)
+        follow = self._group(end, "follow")
+        self.assertEqual(follow["light"], "orange")
+        self.assertIn("領先 Windows 整合 tip 2 個 commit", follow["summary"])
+        self.assertIn("不該有 Windows 沒有的 commit", follow["summary"])
+        self.assertEqual(follow["diverge_commits"], ["abc123 wsl-only commit"])
+        # 選項 b:整體燈隨 follow 三態 → 橙
+        self.assertEqual(end["light"], "orange")
+        self.assertEqual(end["overall_driver"], "follow")
+
+    def test_diverged_from_windows_tip_is_orange_anomaly(self):
+        end = self._wsl(follow_behind=3, follow_ahead=2, follow_ancestor_rc=1)
+        follow = self._group(end, "follow")
+        self.assertEqual(follow["light"], "orange")
+        self.assertIn("雙向分歧", follow["summary"])
+        self.assertIn("不該有 Windows 沒有的 commit", follow["summary"])
+        self.assertEqual(end["light"], "orange")
+        self.assertEqual(end["overall_driver"], "follow")
+
+    # --- 選項 b(2026-08-03 拍板):follow 存在 → upstream 降為資訊性 ----------
+
+    def test_option_b_upstream_demoted_when_follow_present(self):
+        """有 follow 組的 target:upstream 不計入整體燈,但資訊照常輸出。"""
+        end = self._wsl()
+        up = self._group(end, "upstream")
+        self.assertFalse(up["counts_toward_overall"], "follow 存在 → upstream 降為資訊性")
+        # 資訊不打折:數字/summary 照常輸出(UI 標「僅供參考」)
+        self.assertEqual((up["behind"], up["ahead"]), (295, 12))
+        self.assertEqual(up["light"], "orange")
+        self.assertIn("不可自動", up["summary"])
+        # advice 只併陳計入組 → 不含官方組的常態橙訊息
+        self.assertNotIn("官方有", end["advice"])
+
+    def test_option_b_upstream_counts_when_no_follow_group(self):
+        """反向:無 follow 組的 target(拓撲回退)→ upstream 照常計入。
+        規則跟著 remote 拓撲走,不是硬編 target id——WSL 若改指雲端即自動回退。"""
+        wsl = repo_responses(
+            head="abc", porcelain="", remotes=("origin",), refs="main abc commit",
+            per_remote={"origin": {"url": OFFICIAL_URL, "tip": "def", "behind": 5,
+                                   "ahead": 0, "ancestor_rc": 0}})
+        self._install(FakeGit(wsl=wsl))
+        end = T._probe_wsl()
+        up = self._group(end, "upstream")
+        self.assertTrue(up["counts_toward_overall"], "無 follow → upstream 照常計入")
+        self.assertEqual(end["light"], "blue")
+        self.assertEqual(end["overall_driver"], "upstream")
+
+    def test_option_b_windows_end_upstream_still_counts(self):
+        """Windows 端無 follow remote(全網路 URL)→ 完全不受選項 b 影響。"""
+        self._install(FakeGit(win=WIN_REAL))
+        end = T._probe_windows()
+        up = self._group(end, "upstream")
+        self.assertTrue(up["counts_toward_overall"])
+        self.assertEqual(end["light"], "orange")
+        self.assertEqual(end["overall_driver"], "upstream")
+
+    def test_option_b_backup_not_demoted_by_follow(self):
+        """backup 是防重演基準,任何 target 都計入——不因 follow 存在而降級。
+        (WSL 理論上不會有 backup remote,此為防禦性案例。)"""
+        wsl = repo_responses(
+            head="abc", porcelain="", remotes=("origin", "bak"), refs="main abc commit",
+            per_remote={
+                "origin": {"url": LOCAL_PATH_URL, "tip": "abc", "behind": 0,
+                           "ahead": 0, "ancestor_rc": 0},
+                "bak": {"url": PRIVATE_URL, "tip": "old", "behind": 0, "ahead": 4,
+                        "ancestor_rc": 1, "log": "c1 x"},
+            })
+        self._install(FakeGit(wsl=wsl))
+        end = T._probe_wsl()
+        backup = self._group(end, "backup")
+        self.assertTrue(backup["counts_toward_overall"], "backup 不受 follow 降級影響")
+        self.assertEqual(end["light"], "orange")  # backup 橙 > follow 綠
+        self.assertEqual(end["overall_driver"], "backup")
+
+    def test_option_b_demotion_applies_even_when_follow_not_applicable(self):
+        """邊角:follow 組存在但 ref 不存在(灰)→ upstream 仍降級,整體 = 灰。
+        「最該監控的一條查不到」須以灰示警,不得讓 upstream 的常態橙蓋過去。"""
+        wsl = repo_responses(
+            head="abc", porcelain="", remotes=("origin", "upstream"), refs="main abc commit",
+            per_remote={
+                "origin": {"url": LOCAL_PATH_URL, "tip": None},  # follow ref 不存在
+                "upstream": {"url": OFFICIAL_URL, "tip": "def", "behind": 295,
+                             "ahead": 12, "ancestor_rc": 1, "log": "abc custom"},
+            })
+        self._install(FakeGit(wsl=wsl))
+        end = T._probe_wsl()
+        self.assertFalse(self._group(end, "upstream")["counts_toward_overall"])
+        self.assertEqual(self._group(end, "follow")["light"], "gray")
+        self.assertEqual(end["light"], "gray")
+        self.assertEqual(end["overall_driver"], "follow")
+
+    # --- §10.1 的核心回歸:這條以前完全不亮燈 --------------------------------
+
+    def test_regression_follow_anomaly_now_drives_overall_light(self):
+        """官方組健康(綠)時,WSL 領先 Windows 整合 tip 必須把整體拉成橙。
+
+        修正前 follow 被判 peer(counts_toward_overall=False)→ 整體會是**綠**,
+        「WSL 有沒有跟上 Windows」完全不亮燈(提案 §10.1 描述的盲點)。"""
+        end = self._wsl(follow_ahead=2, follow_ancestor_rc=1,
+                        upstream_behind=0, upstream_ahead=12)
+        self.assertEqual(self._group(end, "upstream")["light"], "green")
+        self.assertEqual(end["light"], "orange", "follow 組的異常必須計入整體燈")
+        self.assertEqual(end["overall_driver"], "follow")
+        self.assertIn("領先 Windows 整合 tip", end["advice"])
+
+    def test_negative_other_local_path_stays_peer_and_does_not_light_up(self):
+        """**否定案例**:本機路徑但不是 Windows hermes-agent → 仍是 peer、不計入
+        整體燈。證明 follow 的升級是綁定身分判定,不是「只要是本機路徑」。"""
+        end = self._wsl(follow_url=OTHER_LOCAL_URL, follow_ahead=2,
+                        follow_ancestor_rc=1, upstream_behind=0, upstream_ahead=12)
+        self.assertIsNone(self._group(end, "follow"), "非 Windows repo 不得升級為 follow")
+        peer = self._group(end, "peer")
+        self.assertEqual(peer["remote"], "origin")
+        self.assertFalse(peer["counts_toward_overall"])
+        self.assertEqual(end["light"], "green", "peer 不參與燈號合成(既有行為不變)")
+        self.assertEqual(end["overall_driver"], "upstream")
+
+    def test_follow_ref_missing_is_gray_not_applicable(self):
+        self._install(FakeGit(wsl=repo_responses(
+            head="970118870", porcelain="", remotes=("origin",), refs="main x commit",
+            per_remote={"origin": {"url": LOCAL_PATH_URL, "tip": None}})))
+        end = T._probe_wsl()
+        follow = self._group(end, "follow")
+        self.assertFalse(follow["applicable"])
+        self.assertEqual(follow["light"], "gray")
+        self.assertEqual(end["light"], "gray")
+
+    def test_follow_does_not_change_windows_end_behaviour(self):
+        """Windows 端的 remote 都是網路 URL → 不受 follow 判定影響(回歸)。"""
+        self._install(FakeGit(win=WIN_REAL))
+        end = T._probe_windows()
+        self.assertIsNone(self._group(end, "follow"))
+        self.assertEqual(end["light"], "orange")
+        self.assertEqual(end["overall_driver"], "upstream")
 
 
 # ---------------------------------------------------------------------------
@@ -547,8 +837,26 @@ class ClassifyComparisonTests(unittest.TestCase):
         self.assertEqual(T._classify_comparison("backup", 0, 3)[0], "blue")
         self.assertEqual(T._classify_comparison("backup", 3, 3)[0], "orange")
 
+    def test_follow_semantics_are_the_mirror_image_of_upstream(self):
+        # (ahead, behind) → light。落後 = 藍(該同步);領先/分歧 = 橙(異常)
+        self.assertEqual(T._classify_comparison("follow", 0, 0)[0], "green")
+        self.assertEqual(T._classify_comparison("follow", 0, 5)[0], "blue")
+        self.assertEqual(T._classify_comparison("follow", 2, 0)[0], "orange")
+        self.assertEqual(T._classify_comparison("follow", 2, 3)[0], "orange")
+        # 對照:同樣「領先 2、無落後」在 upstream 組是綠(帶客製屬健康)
+        self.assertEqual(T._classify_comparison("upstream", 2, 0)[0], "green")
+
     def test_unknown_counts_is_gray(self):
         self.assertEqual(T._classify_comparison("upstream", None, None)[0], "gray")
+        self.assertEqual(T._classify_comparison("follow", None, None)[0], "gray")
+
+    def test_counted_roles_and_driver_priority(self):
+        self.assertEqual(set(T.COUNTED_ROLES), {"upstream", "backup", "follow"})
+        self.assertNotIn("peer", T.COUNTED_ROLES)
+        # 打平時 follow 優先被指認為主導組;backup > upstream 維持既有行為
+        self.assertGreater(T.DRIVER_PRIORITY["follow"], T.DRIVER_PRIORITY["backup"])
+        self.assertGreater(T.DRIVER_PRIORITY["backup"], T.DRIVER_PRIORITY["upstream"])
+        self.assertEqual(set(T.ROLE_LABEL), {"upstream", "backup", "follow", "peer"})
 
     def test_severity_order_used_for_overall(self):
         self.assertLess(T.LIGHT_SEVERITY["green"], T.LIGHT_SEVERITY["blue"])

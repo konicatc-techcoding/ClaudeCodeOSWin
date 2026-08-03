@@ -6,11 +6,19 @@
 // onClick 只接 reload 重新取數)。此邊界由 update-precheck-render.test.mjs
 // 與 scripts/webui_security_check.py 第 11 項靜態鎖定。
 //
-// **雙基準**(2026-07-24 防重演落地後的修正):每端同時列出所有比較基準——
-// backup(私有備份/防重演基準:本機與雲端是否同步)與 upstream(官方上游:
-// 有多少新版可吸收);peer(其他基準)僅供參考不計入整體燈。整體燈取
-// backup/upstream 兩組較嚴重者,並以 overall_driver 標示是哪一組造成的,
-// 避免「備份健康但官方有新版」被誤讀成壞掉。
+// **多基準**(2026-07-24 防重演落地後的修正):每端同時列出所有比較基準——
+// backup(私有備份/防重演基準:本機與雲端是否同步)、upstream(官方上游:
+// 有多少新版可吸收)、follow(應跟隨的權威基準 = Windows 整合 tip;
+// 2026-08-03 新增,提案 §10.1);peer(其他基準)僅供參考不計入整體燈。
+// 整體燈取**計入組**(counts_toward_overall)中較嚴重者,並以 overall_driver
+// 標示是哪一組造成的,避免「備份健康但官方有新版」被誤讀成壞掉。
+// **follow 組的語意與 upstream 相反**——落後 = 該同步了(藍);領先/分歧 = 異常
+// (橙)。顯示順序把 follow 排在最前:那是 WSL 端最該被看見的一條。
+// **2026-08-03 拍板(選項 b)**:follow 存在的 target 上,upstream 組由後端
+// 降為資訊性(counts_toward_overall=false)——照常顯示數字/diverge/summary,
+// 但與 peer 一樣標「僅供參考」,整體燈由 follow 獨力驅動(WSL 現況);
+// 無 follow 的 target(Windows)不受影響。UI 不依 role 自行判斷計入與否,
+// 「僅供參考」標記一律由後端 counts_toward_overall 欄位驅動。
 //
 // 五態燈:green 已最新／blue 可 ff-only 前進／orange 帶客製 diverge 需受控
 // merge／red 異常需人工檢查／gray 無法查詢。取數只有 apiGet 一條路。
@@ -86,8 +94,8 @@ export function UpdateTargetCard({ target }: { target: UpdateTarget }) {
   const head = target.head;
   const rescue = target.rescue_refs ?? [];
   const comparisons = target.comparisons ?? [];
-  // 顯示順序:備份 → 官方 → 其他參考
-  const order: Record<string, number> = { backup: 0, upstream: 1, peer: 2 };
+  // 顯示順序:應跟隨的權威基準(Windows 整合 tip)→ 備份 → 官方 → 其他參考
+  const order: Record<string, number> = { follow: 0, backup: 1, upstream: 2, peer: 3 };
   const sorted = [...comparisons].sort((a, b) => (order[a.role] ?? 9) - (order[b.role] ?? 9));
 
   return (
@@ -205,7 +213,7 @@ export default function UpdatePrecheckView() {
       {data && (
         <Panel
           title="Hermes 更新——唯讀升級預檢（階段一）"
-          caption="兩端並列，每端同時對「私有備份/防重演基準」與「官方上游」兩個基準比較；顯示版本/落後/能否 ff/客製 diverge/rescue ref/服務狀態。不提供任何執行、升級、同步操作（階段二寫入未核准）。遠端資訊只讀本地 refs，可能過期。"
+          caption="兩端並列，每端同時對所有可辨識基準比較——「Windows 整合 tip（本端是否跟上）」「私有備份/防重演基準」「官方上游」；顯示版本/落後/能否 ff/客製 diverge/rescue ref/服務狀態。不提供任何執行、升級、同步操作（階段二寫入未核准）。遠端資訊只讀本地 refs，可能過期。"
         >
           <UpdatePrecheckCards payload={data} />
         </Panel>

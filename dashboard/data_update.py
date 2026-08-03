@@ -32,13 +32,14 @@ REF_TEMPLATE_BUILDERS 建構器,且 remote 名須通過 REMOTE_NAME_RE 嚴格驗
 
 角色(role):
 
-| role     | 判定(URL)                   | 語意 |
-|----------|------------------------------|------|
-| upstream | 含 NousResearch/hermes-agent | 官方上游——「有沒有新版可吸收」 |
-| backup   | 含 hermes-agent-private      | 私有備份/防重演基準——「本機與雲端是否同步」 |
-| peer     | 其他(例如本機路徑 remote)   | 其他基準,僅供參考,不計入整體燈 |
+| role     | 判定(URL)                          | 語意 |
+|----------|-------------------------------------|------|
+| upstream | 含 NousResearch/hermes-agent        | 官方上游——「有沒有新版可吸收」 |
+| backup   | 含 hermes-agent-private             | 私有備份/防重演基準——「本機與雲端是否同步」 |
+| follow   | 路徑正規化後 == Windows hermes-agent | 應跟隨的權威基準——「本端有沒有跟上 Windows 整合 tip」 |
+| peer     | 其他(其他本機路徑/不明 remote)     | 其他基準,僅供參考,不計入整體燈 |
 
-## WSL remote 結構已變更(2026-07-25 re-graft)+ **已知燈號限制**
+## WSL remote 結構已變更(2026-07-25 re-graft)→ `follow` role(2026-08-03)
 
 2026-07-25 的 WSL side re-graft(docs/wsl-regraft-plan.md,方案 A,已執行完成)
 把 WSL `main` 對齊到 Windows 整合 tip `970118870`(兩側樹逐 byte 相同),
@@ -51,22 +52,45 @@ REF_TEMPLATE_BUILDERS 建構器,且 remote 名須通過 REMOTE_NAME_RE 嚴格驗
 目的是讓 `hermes update` 的 diverged fallback(`reset --hard origin/main`)
 退化成對「Windows 整合 tip」的 no-op(防重演)。
 
-**⚠️ 由此產生的已知限制(本模組刻意不修正判定邏輯)**:
+**曾經的燈號盲點(2026-08-03 已修正,提案 §10.1 待辦落地)**:此前本機路徑
+URL 既不含 `nousresearch/hermes-agent` 也不含 `hermes-agent-private`,一律判為
+`peer`(`counts_toward_overall=False`),導致「WSL 有沒有跟上 Windows 整合 tip」
+——WSL 最該被監控的一條——**看得到但不會亮燈**,整體燈完全由 `upstream` 組
+(官方)獨力驅動;而兩側對官方落後同樣數量本來就是預期常態。
 
-WSL 的 `origin` 現在是**本機路徑 URL**,既不含 `nousresearch/hermes-agent`
-也不含 `hermes-agent-private`,故 `_role_for_url()` 判為 **`peer`**
-→ `counts_toward_overall = False`。
+現在新增 **`follow`** role 補上這個盲點,判定為 `_is_windows_repo_url()`:
 
-**後果:WSL target 的「整體燈」完全由 `upstream` 組(官方)驅動,
-「WSL 有沒有跟上 Windows 整合 tip」這條完全不計入燈號。**
-偏偏那才是 WSL 最該被監控的一條——WSL 的正確語意就是「跟隨 Windows」,
-對官方落後多少反而是與 Windows 相同的預期常態(re-graft 後兩側同為
-領先 12 / 落後 295)。該組資訊仍**完整輸出**在 comparisons 內(role=`peer`,
-`counts_toward_overall=False`),只是不參與燈號合成——**看得到,但不會亮燈**。
+- **不是「只要是本機路徑就算」**——那會讓任何本機 remote 被誤升級成權威基準。
+  判準是**路徑正規化後與凍結的 `WINDOWS_REPO_PATH` 逐字相等**
+  (`_canonical_path_key()`:統一分隔符/大小寫、收斂重複斜線、`/mnt/<碟>/` ↔
+  `<碟>:/`、去尾斜線與 `/.git`、`file://` 前綴;網路 URL(`scheme://`、
+  scp 形式 `user@host:path`)一律不視為本機路徑)。
+- **零 I/O、零額外 subprocess**:純字串比對,不 stat、不查該 repo 內容
+  (故不新增任何指令面;白名單不變)。
+- **誤判邊界**(刻意選擇的取捨):
+  - *偽陰性(安全側)*:自訂 automount 根(非 `/mnt/`)、junction/symlink、
+    8.3 短檔名、UNC(`\\\\wsl.localhost\\...`)等**別名路徑**不會被認出 →
+    退回 `peer` = 修正前的行為(看得到、不亮燈),不會誤報健康。
+  - *偽陽性*:唯有「該路徑確實存在但裡面不是 hermes-agent」才會誤判;
+    但那同時代表 Windows target 自身也在探測錯的 repo,是更上游的問題,
+    不是本判準能區分的。
+  - `LOCALAPPDATA` 未設定 → `WINDOWS_REPO_PATH is None` → **永不**判 `follow`。
 
-改善方向(新增一種能辨識「本機路徑且指向 Windows repo」的 role 並計入燈號)
-已記在 docs/webui-update-button-proposal.md §10.1,**需獨立評估與核准**;
-在那之前**本模組的角色判定與燈號邏輯維持原樣不動**,此處僅作說明。
+`follow` 的燈號語意與 `upstream` 組**相反**(見下方燈號表):落後 = 該同步了
+(藍,資訊態);領先/分歧 = **異常**(橙)——WSL 理論上不該有 Windows 沒有的
+commit。
+
+**拍板(2026-08-03,選項 b):follow 存在時,同 target 的 upstream 組降為
+資訊性**(`_apply_follow_demotion()`)——某 target 存在 `follow` 組,即代表
+該端的正確語意是「跟隨者」:對官方落後多少是與 Windows 相同的預期常態,
+不該驅動整體燈。此時該 target 的 `upstream` 組 `counts_toward_overall`
+改為 False(照常輸出數字/diverge/summary,UI 標「僅供參考」),整體燈由
+`follow` 組獨力驅動(WSL 現況:恆為 `overall_driver=follow`)。規則跟著
+**remote 拓撲**走,不硬編 target id——若未來拓撲變動(例如 WSL 改指雲端、
+不再有 follow remote),upstream 自動回復計入,不留錯的硬編。`backup` 不受
+此降級影響:防重演基準在任何 target 都計入(理論上 WSL 不會有,防禦性保留)。
+邊角:follow 組存在但 ref 不存在(applicable=False,灰)時**仍然降級**——
+「最該監控的一條查不到」本身就該以灰示警,不得讓 upstream 的常態橙蓋過去。
 
 `<remote>/main` ref 不存在(未 fetch 過/無該 remote)→ 該組
 applicable=False「不適用/無法查詢」,不噴例外、不計入整體燈。
@@ -117,22 +141,37 @@ applicable=False「不適用/無法查詢」,不噴例外、不計入整體燈�
   data_resident 既有探測,不重寫。expect_custom/expect_rescue 皆 False。
   **WSL 端無 live gateway**(gateway 只在 Windows 側),故服務欄看的是
   systemd --user 常駐單元,不是 gateway。整體燈的來源見上方
-  「WSL remote 結構已變更 + 已知燈號限制」——**由 upstream 組獨力驅動**。
+  「WSL remote 結構已變更 → follow role」——2026-08-03 拍板(選項 b)後由
+  `follow` 組(是否跟上 Windows 整合 tip)**獨力驅動**;`upstream` 組照常
+  顯示但降為資訊性(follow 存在時不計入,見 `_apply_follow_demotion()`)。
 
 ## 燈號(每組一盞 + 整體取較嚴重者)
 
 每組(comparison)依 role 給光與建議:
 
-| light  | upstream 組 | backup 組 |
-|--------|-------------|-----------|
-| green  | 無落後 = 已吸收官方最新 | 0/0 = 備份同步(防重演基準有效)|
-| blue   | 落後 N 且無客製分歧 = 可 ff-only 前進 | 備份領先本機,可 ff-only 前進 |
-| orange | 落後 N 且同時領先(帶客製)= diverged,**必須受控 merge、不可自動** | 本機領先備份(客製未進備份)或雙向分歧 |
-| gray   | 該 remote 不適用/ref 不存在/查詢失敗 | 同左 |
+| light  | upstream 組 | backup 組 | follow 組(語意與 upstream 相反)|
+|--------|-------------|-----------|--------------------------------|
+| green  | 無落後 = 已吸收官方最新 | 0/0 = 備份同步(防重演基準有效)| 0/0 = 已跟上 Windows 整合 tip |
+| blue   | 落後 N 且無客製分歧 = 可 ff-only 前進 | 備份領先本機,可 ff-only 前進 | 落後 N = 該同步了(結構上可 ff-only)|
+| orange | 落後 N 且同時領先(帶客製)= diverged,**必須受控 merge、不可自動** | 本機領先備份(客製未進備份)或雙向分歧 | **領先或分歧 = 異常**(本端不該有 Windows 沒有的 commit)|
+| gray   | 該 remote 不適用/ref 不存在/查詢失敗 | 同左 | 同左 |
 
 **整體燈** = 目標端層級的紅(工作樹髒／客製遺失／rescue 遺失)優先,否則取
-role ∈ {upstream, backup} 兩組中**較嚴重者**;並以 `overall_driver` 標示是
-哪一組造成的,避免「備份健康但官方有新版」被誤讀成壞掉。
+**計入組**(`counts_toward_overall=True`)中**較嚴重者**;並以 `overall_driver`
+標示是哪一組造成的,避免「備份健康但官方有新版」被誤讀成壞掉。
+
+哪些組計入是 **per-target** 的(2026-08-03 拍板,選項 b):
+
+- 無 `follow` 組的 target(現況 Windows):upstream 與 backup 計入,同上。
+- 有 `follow` 組的 target(現況 WSL):該端語意是「跟隨者」→ `upstream`
+  降為資訊性不計入,整體燈由 `follow`(+理論上的 `backup`)驅動——
+  WSL 卡片即 follow 三態:已跟上=綠/落後=藍(該同步)/領先或分歧=橙(異常)。
+- `peer` 永遠不計入。
+
+同嚴重度時以 `DRIVER_PRIORITY` 決勝(follow > backup > upstream)——WSL 端
+因只剩 follow 一組計入而自然無需決勝;Windows 端維持既有行為(backup 先於
+upstream)。計入組的摘要**全部併陳**於 advice,不因此漏訊;降級組的資訊仍
+完整輸出於 comparisons(看得到,只是不驅動燈)。
 
 容錯:任何探測失敗一律優雅退化為 gray,不噴例外。快取 45 秒 TTL。
 """
@@ -173,11 +212,27 @@ REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 OFFICIAL_UPSTREAM_MARKER = "nousresearch/hermes-agent"  # 官方上游
 PRIVATE_BACKUP_MARKER = "hermes-agent-private"          # 私有備份/防重演基準
 
+# WSL 對 Windows 磁碟的預設 automount 根。**刻意只認這一個**——自訂 automount
+# 根(/etc/wsl.conf 的 root=)不會被認出,結果是退回 peer(偽陰性,安全側)。
+WSL_MOUNT_PREFIX = "/mnt/"
+
 ROLE_LABEL = {
     "upstream": "官方上游(有無新版可吸收)",
     "backup": "私有備份/防重演基準(本機與雲端是否同步)",
+    "follow": "Windows 整合 tip(本端是否跟上——應跟隨的權威基準)",
     "peer": "其他基準(僅供參考)",
 }
+
+# 計入整體燈的角色(單組層級的預設)。peer 之外皆計入;follow 於 2026-08-03
+# 加入(提案 §10.1)。**注意**:這只是預設——target 層級還有一道
+# `_apply_follow_demotion()`(2026-08-03 拍板,選項 b):同 target 存在 follow
+# 組時,upstream 降為資訊性不計入(該端語意是跟隨者,對官方落後是預期常態)。
+COUNTED_ROLES = ("upstream", "backup", "follow")
+
+# 同嚴重度時誰被標為 overall_driver(數字大者優先)。follow 最優先——「該跟上
+# Windows 整合 tip」是 WSL 最該被看見的一條;backup > upstream 只是**保持**
+# 加入 follow 之前的既有行為(Windows 端 origin=backup 先被列出,打平時取它)。
+DRIVER_PRIORITY = {"follow": 2, "backup": 1, "upstream": 0}
 
 # --- 凍結的唯讀 git 查詢模板(無參數版;subprocess 只允許這組 + 下方建構器)---
 GIT_HEAD_SHORT = ("rev-parse", "--short", "HEAD")
@@ -379,13 +434,75 @@ def _live_version(head_short: str | None, package: str | None,
     }
 
 
+# 網路型 URL 的兩種形態(皆非本機路徑,直接排除,不可能是 Windows repo):
+# 1) `scheme://…`(https/git/ssh/file…)——除 file:// 外一律排除;
+# 2) scp 形式 `user@host:path`(git 的簡寫 SSH URL)。
+_SCP_LIKE_RE = re.compile(r"^[^/\\]+@[^/\\]+:")
+_LEADING_DRIVE_RE = re.compile(r"^/([a-z]:/.*)$")   # file:///C:/x → /c:/x → c:/x
+_MOUNT_DRIVE_RE = re.compile(r"^([a-z])(/.*)?$")    # /mnt/c/x 的 "c/x" → c:/x
+
+
+def _canonical_path_key(raw: str | None) -> str | None:
+    """把「本機路徑型」remote URL 正規化成可逐字比對的 key;非本機路徑 → None。
+
+    純字串運算——**不 stat、不 realpath、不觸檔案系統**(故無 I/O、無副作用,
+    也不受探測時序影響)。正規化步驟:去 `file://` → 分隔符統一為 `/` →
+    收斂重複斜線 → 小寫 → `/mnt/<碟>/…` 換成 `<碟>:/…` → 去尾斜線與 `/.git`。
+
+    刻意**不**解析 symlink/junction/8.3 短檔名/UNC 別名:那需要檔案系統存取,
+    而認不出的代價只是退回 peer(偽陰性,安全側),不會誤報健康。"""
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if "://" in text.lower():
+        if not text.lower().startswith("file://"):
+            return None  # http(s)/git/ssh/… 網路 URL:不是本機路徑
+        text = text[len("file://"):]
+    if _SCP_LIKE_RE.match(text):
+        return None      # user@host:path 的 SSH 簡寫:不是本機路徑
+    key = re.sub(r"/{2,}", "/", text.replace("\\", "/")).lower()
+    drive = _LEADING_DRIVE_RE.match(key)
+    if drive:
+        key = drive.group(1)
+    if key.startswith(WSL_MOUNT_PREFIX):
+        mount = _MOUNT_DRIVE_RE.match(key[len(WSL_MOUNT_PREFIX):])
+        if mount:
+            key = f"{mount.group(1)}:{mount.group(2) or '/'}"
+    key = key.rstrip("/")
+    if key.endswith("/.git"):
+        key = key[:-len("/.git")].rstrip("/")
+    return key or None
+
+
+def _is_windows_repo_url(url: str | None) -> bool:
+    """該 remote 是否**確實**指向 Windows 側 hermes-agent repo(follow role 判準)。
+
+    **不是「只要是本機路徑就算」**——必須正規化後與凍結的 WINDOWS_REPO_PATH
+    (%LOCALAPPDATA%\\hermes\\hermes-agent,本模組唯一的 Windows repo 定義)
+    逐字相等;任何其他本機路徑一律留在 peer,不會被誤升級成權威基準。
+    LOCALAPPDATA 未設定(WINDOWS_REPO_PATH is None)時**永遠**回 False。
+    誤判邊界詳見模組 docstring。"""
+    if WINDOWS_REPO_PATH is None:
+        return False
+    target = _canonical_path_key(str(WINDOWS_REPO_PATH))
+    key = _canonical_path_key(url)
+    return target is not None and key is not None and key == target
+
+
 def _role_for_url(url: str | None) -> str:
-    """依 remote URL 判定角色(不依名稱——兩端 remote 命名不同)。"""
+    """依 remote URL 判定角色(不依名稱——兩端 remote 命名不同)。
+
+    順序固定:官方/私有備份的 URL 標記優先(兩者都不可能是本機路徑),
+    再判 follow(指向 Windows hermes-agent 的本機路徑),其餘為 peer。"""
     low = (url or "").lower()
     if PRIVATE_BACKUP_MARKER in low:
         return "backup"
     if OFFICIAL_UPSTREAM_MARKER in low:
         return "upstream"
+    if _is_windows_repo_url(url):
+        return "follow"
     return "peer"
 
 
@@ -414,6 +531,26 @@ def _classify_comparison(role: str, ahead: int | None, behind: int | None) -> tu
             return "orange", f"本機領先備份 {ahead} 個 commit(尚未推送——防重演基準未涵蓋這些客製)"
         return "blue", f"備份領先本機 {behind} 個 commit,結構上可 ff-only 前進"
 
+    if role == "follow":
+        # 語意與 upstream 組**相反**:落後 = 該同步(資訊態,藍);
+        # 領先/分歧 = 異常(橙)——本端理論上不該有 Windows 沒有的 commit。
+        if behind == 0 and ahead == 0:
+            return "green", "已跟上 Windows 整合 tip ✓"
+        if behind > 0 and ahead > 0:
+            return "orange", (
+                f"與 Windows 整合 tip 雙向分歧(落後 {behind}／領先 {ahead})"
+                f"——本端不該有 Windows 沒有的 commit,需人工檢查"
+            )
+        if ahead > 0:
+            return "orange", (
+                f"領先 Windows 整合 tip {ahead} 個 commit"
+                f"——本端不該有 Windows 沒有的 commit,需人工檢查"
+            )
+        return "blue", (
+            f"落後 Windows 整合 tip {behind} 個 commit,該同步了"
+            f"(無分歧,結構上可 ff-only 前進)"
+        )
+
     # peer:僅供參考
     if behind == 0 and ahead == 0:
         return "green", "與此基準一致"
@@ -437,7 +574,7 @@ def _build_comparison(prefix: tuple[str, ...], remote: str) -> dict:
         "role_label": ROLE_LABEL[role],
         "ref": ref,
         "tip": tip,
-        "counts_toward_overall": role in ("upstream", "backup"),
+        "counts_toward_overall": role in COUNTED_ROLES,
     }
     if tip is None:
         return {
@@ -464,6 +601,25 @@ def _build_comparison(prefix: tuple[str, ...], remote: str) -> dict:
         "diverge_commits": diverge_commits, "merge_base": merge_base,
         "light": light, "light_text": LIGHT_TEXT[light], "summary": summary,
     }
+
+
+def _apply_follow_demotion(comparisons: list[dict]) -> None:
+    """target 層級的角色權重(2026-08-03 拍板,選項 b):同一 target 存在
+    `follow` 組時,`upstream` 組降為資訊性(counts_toward_overall=False)。
+
+    理由:有 follow remote 即代表該端的正確語意是「跟隨者」——對官方落後多少
+    是與 Windows 相同的預期常態,不該驅動整體燈;真正該監控的是「有沒有跟上
+    Windows 整合 tip」(follow 組)。規則跟著 **remote 拓撲**走,不硬編
+    target id:未來拓撲變動(例如 WSL 改指雲端、不再有 follow remote)時
+    upstream 自動回復計入。`backup` 不降級(防重演基準在任何 target 都計入);
+    follow 組 ref 不存在(applicable=False,灰)時**仍然降級**——「最該監控的
+    一條查不到」就該以灰示警,不得讓 upstream 的常態橙蓋過去。
+
+    純資料後處理(in-place 改 counts_toward_overall),零查詢、零副作用。"""
+    if any(c.get("role") == "follow" for c in comparisons):
+        for c in comparisons:
+            if c.get("role") == "upstream":
+                c["counts_toward_overall"] = False
 
 
 def _parse_rescue_refs(refs_text: str | None) -> list[dict]:
@@ -504,6 +660,8 @@ def _facts_from_prefix(prefix: tuple[str, ...], repo_display: str) -> dict:
     comparisons = [
         _build_comparison(prefix, r) for r in remotes if REMOTE_NAME_RE.match(r)
     ]
+    # target 層級的角色權重:有 follow 組 → upstream 降為資訊性(選項 b)
+    _apply_follow_demotion(comparisons)
 
     # live 版本字串(提案 §3.1 第一項):套件版本讀 HEAD 的 pyproject.toml blob,
     # 與 upstream 組的共同祖先/領先數組成。**零副作用**——不跑 hermes CLI、
@@ -535,7 +693,7 @@ def _classify_target(facts: dict, expect_custom: bool, expect_rescue: bool
     """目標端整體燈。回傳 (light, advice, blocking_reasons, overall_driver)。
 
     紅(目標端層級)優先:工作樹髒／客製遺失(以 upstream 組衡量)／rescue 遺失;
-    否則取 role ∈ {upstream, backup} 兩組中較嚴重者。"""
+    否則取 role ∈ COUNTED_ROLES({upstream, backup, follow})各組中較嚴重者。"""
     if not facts.get("queryable"):
         return "gray", "無法查詢此端 repo 狀態", facts.get("reasons", []), None
 
@@ -558,12 +716,15 @@ def _classify_target(facts: dict, expect_custom: bool, expect_rescue: bool
 
     counted = [c for c in comparisons if c.get("counts_toward_overall")]
     if not counted:
-        return "gray", "無可用的比較基準(找不到官方上游或備份 remote)", \
-            ["repo 未設定可辨識的 upstream/backup remote"], None
+        return "gray", "無可用的比較基準(找不到官方上游、備份或 Windows 整合 tip remote)", \
+            ["repo 未設定可辨識的 upstream/backup/follow remote"], None
 
-    worst = max(counted, key=lambda c: LIGHT_SEVERITY.get(c["light"], 0))
-    # 建議文字:兩組語意併陳,避免「備份健康但官方有新版」被誤讀成壞掉
-    order = {"backup": 0, "upstream": 1}
+    # 較嚴重者主導;同嚴重度以 DRIVER_PRIORITY 決勝(follow > backup > upstream),
+    # 不倚賴 `git remote` 的列出順序——避免主導組的指認變成偶然。
+    worst = max(counted, key=lambda c: (LIGHT_SEVERITY.get(c["light"], 0),
+                                        DRIVER_PRIORITY.get(c["role"], -1)))
+    # 建議文字:各組語意併陳,避免「備份健康但官方有新版」被誤讀成壞掉
+    order = {"follow": 0, "backup": 1, "upstream": 2}
     parts = [c["summary"] for c in sorted(counted, key=lambda c: order.get(c["role"], 9))]
     return worst["light"], "；".join(parts), reasons, worst["role"]
 

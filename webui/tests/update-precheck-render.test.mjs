@@ -78,15 +78,77 @@ const UPSTREAM_ORANGE = comparison({
   summary: "官方有 16 個新 commit,因帶 12 個客製屬 diverged,需受控 merge(不可自動)",
 });
 
+// peer = 無法辨識的基準(例如**不是** Windows hermes-agent 的其他本機路徑)
 const PEER = comparison({
-  remote: "windows-side",
-  url: "/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent",
+  remote: "some-peer",
+  url: "/home/razer/scratch/hermes-agent",
   role: "peer",
   role_label: "其他基準(僅供參考)",
-  ref: "windows-side/main",
+  ref: "some-peer/main",
   counts_toward_overall: false,
   summary: "與此基準一致",
 });
+
+// follow = 應跟隨的權威基準(Windows 整合 tip);2026-08-03 起計入整體燈(§10.1)。
+// 語意與 upstream 相反:落後 = 該同步了(藍);領先/分歧 = 異常(橙)。
+const FOLLOW_GREEN = comparison({
+  remote: "origin",
+  url: "/mnt/c/Users/razer/AppData/Local/hermes/hermes-agent",
+  role: "follow",
+  role_label: "Windows 整合 tip(本端是否跟上——應跟隨的權威基準)",
+  ref: "origin/main",
+  counts_toward_overall: true,
+  summary: "已跟上 Windows 整合 tip ✓",
+});
+
+const FOLLOW_BLUE = comparison({
+  ...FOLLOW_GREEN,
+  behind: 5,
+  can_ff: true,
+  light: "blue",
+  light_text: "可 ff-only 前進",
+  summary: "落後 Windows 整合 tip 5 個 commit,該同步了(無分歧,結構上可 ff-only 前進)",
+});
+
+const FOLLOW_ORANGE = comparison({
+  ...FOLLOW_GREEN,
+  ahead: 2,
+  can_ff: false,
+  diverged: true,
+  diverge_commits: ["abc123 wsl-only commit"],
+  light: "orange",
+  light_text: "帶客製 diverge——需人工受控 merge",
+  summary: "領先 Windows 整合 tip 2 個 commit——本端不該有 Windows 沒有的 commit,需人工檢查",
+});
+
+// re-graft 後 WSL 的現況形態:origin = follow(Windows 整合 tip)、upstream = 官方。
+// **選項 b(2026-08-03 拍板)**:follow 存在 → 後端把 upstream 降為資訊性
+// (counts_toward_overall: false),整體燈 = follow 燈、overall_driver 恆為 follow。
+function wslFollowTarget(followGroup, overrides) {
+  return wslTarget({
+    light: followGroup.light,
+    light_text: followGroup.light_text,
+    advice: followGroup.summary,
+    overall_driver: "follow",
+    remotes: ["origin", "upstream"],
+    comparisons: [
+      followGroup,
+      comparison({
+        remote: "upstream",
+        url: "https://github.com/NousResearch/hermes-agent.git",
+        role: "upstream",
+        role_label: "官方上游(有無新版可吸收)",
+        ref: "upstream/main",
+        counts_toward_overall: false, // 選項 b:follow 存在 → 降為資訊性
+        behind: 0,
+        ahead: 12,
+        light: "green",
+        summary: "已吸收官方最新,本機另帶 12 個客製 commit",
+      }),
+    ],
+    ...overrides,
+  });
+}
 
 function windowsTarget(overrides) {
   return {
@@ -215,7 +277,66 @@ test("overall_driver 標示:僅主導組帶標記", () => {
 test("peer 組標示為僅供參考(不計入整體燈)", () => {
   const html = mod.renderCard(wslTarget({}));
   assert.ok(html.includes("僅供參考"), "peer 組須標示僅供參考");
-  assert.ok(html.includes("windows-side/main"), "須顯示 peer ref");
+  assert.ok(html.includes("some-peer/main"), "須顯示 peer ref");
+});
+
+// ---------------------------------------------------------------------------
+// follow 組(Windows 整合 tip;提案 §10.1,2026-08-03)
+// ---------------------------------------------------------------------------
+
+test("follow 組:呈現角色標籤與 ref,且**不得**標示為僅供參考(計入整體燈)", () => {
+  const html = mod.renderCard(wslFollowTarget(FOLLOW_GREEN, {}));
+  assert.ok(html.includes("Windows 整合 tip"), "須呈現 follow 角色標籤");
+  assert.ok(html.includes("origin/main"), "須顯示 follow ref");
+  assert.ok(html.includes("已跟上 Windows 整合 tip"), "須顯示同步說明");
+  // 「僅供參考」標記由 counts_toward_overall 驅動:恰出現一次,且是在降級的
+  // 官方上游組(排序在 follow 之後)——follow 組本身不得被標。
+  const markers = html.match(/僅供參考/g) ?? [];
+  assert.equal(markers.length, 1, "恰有降級的 upstream 一組標僅供參考");
+  assert.ok(html.indexOf("僅供參考") > html.indexOf("官方上游"),
+    "標記須落在官方上游組內,不在排最前的 follow 組");
+});
+
+test("選項 b:follow target 的整體燈 = follow 燈(綠),官方橙僅供參考不驅動", () => {
+  const html = mod.renderCard(wslFollowTarget(FOLLOW_GREEN, {}));
+  assert.ok(html.includes('class="update-card update-light-green"'),
+    "WSL 卡片整體須為綠(由 follow 0/0 驅動,不被官方組拉橙)");
+  assert.ok(html.includes("已吸收官方最新"), "官方組資訊照常顯示");
+  // 主導標記恰一處,且落在 follow 組(排最前,先於官方上游)
+  const drivers = html.match(/主導整體燈/g) ?? [];
+  assert.equal(drivers.length, 1, "恰有一組被標為主導");
+  assert.ok(html.indexOf("主導整體燈") < html.indexOf("官方上游"),
+    "主導標記須在 follow 組(先於官方上游組)");
+});
+
+test("follow 組:落後 = 該同步了(藍,資訊態)", () => {
+  const html = mod.renderCard(wslFollowTarget(FOLLOW_BLUE, {}));
+  assert.ok(html.includes("落後 Windows 整合 tip 5 個 commit"), "須顯示落後數");
+  assert.ok(html.includes("該同步了"), "落後須呈現為「該同步」而非異常");
+  assert.ok(html.includes("update-card update-light-blue"), "整體卡片須為藍");
+});
+
+test("follow 組:領先 = 異常(橙)——與 upstream 組語意相反", () => {
+  const html = mod.renderCard(wslFollowTarget(FOLLOW_ORANGE, {}));
+  assert.ok(html.includes("領先 Windows 整合 tip 2 個 commit"), "須顯示領先數");
+  assert.ok(html.includes("不該有 Windows 沒有的 commit"), "須明示這是異常");
+  assert.ok(html.includes("update-card update-light-orange"), "整體卡片須為橙");
+  // 同一張卡上官方組是綠——證明整體橙是 follow 組帶起來的(§10.1 的盲點已補)
+  assert.ok(html.includes("已吸收官方最新"), "官方組須同時呈現為健康");
+  assert.ok(html.includes("主導整體燈"), "須標示 follow 為主導組");
+});
+
+test("follow 組排在最前(WSL 端最該被看見的一條)", () => {
+  const html = mod.renderCard(wslFollowTarget(FOLLOW_ORANGE, {}));
+  assert.ok(html.indexOf("Windows 整合 tip") < html.indexOf("官方上游"),
+    "follow 組須排在官方上游組之前");
+});
+
+test("follow 組不引入任何執行入口(零 button 仍成立)", () => {
+  for (const group of [FOLLOW_GREEN, FOLLOW_BLUE, FOLLOW_ORANGE]) {
+    const html = mod.renderCard(wslFollowTarget(group, {}));
+    assert.ok(!html.includes("<button"), "follow 組不得帶 button");
+  }
 });
 
 test("WSL 的 origin 指向官方時,以「官方上游」角色呈現(不依 remote 名稱)", () => {

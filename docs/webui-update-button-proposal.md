@@ -578,6 +578,27 @@ push hook／定期自動 push 客製 tip 到私有備份，或在 Desktop 端封
 最該被監控的一條（WSL 的正確語意就是「跟隨 Windows」，對官方落後多少反而
 是預期中的常態，兩側都落後同樣數量）。
 
+> **✅ 已落地（2026-08-03，只做偵測層/唯讀）**：新增 `follow` role，判準是
+> `data_update.py::_is_windows_repo_url()`——**路徑正規化後與凍結的
+> `WINDOWS_REPO_PATH` 逐字相等**（純字串比對，零 I/O、零新增指令面），
+> 而非「只要是本機路徑」。誤判邊界：別名路徑（自訂 automount 根、
+> symlink/junction、8.3 短檔名、UNC）認不出 → 退回 `peer`＝修正前行為
+> （偽陰性，安全側）。燈號語意與 `upstream` 組相反：落後＝藍（該同步了）／
+> 領先或分歧＝橙（異常）。同嚴重度時 `DRIVER_PRIORITY` 讓 `follow` 優先被
+> 標為 `overall_driver`。**本次不含任何執行層**：無寫入路徑、無執行鈕、
+> 無 bridge 白名單項目；階段二仍延後。詳見 `data_update.py` 模組 docstring。
+>
+> **追加拍板（2026-08-03，選項 b）**：follow 存在的 target 上，`upstream`
+> 組**降為資訊性**（`counts_toward_overall=false`，照常顯示、UI 標
+> 「僅供參考」），整體燈由 `follow` 組**獨力驅動**——WSL 卡片即 follow
+> 三態：已跟上＝綠／落後＝藍（該同步了）／領先或分歧＝橙（異常）。
+> 理由：WSL 的 `upstream` 組因設計使然恆為橙（帶客製 diverged 是常態），
+> 若計入會讓整體燈「橙飽和」，follow 的訊號永遠顯不出顏色差異。實作為
+> `_apply_follow_demotion()`——規則跟著 remote 拓撲走（「有 follow 組」⇒
+> 該端是跟隨者），**不硬編 target id**；拓撲若變（WSL 改指雲端）upstream
+> 自動回復計入。`backup` 不受降級影響（防重演基準任何 target 都計入）。
+> 無 follow 的 target（Windows）行為完全不變。
+
 **待辦（需獨立評估與核准，不在本次改動範圍）**：考慮新增一種 role
 （暫名 `follow` / `peer-authoritative`），讓「**本機路徑 remote 且指向
 Windows hermes-agent repo**」能被辨識並**計入 WSL target 的整體燈**：
@@ -589,5 +610,6 @@ Windows hermes-agent repo**」能被辨識並**計入 WSL target 的整體燈**�
 - 需同步更新 `data_update.py` 的 `ROLE_LABEL`、`_build_comparison()` 的
   `counts_toward_overall`、`_classify_target()` 的燈號合成，以及該模組
   docstring 的角色表與燈號表。
-- **在此待辦落地前，判定邏輯維持不動**——只在 docstring 記載此限制，避免
-  在沒有完整評估的情況下改動燈號語意。
+- ~~**在此待辦落地前，判定邏輯維持不動**——只在 docstring 記載此限制，避免
+  在沒有完整評估的情況下改動燈號語意。~~（已由上方 2026-08-03 落地取代；
+  docstring 的「已知限制」段已同步改寫成 `follow` role 的判準與誤判邊界。）

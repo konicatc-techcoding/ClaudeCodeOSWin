@@ -179,9 +179,17 @@ export type UpdateTargetService = {
 export type UpdateRescueRef = { name: string; object: string; type: string };
 
 // 比較基準角色:upstream=官方上游(有無新版可吸收)、backup=私有備份/防重演
-// 基準(本機與雲端是否同步)、peer=其他基準(僅供參考,不計入整體燈)。
-// 角色由資料層**依 remote URL** 判定,不依 remote 名稱——兩端 remote 命名不同。
-export type UpdateRole = "upstream" | "backup" | "peer";
+// 基準(本機與雲端是否同步)、follow=應跟隨的權威基準(Windows 整合 tip;
+// 2026-08-03 新增,提案 §10.1)、peer=其他基準(僅供參考,不計入整體燈)。
+// 角色由資料層**依 remote URL** 判定,不依 remote 名稱——兩端 remote 命名不同;
+// follow 的判準是「路徑正規化後等於 Windows hermes-agent repo」,不是「本機路徑」。
+// **follow 的燈號語意與 upstream 相反**:落後 = 該同步了(藍,資訊態);
+// 領先/分歧 = 異常(橙)——WSL 理論上不該有 Windows 沒有的 commit。
+// 計入整體燈與否一律以後端的 counts_toward_overall 欄位為準(UI 不依 role
+// 自行判斷):peer 永不計入;**follow 存在的 target 上 upstream 也降為資訊性**
+// (2026-08-03 拍板,選項 b——該端語意是跟隨者,對官方落後是預期常態),
+// 此時整體燈由 follow 組獨力驅動;無 follow 的 target(Windows)行為不變。
+export type UpdateRole = "upstream" | "backup" | "follow" | "peer";
 
 export type UpdateComparison = {
   remote: string;
