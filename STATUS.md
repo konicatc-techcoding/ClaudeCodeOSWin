@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-02
+**最後更新**:2026-08-03
 
 ---
 
@@ -55,50 +55,35 @@
 
 ## 2. 上一個 session 做了什麼
 
-(2026-07-30,自上次快照 `565970c` 以來共 5 個 commit + 本收尾 commit,
-皆已 push;主軸=named profile session 讀取實證 → 記憶生命週期拍板到
-全面落地。)
+(2026-08-02~03,自上次快照 `d2542c7` 以來共 5 個 commit + 本收尾 commit,
+皆已 push;主軸=A1 驗收——製造測試流量 → 實戰揪出三 bug → 修復 → 簽收。
+完整驗收紀錄正本:[memory-lifecycle-proposal](docs/memory-lifecycle-proposal.md)
+§7 驗收紀錄。)
 
-- **named profile session 讀取路徑實證**:跨庫 FTS 定位使用者的 gptcoding
-  Telegram 對話(「Gemini 即時翻譯字幕系統設計」,在 WSL 側主 state.db、
-  `profile_name` 欄標記;live db 用快照複製避鎖),蒸餾入正本
-  `memory/project_live-translate-vmix-caption-design.md`(`986bb1e`,標注
-  設計討論尚未開工)。
-- **記憶生命週期提案+四項拍板**(planning 起草,
-  [memory-lifecycle-proposal](docs/memory-lifecycle-proposal.md) v1.1):
-  汰選=**全自動歸檔**(豁免:拍板決策/事故教訓/feedback;冷啟動保護)、
-  A1 核准+先查證(inactivity 72h 維持)、升格=C-a 索引分層、B1 recall
-  log 核准(接受方向性下限)。關鍵盤點:default profile 的自動蒸餾**本來
-  就存在**,真缺口=named 全漏/recall 零統計/記憶只進不出。
-- **第一批落地**(`105eedb`):`scripts/log_recall.py`(11 測試)+決策程序
-  步驟 1.5 埋點+`consolidation_policy.yaml` `retention:` 區塊+
-  daily-memory-check prompt 第 4 步+SKILL.md retention 指引;已 sync 兩側。
-- **A1 落地**(`55b6639`):bridge 三件組+adapter 多 profile 擴充——
-  namespace `hermes/<profile>:`啟用(裸形式恆等 default 零 migration)、
-  主 db 依 `profile_name` 分流+四顆 profile db 納掃、per-profile cutover、
-  WAL symlink 修正、tool 縮減(500 字元/則,敏感偵測在縮減前)。
-  查證發現:WSL `~/.hermes/state.db` 是 symlink 指向 Windows 主 db(兩側
-  同一顆);lane session 83–94% 是 tool 輸出。
-- **部署中抓到既有 bug 並修**(`b315d71`):reconcile 的 cursor_recovery
-  是無條件空重放,健康與否無從分辨——改為只在 cursor 真落後時動作,
-  「跑兩次第二次歸零」成為機械判準(WSL 實證通過)。
-- **A1 上線**(`8860034`):runbook §7 步驟 1–9 全過,四 profile cutover=
-  `2026-07-30T09:15:55Z`,兩側 dry-run 皆零歷史湧入(49 筆歷史 episode
-  正確被擋)。
-- 測試終值:hermes 483、scripts 107、皆綠。
-
-**(2026-08-02 增補,非收尾 session)**
-
-- **A1 首輪健康檢查**:部署後三輪每日掃描(07-31~08-02)零錯誤,watermark
-  正常推進;named episode 0 筆經查證為**正確結果**(cutover 後五個 named
-  profile 零新活動,49 筆歷史持續被擋)。
-- **製造驗收用測試流量**:主 session 經 gptcoding lane 跑唯讀三步驟任務
-  (session `20260802_113516_3c63ea`,5 則訊息/11117 字元/已 ended,全部
-  超過擷取門檻);dry-run 預演確認 `create_episode…trigger=ended｜
-  profile=gptcoding` 將於 08-03 08:05 首次真實擷取。
-- 順帶觀察:白天忙時段 WSL 經 /mnt/c 對主 db 做快照會輸給 WAL 高頻寫入
-  (fail-loud 三次重試放棄,設計行為);每日 08:05 排程時段三輪實績皆
-  成功——暫不動重試參數,若排程時段也開始撞再議。
+- **健康檢查+測試流量**(`6928f3d`):部署後每日掃描零錯誤;named episode
+  0 筆查證為正確(cutover 後零 named 活動);經 gptcoding lane 造測試
+  session 並以 dry-run 預演確認會被擷取。
+- **驗收實戰揪出三問題並修復**(`e3df425`):
+  (1) **importer 佇列發散**(既有,潛伏兩週):`--limit 10` 掐住零成本的
+  skip 判定,佇列 +24/−10 每日淨增,積壓 6283 筆、頭停 07-17——改為 limit
+  只計實質落地(to_inbox/needs_review),skip 不計數;手動全量出清
+  (6284 筆:落地僅 1、雜訊 skip 3054、duplicate 3211、敏感攔 17)。
+  (2) **checkpoint 非 profile-aware**(A1 缺口):指定 profile db 會默默落
+  default namespace——改為 db 歸屬推導(與 scan 同規則)+`--source-profile`
+  僅交叉驗證、不符 fail loud;實測 `hermes/nemocoding:` 正確。
+  (3) gptcoding 的 codex 訂閱當日 429 用量上限——換 nemocoding 完成測試
+  (供應商多樣性的實際價值)。
+- **敏感 fail-closed 首次實戰**:測試 session 讀了 consolidation_policy.yaml,
+  tool 輸出引用偵測 pattern 字面 → 自我指涉命中 → needs_review 零外洩
+  (寧可誤攔如設計)。已知邊界:引用政策檔的 session 必被誤攔。
+- **too_short 語義釐清(修正 07-30 查證錯誤)**:episode 判定只計實質對話
+  訊息(user+有內容 assistant),tool 不計——**單發 lane 任務(2 則)不入庫
+  是正確設計**(價值已由 envelope 回傳);A1 擷取對象=多輪 named 對話。
+  連帶:「lane 雜訊灌 consolidation」風險對單發任務不成立,摘要步維持暫緩。
+- **A1 簽收**(`e41edf2`)+ inbox 兩新件入庫(`25486c1`:07-31 skill-catalog
+  +積壓清理落地的 07-16 episode,待 N-gate 整併)+ 平行 session 的術語
+  記憶補 commit(`1bc6802`:「開啟服務」=新版 webui)。
+- 測試終值:hermes 491、全綠。
 
 ## 3. 卡住/未決的問題
 
@@ -127,12 +112,11 @@
   實證(profile state.db 快照複製+FTS 搜尋,手動可挖)且 A1 上線後
   named session 會自動進記憶;剩 webui「Hermes Sessions」view 仍只讀
   預設 profile 的呈現層缺口。待議,優先級降。
-- **A1 驗收已完成(08-03,詳細紀錄見提案 §7 驗收紀錄)**:核心全過;
-  實戰揪出並修復兩缺口(importer limit 佇列發散、checkpoint 非
-  profile-aware);敏感 fail-closed 首次實戰攔截(自我指涉誤攔,已知邊界);
-  釐清 too_short 只計實質對話訊息——**單發 lane 任務不入庫是正確設計**
-  (envelope 已回傳),A1 抓的是多輪 named 對話。唯一留給自然流量的:
+- **A1 驗收已結案(08-03,紀錄正本=提案 §7)**:唯一留給自然流量的是
   首個多輪 named episode 落地檔的目視(render 有單測釘格式)。
+- **白天手動跑 bridge 掃描可能撞 WAL**(08-02 觀察):忙時段 WSL 經
+  /mnt/c 對主 db 快照會輸給高頻寫入(fail-loud 三次重試放棄,設計行為);
+  每日 08:05 排程時段實績皆成功。排程時段也開始撞再議重試參數。
 - **retention 冷啟動中**:recall log 自 07-30 起算,覆蓋滿 90 天(約 10 月底)
   前 retention review 只做升格不汰選——這是設計,不是故障。
 - **keepalive 第二階段(watchdog+toast)拍板暫緩**:殘餘風險=WSL 本身壞掉
