@@ -24,7 +24,10 @@
   驗證,提案正本
   [docs/webui-service-control-proposal.md](docs/webui-service-control-proposal.md) v1.1)。
   總覽頁/排程表的 systemd 欄位已改經 WSL 唯讀探測(`dashboard/data_systemd_wsl.py`),
-  「未安裝」誤報已修正。
+  「未安裝」誤報已修正。**觀測面 stack 有一鍵啟動器**
+  (`scripts/start_webui_stack`,冪等,桌面捷徑「AgentOS WebUI」),總覽頁
+  頂部並排顯示服務控制(WSL systemd)與本機服務(8787/8801/5173/8799)
+  狀態卡——開機後點捷徑即全套就緒(背景鏈本來就自動)。
 - **WSL keepalive 已補強自癒**:`HermesWslKeepAlive` 曾於 07-24~27 靜默停擺
   三天(常駐燈號首次抓到真實事故);現有 TimeTrigger PT15M backstop,死了
   最壞 15 分鐘自動拉回(實測零人工介入復活整條鏈)。提案正本
@@ -55,10 +58,21 @@
 
 ## 2. 上一個 session 做了什麼
 
-(2026-08-02~03,自上次快照 `d2542c7` 以來共 5 個 commit + 本收尾 commit,
-皆已 push;主軸=A1 驗收——製造測試流量 → 實戰揪出三 bug → 修復 → 簽收。
+(2026-08-02~03,自上次快照 `d2542c7` 以來共 7 個 commit + 本收尾 commit,
+皆已 push;主軸=A1 驗收簽收 + 觀測面啟動體驗補完。
 完整驗收紀錄正本:[memory-lifecycle-proposal](docs/memory-lifecycle-proposal.md)
 §7 驗收紀錄。)
+
+**觀測面啟動體驗(08-03 後段)**
+
+- **一鍵啟動器**(`5dbbc53`):`scripts/start_webui_stack.ps1`+`.vbs` 零黑窗
+  wrapper——冪等(探測四 port 只補缺的;npm-local 三件組 all-or-nothing,
+  部分運行誠實報錯不硬啟)、就緒後自動開瀏覽器;桌面捷徑「AgentOS WebUI」
+  已建。實測:冷啟四 port 全起、冪等重跑正確、UI 燈號全綠。
+- **UI 版面**(`b7d9fed`):服務控制+新增的「本機服務」狀態卡從 sidebar
+  搬到總覽頁頂部並排(grid auto-fit,窄幕堆疊)、字級放大;sidebar 只留
+  聚合燈。本機服務卡**刻意零操作鍵**(啟動時 UI 已死按鈕不存在、停止會
+  鋸自己坐的樹枝——啟動入口誠實放 UI 外的捷徑)。
 
 - **健康檢查+測試流量**(`6928f3d`):部署後每日掃描零錯誤;named episode
   0 筆查證為正確(cutover 後零 named 活動);經 gptcoding lane 造測試
@@ -154,6 +168,8 @@
   WSL 本身的問題)。
 - **A1 已驗收結案**:日常留意首個多輪 named 對話的 episode 落地檔
   (frontmatter/tool 縮減目視即可)。
+- **launcher `-Restart` 選項待答**:若要「一鍵重啟整套 stack」,給
+  launcher 加參數+第二個桌面捷徑即可(已向使用者提出,未答)。
 - **lane 通道已全通,可開始真實使用**:前台直接指定(「用 GPT 做 X」),
   Telegram 入口亦可;named profile 對話現在會自動進記憶(最壞 3 天),
   累積真實使用觀察,供日後「依任務類型自動選模型」規則引擎的設計依據。
