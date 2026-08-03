@@ -197,6 +197,9 @@ button { color: inherit; }
 .service-converge-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #fbbf24; margin-right: 5px; box-shadow: 0 0 5px 0 currentColor; }
 .service-note-error .service-converge-dot { background: #f87171; }
 .service-stop-semantics { font-size: 10px; }
+/* 本機服務燈號區(2026-08-03,唯讀零操作鍵):沿用 .service-control 盒/列/
+   燈號既有視覺,只補說明小字的層級 */
+.local-services-note { font-size: 10px; color: #9ca3af; }
 @media (max-width: 760px) { .service-control { display: none; } }
 
 /* ---- Hermes 更新——唯讀升級預檢(階段一;webui-update-button-proposal §3)---- */

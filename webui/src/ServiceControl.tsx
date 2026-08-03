@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { ServiceUnitLight, useResidentStatus } from "./ResidentStatus";
 
 // 服務控制鍵(寫入,白名單第二群組;2026-07-27 使用者核准,設計正本
@@ -41,7 +41,47 @@ export const BRIDGE_HEALTH_POLL_MS = 30_000; // bridge 在線探測輪詢
 export const CONVERGE_NOTICE_MS = 45_000; // 收斂提示至少涵蓋一輪燈號輪詢(30s)
 
 type PendingAction = { unit: ServiceUnit; op: ServiceOp };
-type BridgeState = "unknown" | "online" | "offline";
+export type BridgeState = "unknown" | "online" | "offline";
+
+// --- bridge(8787)health 共享輪詢 store(2026-08-03 抽出)---
+// 原本是元件內 useEffect 的私有探測;為了讓 sidebar「本機服務」區塊
+// (LocalServices.tsx)顯示 Bridge 燈號而抽成模組層 store——同一條 30 秒輪詢、
+// 單一 interval、單一 fetch 位點,多訂閱者共用,不開第二條輪詢(節奏不變)。
+// 探測仍是唯讀 GET /health;操作面(POST /api/service/*)完全不受影響。
+let bridgeSnapshot: BridgeState = "unknown";
+const bridgeListeners = new Set<() => void>();
+let bridgeTimer: ReturnType<typeof setInterval> | null = null;
+
+async function pollBridgeHealth(): Promise<void> {
+  try {
+    const response = await fetch(`${BRIDGE_URL}/health`, { signal: AbortSignal.timeout(2500) });
+    bridgeSnapshot = response.ok ? "online" : "offline";
+  } catch {
+    bridgeSnapshot = "offline";
+  }
+  for (const listener of bridgeListeners) listener();
+}
+
+function subscribeBridgeHealth(listener: () => void): () => void {
+  bridgeListeners.add(listener);
+  if (bridgeListeners.size === 1) {
+    void pollBridgeHealth();
+    bridgeTimer = setInterval(() => void pollBridgeHealth(), BRIDGE_HEALTH_POLL_MS);
+  }
+  return () => {
+    bridgeListeners.delete(listener);
+    if (bridgeListeners.size === 0 && bridgeTimer !== null) {
+      clearInterval(bridgeTimer);
+      bridgeTimer = null;
+    }
+  };
+}
+
+// 唯讀共享 hook:bridge 8787 在線狀態(ServiceControl 按鈕可用性與
+// LocalServices 燈號同源取數)
+export function useBridgeHealth(): BridgeState {
+  return useSyncExternalStore(subscribeBridgeHealth, () => bridgeSnapshot);
+}
 
 // 操作鈕圖示化(2026-07-27):每列三鈕改為 play(啟動)/reload(重啟)/stop(停止)
 // 圖示,騰出橫向空間給個別燈號。inline SVG + currentColor——顏色跟隨按鈕文字色
@@ -74,30 +114,13 @@ function OpIcon({ op }: { op: ServiceOp }) {
 type ServiceResult = { ok?: boolean; error?: string; exitCode?: number | null };
 
 export default function ServiceControl() {
-  const [bridgeState, setBridgeState] = useState<BridgeState>("unknown");
+  // bridge 在線狀態:模組層共享 store(與 LocalServices 燈號同源、單一輪詢)
+  const bridgeState = useBridgeHealth();
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busyUnit, setBusyUnit] = useState<ServiceUnit | null>(null);
   const [notice, setNotice] = useState<{ kind: "converging" | "error"; text: string } | null>(null);
   // 個別燈號資料:與聚合燈同源(8799 唯讀共享 store),非 bridge
   const residentStatus = useResidentStatus();
-
-  useEffect(() => {
-    let cancelled = false;
-    const probe = async () => {
-      try {
-        const response = await fetch(`${BRIDGE_URL}/health`, { signal: AbortSignal.timeout(2500) });
-        if (!cancelled) setBridgeState(response.ok ? "online" : "offline");
-      } catch {
-        if (!cancelled) setBridgeState("offline");
-      }
-    };
-    void probe();
-    const timer = setInterval(probe, BRIDGE_HEALTH_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
 
   useEffect(() => {
     if (notice?.kind !== "converging") return;

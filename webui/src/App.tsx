@@ -3,6 +3,7 @@ import CostView from "./views/Cost";
 import CredentialsView from "./views/Credentials";
 import HermesView from "./views/Hermes";
 import JobsView from "./views/Jobs";
+import LocalServices from "./LocalServices";
 import LogsView from "./views/Logs";
 import MemoryView from "./views/Memory";
 import Overview from "./views/Overview";
@@ -69,6 +70,11 @@ export default function App() {
             同一脈絡,經 bridge 8787 的枚舉 route 操作,二次確認+不樂觀更新。
             設計正本 docs/webui-service-control-proposal.md §2。 */}
         <ServiceControl />
+
+        {/* 本機服務燈號(2026-08-03,唯讀零操作鍵):Web UI stack 四個本機
+            port(8799/8787/8801/5173)的開/關狀態;啟動一律在 UI 外用
+            scripts/start_webui_stack(UI 死了按鈕也死,不做假啟動鈕)。 */}
+        <LocalServices />
 
         <p className="nav-label">WORKSPACE</p>
         <nav className="main-nav" aria-label="主要功能">

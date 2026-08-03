@@ -26,11 +26,19 @@ let residentSnapshot: ResidentStatusPayload | null = null;
 const residentListeners = new Set<() => void>();
 let residentTimer: ReturnType<typeof setInterval> | null = null;
 
+// 唯讀 API(8799)可達性(2026-08-03,「本機服務」區塊):不另發任何請求,
+// 直接以本 store 既有輪詢的成敗當作 8799 存活判斷——最便宜的探測是零額外
+// 請求。"unknown" 只出現在第一次輪詢回來之前(顯示灰燈,不假裝已知)。
+export type ResidentApiState = "unknown" | "online" | "offline";
+let residentApiState: ResidentApiState = "unknown";
+
 async function pollResidentStatus(): Promise<void> {
   try {
     residentSnapshot = await apiGet<ResidentStatusPayload>("/api/resident-status");
+    residentApiState = "online";
   } catch {
     residentSnapshot = null; // 探測失敗 → 灰燈「無法查詢」,不噴例外(mock 清零)
+    residentApiState = "offline";
   }
   for (const listener of residentListeners) listener();
 }
@@ -53,6 +61,12 @@ function subscribeResidentStatus(listener: () => void): () => void {
 // 唯讀共享 hook:回傳最新一次輪詢快照(null = 尚未取得/查詢失敗 → 灰燈)
 export function useResidentStatus(): ResidentStatusPayload | null {
   return useSyncExternalStore(subscribeResidentStatus, () => residentSnapshot);
+}
+
+// 唯讀共享 hook:8799 唯讀 API 本身的可達性(LocalServices「本機服務」區塊
+// 取數用)。與快照同一條 30 秒輪詢、同一個訂閱生命週期——零新增請求位點。
+export function useResidentApiState(): ResidentApiState {
+  return useSyncExternalStore(subscribeResidentStatus, () => residentApiState);
 }
 
 const LIGHT_COLORS: Record<ResidentLight, string> = {
