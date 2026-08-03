@@ -10,6 +10,8 @@ import {
   type SystemdStatusPayload,
 } from "../api";
 import { ErrorNotice, InfoNotice, Metric, Panel, RefreshButton, useApiData, WarnNotice } from "./common";
+import LocalServices from "../LocalServices";
+import ServiceControl from "../ServiceControl";
 import SchedulePanel from "./Schedule";
 
 // 與 dashboard/app.py 的 SYSTEMD_LABELS 一致
@@ -89,6 +91,20 @@ export default function Overview() {
       {data && !data.health.jobs_db_exists && (
         <WarnNotice message="hermes/jobs.db 尚未建立(runtime 資料,不在 git 裡)。worker 或 adapter 第一次執行後就會建立;在那之前 Jobs/成本分頁會是空的。" />
       )}
+
+      {/* 服務控制鍵+本機服務燈號(2026-08-03 自 sidebar 遷入,置於
+          Worker/Adapter 狀態上方):兩欄 grid 左右並排,窄視窗由 auto-fit
+          自然換行堆疊(不出橫向捲軸)。兩元件的安全語意(二次確認全文字、
+          stop 語意明示、bridge 離線停用、白名單枚舉)全在元件內部,搬掛載點
+          不改行為;取數皆為模組層共享 store(resident/bridge/PTY 各單一
+          輪詢),搬動不新增輪詢——切出總覽 view 後 bridge/PTY store 因最後
+          訂閱者退場而停止輪詢(合理省資源),sidebar 聚合燈常駐訂閱的
+          resident 輪詢不受影響。不依賴本頁 API 取數,API 掛掉也照常顯示。 */}
+      <div className="service-overview-grid">
+        <ServiceControl />
+        <LocalServices />
+      </div>
+
       {data && (
         <>
           <Panel

@@ -306,14 +306,21 @@ test("UI 行為邊界:二次確認、stop 語意明示、不樂觀更新、bridg
   assert.ok(source.includes("未運行,按鈕已停用"), "停用時須說明原因與啟動方式");
 });
 
-test("App.tsx:ServiceControl 掛載於 sidebar、緊鄰 ResidentStatus(同一脈絡)", async () => {
+test("掛載位置(2026-08-03 遷移):ServiceControl 移出 sidebar,掛在總覽頁 Worker/Adapter 狀態上方的兩欄 grid", async () => {
   const app = await readFile(join(root, "src", "App.tsx"), "utf8");
+  // sidebar 不再掛服務控制;聚合燈(ResidentStatus)留在原位常駐
+  assert.ok(!app.includes("<ServiceControl />"), "App.tsx(sidebar)不得再掛服務控制鍵");
   const sidebarIdx = app.indexOf('className="sidebar"');
   const residentIdx = app.indexOf("<ResidentStatus />");
-  const serviceIdx = app.indexOf("<ServiceControl />");
   const workspaceIdx = app.indexOf('className="workspace"');
-  assert.ok(sidebarIdx >= 0 && residentIdx > sidebarIdx && serviceIdx > residentIdx && serviceIdx < workspaceIdx,
-    "服務控制鍵必須在 sidebar 內、緊接常駐狀態燈號之後");
+  assert.ok(sidebarIdx >= 0 && residentIdx > sidebarIdx && residentIdx < workspaceIdx,
+    "聚合燈必須留在 sidebar 原位(常駐訂閱 resident store,輪詢不因切 view 停止)");
+  const overview = await readFile(join(root, "src", "views", "Overview.tsx"), "utf8");
+  const gridIdx = overview.indexOf('className="service-overview-grid"');
+  const serviceIdx = overview.indexOf("<ServiceControl />");
+  const workerPanelIdx = overview.indexOf("Worker / Adapter 狀態");
+  assert.ok(gridIdx >= 0 && serviceIdx > gridIdx && workerPanelIdx > serviceIdx,
+    "服務控制鍵必須在總覽頁的兩欄 grid 內、Worker/Adapter 狀態區塊上方");
 });
 
 test("讀寫分離不回退:ResidentStatus.tsx 仍零操作入口(button/onClick/fetch 皆無)", async () => {

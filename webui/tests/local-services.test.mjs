@@ -59,11 +59,14 @@ test("共享 store 來源不回退:ServiceControl 仍只有兩個 fetch 位點�
   assert.equal(fetches.length, 2, "抽出共享 store 後 fetch 位點仍須恰為 health + 服務操作兩處");
 });
 
-test("App.tsx:LocalServices 掛載於 sidebar(常駐,不隨 view 卸載)", async () => {
+test("掛載位置(2026-08-03 遷移):LocalServices 與 ServiceControl 並排於總覽頁 grid、Worker/Adapter 狀態上方", async () => {
   const app = await readFile(join(root, "src", "App.tsx"), "utf8");
-  const sidebarIdx = app.indexOf('className="sidebar"');
-  const localIdx = app.indexOf("<LocalServices />");
-  const workspaceIdx = app.indexOf('className="workspace"');
-  assert.ok(sidebarIdx >= 0 && localIdx > sidebarIdx && localIdx < workspaceIdx,
-    "本機服務區塊必須在全 view 共用的 sidebar 內");
+  assert.ok(!app.includes("<LocalServices />"), "App.tsx(sidebar)不得再掛本機服務區塊");
+  const overview = await readFile(join(root, "src", "views", "Overview.tsx"), "utf8");
+  const gridIdx = overview.indexOf('className="service-overview-grid"');
+  const serviceIdx = overview.indexOf("<ServiceControl />");
+  const localIdx = overview.indexOf("<LocalServices />");
+  const workerPanelIdx = overview.indexOf("Worker / Adapter 狀態");
+  assert.ok(gridIdx >= 0 && serviceIdx > gridIdx && localIdx > serviceIdx && workerPanelIdx > localIdx,
+    "本機服務區塊必須與服務控制鍵同在總覽頁兩欄 grid、Worker/Adapter 狀態上方");
 });

@@ -44,7 +44,7 @@ type PendingAction = { unit: ServiceUnit; op: ServiceOp };
 export type BridgeState = "unknown" | "online" | "offline";
 
 // --- bridge(8787)health 共享輪詢 store(2026-08-03 抽出)---
-// 原本是元件內 useEffect 的私有探測;為了讓 sidebar「本機服務」區塊
+// 原本是元件內 useEffect 的私有探測;為了讓「本機服務」區塊
 // (LocalServices.tsx)顯示 Bridge 燈號而抽成模組層 store——同一條 30 秒輪詢、
 // 單一 interval、單一 fetch 位點,多訂閱者共用,不開第二條輪詢(節奏不變)。
 // 探測仍是唯讀 GET /health;操作面(POST /api/service/*)完全不受影響。
@@ -91,21 +91,21 @@ export function useBridgeHealth(): BridgeState {
 function OpIcon({ op }: { op: ServiceOp }) {
   if (op === "start") {
     return (
-      <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
+      <svg viewBox="0 0 12 12" width="16" height="16" aria-hidden="true" focusable="false">
         <polygon points="2.5,1.5 10.5,6 2.5,10.5" fill="currentColor" />
       </svg>
     );
   }
   if (op === "restart") {
     return (
-      <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
+      <svg viewBox="0 0 12 12" width="16" height="16" aria-hidden="true" focusable="false">
         <path d="M10.5 6A4.5 4.5 0 1 1 6 1.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         <polygon points="6,0 9.2,1.6 6,3.2" fill="currentColor" />
       </svg>
     );
   }
   return (
-    <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
+    <svg viewBox="0 0 12 12" width="16" height="16" aria-hidden="true" focusable="false">
       <rect x="2" y="2" width="8" height="8" rx="1" fill="currentColor" />
     </svg>
   );

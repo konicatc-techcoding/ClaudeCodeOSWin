@@ -168,39 +168,42 @@ button { color: inherit; }
 .resident-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- 服務控制鍵(寫入,第二白名單群組;webui-service-control-proposal v1.1 §2) ---- */
-/* 非語意說明文字調亮(2026-07-27);燈號/按鈕語意色(紅 stop、黃收斂、
-   #9ca3af 離線灰、灰燈「無法查詢」)維持不變 */
-.service-control { margin: 0 7px 14px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(255,255,255,.03); font-size: 11px; color: #d8dbe3; display: grid; gap: 6px; }
-.service-control-title { margin: 0; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #b8bec9; }
-.service-control-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.service-unit { font-weight: 700; color: var(--text); }
-.service-actions { display: flex; gap: 4px; }
+/* 2026-08-03 遷至總覽頁(Worker/Adapter 狀態上方):與本機服務燈號區左右
+   並排兩欄——auto-fit minmax,窄視窗自然換行堆疊,不出橫向捲軸;卡片外觀
+   與尺寸自 sidebar 縮小版放大,對齊 .panel(邊框/圓角/底色/字級)。
+   燈號/按鈕語意色(紅 stop、黃收斂、#9ca3af 離線灰、灰燈「無法查詢」)不變 */
+.service-overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 15px; align-items: start; }
+.service-control { margin: 0; padding: 15px 18px; border: 1px solid var(--line); border-radius: 14px; background: rgba(21,24,31,.94); font-size: 15px; color: #d8dbe3; display: grid; gap: 11px; }
+.service-control-title { margin: 0; font-size: 15px; letter-spacing: .08em; text-transform: uppercase; color: #b8bec9; }
+.service-control-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.service-unit { font-weight: 700; color: var(--text); font-size: 16px; }
+.service-actions { display: flex; gap: 7px; }
 /* 個別服務小燈號(唯讀,與聚合燈同源;2026-07-27 拍板)——狀態文字調亮,
    但灰燈「無法查詢」屬語意灰,由下一條規則保留原灰色 */
-.service-unit-light { display: inline-flex; align-items: center; gap: 4px; margin-right: auto; font-size: 10px; color: #d8dbe3; cursor: help; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.service-unit-light { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; font-size: 14px; color: #d8dbe3; cursor: help; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .service-unit-light.service-unit-light-gray { color: var(--muted-2); }
-.service-unit-light-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: 0 0 5px 0 currentColor; }
+.service-unit-light-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: 0 0 6px 0 currentColor; }
 .service-unit-light-text { overflow: hidden; text-overflow: ellipsis; }
-.service-btn { padding: 3px 7px; border: 1px solid var(--line-soft); border-radius: 6px; background: rgba(255,255,255,.05); color: #d8dbe3; font-size: 11px; cursor: pointer; }
+.service-btn { padding: 6px 12px; border: 1px solid var(--line-soft); border-radius: 7px; background: rgba(255,255,255,.05); color: #d8dbe3; font-size: 15px; cursor: pointer; }
 .service-btn:hover:not(:disabled) { background: rgba(255,255,255,.12); }
 .service-btn:disabled { opacity: .4; cursor: not-allowed; }
-/* 圖示按鈕(play/reload/stop inline SVG,currentColor 跟隨文字色) */
-.service-btn-icon { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 21px; padding: 4px 6px; }
+/* 圖示按鈕(play/reload/stop inline SVG,currentColor 跟隨文字色)——
+   總覽頁尺寸放大到好點擊(≥ 44×34 命中面積,與 +2px 字級協調) */
+.service-btn-icon { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 34px; padding: 8px 11px; }
 .service-btn-icon svg { display: block; }
 .service-btn-stop { border-color: rgba(248,113,113,.5); color: #f87171; }
-.service-confirm { border: 1px solid rgba(251,191,36,.5); border-radius: 7px; padding: 6px 8px; display: grid; gap: 5px; }
+.service-confirm { border: 1px solid rgba(251,191,36,.5); border-radius: 9px; padding: 10px 12px; display: grid; gap: 8px; }
 .service-confirm p { margin: 0; word-break: break-all; }
 .service-note { margin: 0; line-height: 1.5; color: #c9cdd7; }
 .service-note-offline { color: #9ca3af; }
 .service-note-error { color: #f87171; }
 .service-note-converging { color: #fbbf24; }
-.service-converge-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #fbbf24; margin-right: 5px; box-shadow: 0 0 5px 0 currentColor; }
+.service-converge-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #fbbf24; margin-right: 5px; box-shadow: 0 0 5px 0 currentColor; }
 .service-note-error .service-converge-dot { background: #f87171; }
-.service-stop-semantics { font-size: 10px; }
-/* 本機服務燈號區(2026-08-03,唯讀零操作鍵):沿用 .service-control 盒/列/
-   燈號既有視覺,只補說明小字的層級 */
-.local-services-note { font-size: 10px; color: #9ca3af; }
-@media (max-width: 760px) { .service-control { display: none; } }
+.service-stop-semantics { font-size: 14px; }
+/* 本機服務燈號區(唯讀零操作鍵):沿用 .service-control 盒/列/燈號既有視覺,
+   只補說明小字的層級 */
+.local-services-note { font-size: 14px; color: #9ca3af; }
 
 /* ---- Hermes 更新——唯讀升級預檢(階段一;webui-update-button-proposal §3)---- */
 /* 純唯讀:卡片式兩端並列+五態燈+落後 commit 數+文字建議;無任何執行/升級/同步鈕 */

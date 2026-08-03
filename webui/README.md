@@ -186,7 +186,9 @@ dashboard 操作)以**獨立常數分列**,測試斷言兩群組各自的完整�
 - **audit log**:沿用同一份 `logs/webui_bridge_audit.log`,每次操作
   (含拒絕)一筆——時間、動詞(`service:<op>`)、單元、結果/exit code。
 - **重複操作防護**:同一單元已有操作進行中 → 409 + audit。
-- **UI**(`src/ServiceControl.tsx`,sidebar 燈號下方):枚舉與 bridge
+- **UI**(`src/ServiceControl.tsx`;2026-08-03 起掛在總覽頁 Worker/Adapter
+  狀態上方,與本機服務燈號區(`src/LocalServices.tsx`)兩欄並排——sidebar
+  只留聚合燈):枚舉與 bridge
   一致(測試斷言);全部動作**二次確認**;操作後**不樂觀更新**(顯示
   黃色收斂等待,狀態以燈號 30 秒輪詢收斂為準);bridge 未運行時按鈕為
   明確停用狀態+原因說明(不做假按鈕)。唯讀燈號(`ResidentStatus.tsx`)

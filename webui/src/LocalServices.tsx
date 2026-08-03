@@ -4,7 +4,8 @@ import type { ResidentApiState } from "./ResidentStatus";
 import { useBridgeHealth } from "./ServiceControl";
 import type { BridgeState } from "./ServiceControl";
 
-// 「本機服務」狀態區(2026-08-03 拍板,任務 2):sidebar 顯示 Web UI 觀測面
+// 「本機服務」狀態區(2026-08-03 拍板,任務 2;同日稍晚自 sidebar 遷至
+// 總覽頁,與 ServiceControl 並排):顯示 Web UI 觀測面
 // stack 四個本機服務(唯讀 API 8799 / Bridge 8787 / PTY 8801 / UI 5173)的
 // 開/關燈號。**純唯讀、零操作鍵**:UI 死了畫面上的按鈕也死——啟動必須在
 // UI 外做(scripts/start_webui_stack),這裡誠實面對這個結構,只給燈號與
