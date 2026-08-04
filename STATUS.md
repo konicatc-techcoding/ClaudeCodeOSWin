@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-04(第二次收工)
+**最後更新**:2026-08-04(第三次收工)
 
 ---
 
@@ -73,6 +73,13 @@
   第四個寫入例外(bridge 8787 第三群組):四條凍結 fetch 指令、零參數、
   無 --prune 純加法、per-remote fail-loud、audit 逐條;預檢 `?fresh=1`
   cache-bust,按完即見新數字。實按驗證四條全過。security_check 12→13 項。
+- **升級流程已 skill 化(08-04 第三輪)**:`/hermes-upgrade` skill + 兩支冪等
+  script(`scripts/hermes_apply_upgrade.ps1 -Tip <sha>` Windows live 切換
+  八步全程含 S7 驗證與 push、`scripts/hermes_sync_wsl.ps1` WSL ff 跟上)。
+  結構上只允許 ff(無 reset)、失敗停在原地印 rollback、冪等可重跑;pins
+  維護在 `scripts/hermes_extra_pins.txt`、回歸測試 `scripts/tests/`(沙箱
+  43 案例)。真實環境 `-DryRun` 試跑通過(零寫入、冪等 skip 正確)。
+  下次升級=按 fetch 鈕 → 任一 session 說「升級 hermes」→ 兩次核准。
 - Stage 3 四條 DoD 已透過 Stage 5 P2 在新載體達成;階段全貌見
   [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md)。
 
@@ -107,6 +114,11 @@
   遠端 fetch 為唯一寫入,僅更新 refs」)。
 - 測試終值:dashboard test_data_update 88/test_data_resident 41、
   webui 149、typecheck 乾淨、security_check **13/13**,零新增失敗。
+- **(第三輪,`23def3f`)升級流程簡化交付**:規劃拍板(script 化機械尾段
+  + skill 化程序,UI 按鈕評估後暫不做)→ engineering 交付兩支 script
+  (沙箱 43/43,真 PS 5.1;PS 5.1 的 BOM/`$PSScriptRoot` 兩坑已修)→
+  CoS 寫 `/hermes-upgrade` skill → 真實環境 DryRun 試跑通過。memory
+  升級順序段已指向新工具。
 
 ## 3. 卡住/未決的問題
 
@@ -158,6 +170,9 @@
   (`_deliver_result` 新增 relay fail-closed 閘門,觀察無誤閘);
   (b) 本機重跑上游測試套件前必看計畫文件 §11 的 `--ignore` 清單
   (三組測試會沙箱洩漏:dashboard unified launch/update-flow/pty)。
+- **升級 script 尚未實戰**:DryRun 與沙箱矩陣全過,但完整寫入路徑
+  (真 merge/pip/build/gateway 重啟/push)要等下次官方升級首跑驗證;
+  skill 已註明首跑先 `-DryRun`。
 - **Streamlit 退役決策**:待並行觀察期(2026-07-24 起)滿一個自然使用週期後拍板。
 - **env 變數清理待使用者手動**:建議移除 `GEMINI_API_KEY`/`GOOGLE_API_KEY`/
   `ANTHROPIC_API_KEY`(防重撿)。`OPENROUTER_API_KEY`:07-29 實測 shell
@@ -176,8 +191,9 @@
 
 - **0.19.1 已全程完成**,無進行中作業。日常留意:S7-6 cron 送達一輪
   (下次排程自然觸發時看 Slack 是否正常);Windows 卡片橙(落後 934)
-  是升級後預期常態,下次想吸收官方就走同一套受控流程(fetch 按鈕可先
-  按一下看最新落後數)。
+  是升級後預期常態。**下次想升級:按 fetch 鈕看落後數 → 說「升級
+  hermes」觸發 `/hermes-upgrade`**(兩次核准,其餘機械化;首跑先
+  `-DryRun`)。
 - **日常實際使用新 UI**(`webui/` 下 `npm run local` + `readonly-api`),
   累積觀察期經驗;觀察期滿拍板 Streamlit 退役。「Hermes 更新」頁 backup 組
   亮橙=有客製沒 push,立刻處理;sidebar 常駐燈紅=先查
