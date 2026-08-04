@@ -1,0 +1,13 @@
+# hermes live venv 額外 pins — scripts/hermes_apply_upgrade.ps1 步驟 5 讀取。
+#
+# 維護契約(這就是「pins 不可硬編在 script」的機制):
+# - 每次升級調查(engineering domain 隔離 worktree merge)盤點新版依賴後,
+#   由 engineering 更新本檔,與整合 tip 一起交付核准。
+# - 一行一個 pip requirement specifier;`#` 開頭為註解;空檔=不補裝。
+# - 這些是「live venv 同時承載 dashboard/mcp 等,editable 重裝不會自動帶到
+#   的版本特定 pin」——pip 對已滿足的 pin 為 no-op,重跑天然冪等。
+#
+# 目前內容:2026-08-04 v0.19.1 升級(docs/hermes-0191-merge-plan.md §5 S4)
+starlette==1.3.1
+python-multipart==0.0.32
+mcp==1.26.0
