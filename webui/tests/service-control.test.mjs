@@ -103,9 +103,11 @@ test("模板不可參數化:bridge 原始碼的服務 execFile 呼叫必須是�
     source.includes("execFile(serviceCommand.bin, [...serviceCommand.args, op, unit]"),
     "服務控制的 execFile 必須是「凍結模板 + 枚舉 op/unit」的固定字面",
   );
-  // 全檔恰兩處 execFile:taskkill(第一群組)+ 服務控制(第二群組)
+  // 全檔恰三處 execFile:taskkill(第一群組)+ 服務控制(第二群組)+
+  // fetch-remotes(第三群組,2026-08-04 拍板的第四寫入例外——有意識擴充,
+  // 枚舉仍封閉,多一處即 FAIL;第三群組的凍結性由 fetch-remotes.test.mjs 鎖定)
   const execFileCalls = source.match(/execFile\(/g) ?? [];
-  assert.equal(execFileCalls.length, 2, "execFile 呼叫位點僅允許 taskkill 與服務控制兩處");
+  assert.equal(execFileCalls.length, 3, "execFile 呼叫位點僅允許 taskkill/服務控制/fetch-remotes 三處");
   // 禁區動詞(提案 §0.2)在 bridge 程式碼技術上不存在——
   // 先剝離 // 註解再掃(「明確不做」的說明文字不是入口),與
   // scripts/webui_security_check.py 既有慣例一致

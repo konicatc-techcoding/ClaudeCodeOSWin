@@ -32,6 +32,22 @@
 // e. audit log:沿用同一份 logs/webui_bridge_audit.log,每次操作一筆
 //    (時間、單元、動詞、結果/exit code,含拒絕)。
 // f. 重複操作防護:同一單元已有操作進行中 → 409 + audit。
+//
+// 白名單第三群組:升級預檢〔重新整理遠端資訊〕git fetch(2026-08-04
+// 使用者拍板,docs/webui-update-button-proposal.md §9 待拍板項 2)。
+// 第四個寫入例外;完全沿用第二群組模式(固定指令集、audit、fail-closed):
+// g. **一顆鈕跑全部四條固定指令,零參數**:FETCH_COMMANDS 凍結陣列——
+//    Windows repo `git fetch upstream`/`git fetch origin`、WSL repo(經
+//    `wsl -d Ubuntu --exec`)`git fetch origin`/`git fetch upstream`。
+//    HTTP 介面不讀 body、不解析 query;route 全字串比對,無任何參數入口。
+// h. **禁止事項(拍板)**:不帶 --prune(純加法,絕不刪 refs);絕無
+//    pull/merge/checkout/reset;不碰工作樹、本地 branch、HEAD。fetch 只寫
+//    remote-tracking refs——這正是它被單獨核准的原因。
+// i. **per-remote fail-loud**:四條各自回報成敗(id/exitCode/錯誤尾段),
+//    一條失敗不中止其餘、不整體靜默;每條 timeout 60 秒;每條各寫一筆 audit。
+// j. 併發防護:同時只允許一輪 fetch(進行中再按 → 409 + audit)。
+// k. 憑證:Windows `fetch origin`(https)走既有 credential manager
+//    (bridge 同使用者身分),不新增任何憑證存放;憑證失效即該條 fail-loud。
 
 import { spawn, execFile } from "node:child_process";
 import { createServer } from "node:http";
@@ -80,6 +96,36 @@ export const SERVICE_ROUTES = (() => {
 })();
 export const SERVICE_TIMEOUT_MS = 30000; // wsl 呼叫上限,避免拖住 bridge
 
+// ---- 白名單第三群組凍結常數:〔重新整理遠端資訊〕git fetch(2026-08-04 拍板) ----
+// 兩個 repo 路徑是凍結常數(與 dashboard/data_update.py 的預檢目標一致);
+// LOCALAPPDATA 缺失時 Windows 兩條會 fail-loud(git -C 不存在的路徑必失敗),
+// 不做任何 fallback 猜測。
+export const WINDOWS_HERMES_REPO = join(process.env.LOCALAPPDATA ?? "C:\\__LOCALAPPDATA_UNSET__", "hermes", "hermes-agent");
+export const WSL_HERMES_REPO = "/home/razer/.hermes/hermes-agent";
+export const FETCH_ROUTE = "/api/repo/fetch-remotes";
+export const FETCH_TIMEOUT_MS = 60000; // 每條 fetch 上限 60 秒(拍板值)
+// 四條固定指令(拍板順序:Windows upstream→origin;WSL origin→upstream)。
+// **刻意不帶 --prune**(純加法,絕不刪 refs);絕無 pull/merge/checkout/reset。
+// WSL 側用 `--exec`(不經 shell,與唯讀預檢同一種呼叫形態)。
+export const FETCH_COMMANDS = Object.freeze([
+  Object.freeze({
+    id: "windows:upstream", label: "Windows ← 官方 upstream",
+    bin: "git", args: Object.freeze(["-C", WINDOWS_HERMES_REPO, "fetch", "upstream"]),
+  }),
+  Object.freeze({
+    id: "windows:origin", label: "Windows ← 私有備份 origin",
+    bin: "git", args: Object.freeze(["-C", WINDOWS_HERMES_REPO, "fetch", "origin"]),
+  }),
+  Object.freeze({
+    id: "wsl:origin", label: "WSL ← Windows 整合 tip(origin,本機路徑)",
+    bin: "wsl.exe", args: Object.freeze(["-d", "Ubuntu", "--exec", "git", "-C", WSL_HERMES_REPO, "fetch", "origin"]),
+  }),
+  Object.freeze({
+    id: "wsl:upstream", label: "WSL ← 官方 upstream",
+    bin: "wsl.exe", args: Object.freeze(["-d", "Ubuntu", "--exec", "git", "-C", WSL_HERMES_REPO, "fetch", "upstream"]),
+  }),
+]);
+
 const allowedOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
 
 // createBridge():production 由 agentos-local.mjs 以「零參數」呼叫,全部
@@ -94,12 +140,16 @@ export function createBridge(options = {}) {
   // 第二群組:僅供測試注入假 wsl fixture;production 零參數=SERVICE_COMMAND
   const serviceCommand = options.serviceCommand ?? SERVICE_COMMAND;
   const serviceTimeoutMs = options.serviceTimeoutMs ?? SERVICE_TIMEOUT_MS;
+  // 第三群組:僅供測試注入假 git fixture;production 零參數=FETCH_COMMANDS
+  const fetchCommands = options.fetchCommands ?? FETCH_COMMANDS;
+  const fetchTimeoutMs = options.fetchTimeoutMs ?? FETCH_TIMEOUT_MS;
   const auditLogPath = join(logDir, AUDIT_LOG_NAME);
 
   let ownedChild = null; // 本 bridge spawn 的 child(ownership 的唯一依據)
   let startPromise = null; // 併發啟動去重
   let childLog = "";
   const serviceInFlight = new Set(); // 第二群組重複操作防護(以單元名為鍵)
+  let fetchInFlight = false; // 第三群組併發防護(同時只允許一輪 fetch)
 
   function audit(operation, pid, result) {
     // 每次 start/stop/reload 操作寫一筆:時間、操作、PID、結果。
@@ -124,8 +174,60 @@ export function createBridge(options = {}) {
     }
   }
 
+  function auditFetch(step, result) {
+    // 第三群組 audit:每條 fetch 指令(含拒絕)一筆——時間、指令 id、結果。
+    // 沿用同一份 audit log 落點。
+    try {
+      mkdirSync(logDir, { recursive: true });
+      const line = `${new Date().toISOString()} | fetch:${step} | ${result}\n`;
+      appendFileSync(auditLogPath, line, "utf8");
+    } catch (error) {
+      console.error(`audit log 寫入失敗: ${error.message}`);
+    }
+  }
+
   function ownedAlive() {
     return ownedChild !== null && ownedChild.exitCode === null;
+  }
+
+  async function runFetchRemotes() {
+    // 併發防護:同時只允許一輪(四條循序跑,最長 4×60 秒)
+    if (fetchInFlight) {
+      auditFetch("-", "拒絕(已有一輪 fetch 進行中)");
+      const error = new Error("已有一次「重新整理遠端資訊」進行中,請等它完成後再試");
+      error.statusCode = 409;
+      throw error;
+    }
+    fetchInFlight = true;
+    try {
+      const results = [];
+      for (const command of fetchCommands) {
+        // 指令=FETCH_COMMANDS 凍結字面(bin+args 全部寫死,零參數入口);
+        // execFile 不經 shell。**per-remote fail-loud**:一條失敗記下錯誤
+        // 繼續跑下一條,絕不中止其餘、絕不整體靜默。
+        const outcome = await new Promise((resolveExec) => {
+          execFile(command.bin, [...command.args], { timeout: fetchTimeoutMs }, (error, _stdout, stderr) => {
+            if (!error) {
+              resolveExec({ ok: true, exitCode: 0, error: null });
+            } else {
+              resolveExec({
+                ok: false,
+                exitCode: typeof error.code === "number" ? error.code : null,
+                error: error.killed
+                  ? `逾時(${fetchTimeoutMs / 1000} 秒)`
+                  : String(stderr || error.message || "").trim().slice(-400) || "執行失敗",
+              });
+            }
+          });
+        });
+        auditFetch(command.id, outcome.ok ? "成功 exit=0"
+          : (outcome.exitCode !== null ? `失敗 exit=${outcome.exitCode}` : `失敗(${outcome.error})`));
+        results.push({ id: command.id, label: command.label, ...outcome });
+      }
+      return { ok: results.every((r) => r.ok), results };
+    } finally {
+      fetchInFlight = false;
+    }
   }
 
   async function runServiceControl(route) {
@@ -363,6 +465,18 @@ export function createBridge(options = {}) {
         sendJson(response, 200, await stopDashboard(), origin);
       } catch (error) {
         sendJson(response, error.statusCode ?? 500, { ok: false, error: error.message || "Hermes Dashboard 關閉失敗" }, origin);
+      }
+      return;
+    }
+
+    // ---- 白名單第三群組:〔重新整理遠端資訊〕git fetch(2026-08-04 拍板)----
+    // route 全字串比對(帶 query string 即不匹配 → 404,UI 傳參技術上被拒);
+    // 一顆鈕=四條凍結指令,per-remote fail-loud(HTTP 200 + 各條成敗)。
+    if (request.method === "POST" && request.url === "/api/repo/fetch-remotes") {
+      try {
+        sendJson(response, 200, await runFetchRemotes(), origin);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 500, { ok: false, error: error.message || "遠端重新整理失敗" }, origin);
       }
       return;
     }

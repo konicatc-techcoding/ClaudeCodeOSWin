@@ -693,6 +693,13 @@ class FollowRoleTests(UpdateProbeTestCase):
         # 選項 b:整體燈隨 follow 三態 → 橙
         self.assertEqual(end["light"], "orange")
         self.assertEqual(end["overall_driver"], "follow")
+        # per-role light_text(2026-08-04):follow 橙態不得沿用共用表的
+        # 「帶客製 diverge——需人工受控 merge」(那是對官方的正向 diverge 語意)
+        expected_text = "領先/分歧於 Windows 整合 tip——異常,需人工檢查"
+        self.assertEqual(follow["light_text"], expected_text)
+        self.assertEqual(end["light_text"], expected_text,
+                         "整體 badge 由 follow 驅動時短文字須跟著 follow 語意")
+        self.assertNotIn("帶客製 diverge", end["light_text"])
 
     def test_diverged_from_windows_tip_is_orange_anomaly(self):
         end = self._wsl(follow_behind=3, follow_ahead=2, follow_ancestor_rc=1)
@@ -850,6 +857,18 @@ class ClassifyComparisonTests(unittest.TestCase):
         self.assertEqual(T._classify_comparison("upstream", None, None)[0], "gray")
         self.assertEqual(T._classify_comparison("follow", None, None)[0], "gray")
 
+    def test_per_role_light_text_overrides(self):
+        """ROLE_LIGHT_TEXT(2026-08-04):只覆寫語意不貼的格子——follow 橙;
+        其餘沿用共用表(follow 藍/綠/灰、upstream/backup 全態、target 紅)。"""
+        self.assertEqual(T._light_text_for("follow", "orange"),
+                         "領先/分歧於 Windows 整合 tip——異常,需人工檢查")
+        # 未覆寫者一律共用表
+        for role, light in [("follow", "blue"), ("follow", "green"), ("follow", "gray"),
+                            ("upstream", "orange"), ("backup", "orange"),
+                            ("target", "red"), (None, "red"), ("peer", "blue")]:
+            self.assertEqual(T._light_text_for(role, light), T.LIGHT_TEXT[light],
+                             f"{role}/{light} 應沿用共用表")
+
     def test_counted_roles_and_driver_priority(self):
         self.assertEqual(set(T.COUNTED_ROLES), {"upstream", "backup", "follow"})
         self.assertNotIn("peer", T.COUNTED_ROLES)
@@ -905,6 +924,31 @@ class ProbeAndCacheTests(UpdateProbeTestCase):
             T._probe = orig
         self.assertTrue(all(t["light"] == "gray" for t in payload["targets"]))
         self.assertEqual(len(payload["targets"]), 2)
+
+    def test_force_bypasses_ttl_and_overwrites_cache(self):
+        """force=True(api 的 fresh=1;2026-08-04 隨 fetch 按鈕引入):TTL 內
+        也立即重探,且新結果覆寫快取(之後一般請求拿到新資料)。"""
+        count = {"n": 0}
+        orig = T._probe
+
+        def counting():
+            count["n"] += 1
+            return {"checked_at": f"t{count['n']}", "remote_note": "x",
+                    "stage": "s", "targets": []}
+
+        T._probe = counting
+        try:
+            first = T.get_update_precheck()
+            self.assertEqual(count["n"], 1)
+            forced = T.get_update_precheck(force=True)
+            self.assertEqual(count["n"], 2, "force 必須繞過 TTL 立即重探")
+            self.assertNotEqual(first["checked_at"], forced["checked_at"])
+            # force 的新結果覆寫快取:接著的一般請求(TTL 內)拿到 force 結果
+            again = T.get_update_precheck()
+            self.assertEqual(count["n"], 2, "force 後 TTL 內一般請求命中新快取")
+            self.assertEqual(again["checked_at"], forced["checked_at"])
+        finally:
+            T._probe = orig
 
 
 # ---------------------------------------------------------------------------

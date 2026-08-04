@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-04
+**最後更新**:2026-08-04(第二次收工)
 
 ---
 
@@ -48,46 +48,65 @@
   保護=log 覆蓋滿 90 天前不汰選)。檢視掛既有 daily-memory-check,零新排程。
 - **Streamlit 並行觀察期自 2026-07-24 起算**(觀察一個自然使用週期後決定退役;
   期間 `dashboard/app.py` 零改動、標 deprecated)。
-- **Hermes-agent repo 兩側(Windows/WSL)已對齊且防重演已落地**:兩側 HEAD 皆
-  `970118870`、逐 byte 相同,`origin` 各自指向私有備份/本機 Windows 路徑,
-  使 `reset --hard origin/main` 退化為 no-op。詳見
-  [docs/wsl-regraft-plan.md](docs/wsl-regraft-plan.md) 與 auto-memory
-  `hermes-agent-repo-work`。
+- **Hermes-agent 兩側已升 v0.19.1 且對齊(08-04,首次完整走受控升級流程)**:
+  兩側 HEAD 皆 `aa65ff286`(= 客製 tip × 官方 tag `v2026.7.30` 受控 merge,
+  engineering 隔離 worktree 產出),live 驗證全過(doctor/allowlist 負面
+  fail-closed/message-key dedup/multiplexer 5 profiles),main+整合 branch+
+  rescue tag `rescue/pre-0191-20260803` 皆已 push 私有備份,防重演基準回位。
+  WSL ff-only 同步、服務零停機。順帶修掉 live 現存 Slack 帶附件送出必炸 bug。
+  計畫正本 [docs/hermes-0191-merge-plan.md](docs/hermes-0191-merge-plan.md)
+  (含 §11 測試洩漏事故記錄);踩坑清單在 auto-memory `hermes-agent-repo-work`。
+  **升級後穩態:Windows 對官方 orange(落後 934/帶 15 客製)屬預期常態**。
 - **升級預檢的 §10.1 燈號盲點已修(08-03,含追加拍板選項 b)**:新增 `follow`
   role(WSL origin=本機 Windows 路徑經正規化逐字比對才判定),「WSL 有沒有
   跟上 Windows」計入且**獨力驅動** WSL 整體燈(同 target 存在 follow 時
   upstream 降為僅供參考——per-topology 規則非硬編,拓撲變動自動回退)。
   三態語意:跟上=綠/落後 Windows=藍「該同步了」/領先或分歧=橙「異常」。
-  live 驗證通過:WSL 卡片綠、主導標記在 follow 組、Windows 卡片零變化。
+  **三態已於 0.19.1 升級中實戰驗證(綠→藍→綠完整循環)**;橙態 badge 文字
+  已 per-role 貼合(08-04 第二輪)。
   正本:[webui-update-button-proposal.md](docs/webui-update-button-proposal.md) §10.1。
+- **觀測面兩項新能力(08-04)**:(1) **gateway pid 活性驗證**——常駐燈與預檢
+  service 欄不再盲信 `gateway_state.json`,以 OpenProcess(QUERY_LIMITED)+
+  `start_time` 指紋(與 hermes lifecycle ledger 同源)驗 pid 死活,fail-open
+  防檢查器自身故障誤報;起因=gateway 曾死一天半而燈號一直顯示「就緒」的
+  真實事故,現最壞 75 秒轉紅。(2) **〔重新整理遠端資訊〕fetch 按鈕**——
+  第四個寫入例外(bridge 8787 第三群組):四條凍結 fetch 指令、零參數、
+  無 --prune 純加法、per-remote fail-loud、audit 逐條;預檢 `?fresh=1`
+  cache-bust,按完即見新數字。實按驗證四條全過。security_check 12→13 項。
 - Stage 3 四條 DoD 已透過 Stage 5 P2 在新載體達成;階段全貌見
   [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md)。
 
 ## 2. 上一個 session 做了什麼
 
-(2026-08-03~04,自上次快照 `d2007a5` 以來即本收尾 commit;主軸=升級預檢
-follow role 落地(§10.1 燈號盲點修復)+ 0.19.1 受控 merge 定案並啟動。)
+(2026-08-04 同日第二次收工,自 `7b7db32` 以來即本收尾 commit;主軸=
+**0.19.1 受控升級全程執行完畢** + 更新頁待辦優先序 5→2→4 三項交付。)
 
-- **follow role 兩輪交付(engineering 分派,同一 agent 延續)**:
-  第一輪=新增 `follow` role 偵測(`dashboard/data_update.py` 的
-  `_canonical_path_key()`/`_is_windows_repo_url()`:remote URL 正規化後與
-  `%LOCALAPPDATA%\hermes\hermes-agent` 逐字相等才判定,認不出退 `peer`
-  安全側);第二輪=拍板**選項 b**——同 target 存在 follow 組時 upstream
-  降為僅供參考(`_apply_follow_demotion()`,per-topology 非硬編),WSL
-  整體燈由 follow 獨力驅動。前端僅型別/註解/fixture 動,顯示邏輯零改
-  (本來就吃後端欄位)。
-- **兩輪 live 驗證皆通過**(重啟 8799 經 launcher 冪等補缺):WSL 卡片
-  綠「已是最新」、advice=「已跟上 Windows 整合 tip ✓」、主導標記在
-  follow 組、官方組標「僅供參考」;Windows 卡片逐項零變化。
-- **邊角決定(已追認)**:follow 組存在但 ref 查不到(灰)時仍降級
-  upstream ⇒ 整體=灰(查詢失效本身要示警,不讓恆橙蓋掉)。
-- 測試終值:dashboard 86(+23 vs baseline 63)、webui 137(+6)、
-  typecheck 乾淨、security_check 12/12,零新增失敗,全程沙箱。
-- **0.19.1 升級路線拍板**:不做按鈕(diverged repo 無一鍵更新,07-24
-  教訓)、走受控流程五步——wrapup → engineering 隔離 worktree merge
-  (產計畫文件,不碰 live)→ 使用者核准 → 主 session live 切換 →
-  **立即 push 私有備份** → WSL ff-only。此次同時是階段二 blocker (a)
-  的測試案例與 follow 燈號的首次實戰(merge 後 WSL 應轉藍、ff 後回綠)。
+- **0.19.1 受控 merge 全程走完(首個端到端案例)**:engineering 隔離
+  worktree merge(整合 tip `aa65ff286`,6 檔衝突全解,上游 tag
+  `v2026.7.30`;沙箱 13,123 passed/408 全環境性)→ 主 session live 切換
+  (rescue tag→停 gateway→ff-only 切 tip(分類器擋 reset,使用者親跑)
+  →`pip install -e`+pins→web build→受控重啟→S7 驗證清單全過)→ push
+  私有備份 → WSL ff-only(venv 實名 `venv` 非 `.venv`)。**follow 燈號
+  三態實戰驗證:綠→藍(落後 2130「該同步了」)→綠**。
+- **升級中處理的事故**:上游測試 mock 不完整致沙箱洩漏(洩漏 dashboard
+  對 live home 跑 1 小時、update-flow 測試殺真 gateway 進程),git 狀態
+  無損、config/.env 未動;洩漏進程已清;**live gateway 實際自 08-03 08:04
+  已死而燈號一直顯示就緒**——催生第 5 項。npm install 弄髒 root
+  package-lock.json(重解析噪音)已 restore。教訓與 --ignore 清單記
+  計畫文件 §11 與 auto-memory。
+- **第 5 項:gateway pid 活性驗證**(`data_resident.py` 共用 helper +
+  `data_update.py` 透傳;ctypes QUERY_LIMITED + start_time 指紋,
+  fail-open;worker 個別燈死態紅而非誤標暖機黃)。live 驗證:活路徑
+  指紋逐位吻合;死路徑 13 條沙箱測試鎖定。
+- **第 2 項:fetch 按鈕拍板+落地**(第四寫入例外/bridge 第三群組,
+  拍板=一顆鈕四條凍結指令/無 prune/per-remote fail-loud/60s timeout;
+  `?fresh=1` cache-bust)。live 實按:四條全 ✓、audit 四筆、404 反向
+  驗證過。提案 §9 項 2 已標拍板。
+- **第 4 項:follow 橙態 per-role light_text**(「領先/分歧於 Windows
+  整合 tip——異常,需人工檢查」)+ 預檢頁副標措辭誠實化(「零升級執行鈕;
+  遠端 fetch 為唯一寫入,僅更新 refs」)。
+- 測試終值:dashboard test_data_update 88/test_data_resident 41、
+  webui 149、typecheck 乾淨、security_check **13/13**,零新增失敗。
 
 ## 3. 卡住/未決的問題
 
@@ -95,11 +114,11 @@ follow role 落地(§10.1 燈號盲點修復)+ 0.19.1 受控 merge 定案並啟�
   是 no-op 的前提是 `main == origin/main`。**一旦有客製 commit 沒 push 到私有
   備份,桌面 Install 鈕就會吃掉它們**——中和繫於「每次客製後都要 push」的人為
   紀律,不是結構保證。升級預檢已會在 `ahead > 0` 時亮橙告警。
-- **更新按鈕階段二(寫入型 ff 執行鈕)維持延後,但 blocker (a) 正在解**:
-  宿主依賴(service-control 寫入部分)已落地。剩兩個 blocker:(a) **沒有
-  測試案例**——**0.19.1 受控 merge 已啟動(見 §4),完成後即有首個案例**;
-  (b) 白名單**不含 timer**(07-27 拍板),階段二要用 timer 需回
-  service-control 提案擴充重審。
+- **更新按鈕階段二(寫入型 ff 執行鈕):blocker (a) 已解,但價值待重估**:
+  0.19.1 升級提供了首個端到端案例——同時實證 WSL ff 段實際只有三條指令、
+  零停機,**按鈕的價值比原提案設想小**。剩 blocker (b):白名單不含 timer
+  (07-27 拍板),要做需回 service-control 提案擴充重審。建議下次議程
+  帶「還做不做」一起議,而非只議「怎麼做」。
 - **一份草案待拍板**:[telegram-cos-realtime-proposal](docs/telegram-cos-realtime-proposal.md)
   (`/cos` 混合模式)。**建議議程順帶納入 07-29 新發現的 Telegram 出口
   格式缺口**(見下項)。
@@ -131,12 +150,14 @@ follow role 落地(§10.1 燈號盲點修復)+ 0.19.1 受控 merge 定案並啟�
 - **排程表小措辭**:未安裝列的觸發欄顯示「無法查詢」,嚴格應為 `n/a`
   (沒裝不是查不到)。一句話可修,未排。
 - **升級預檢的已知邊界**(取捨非疏漏,已記於提案與 docstring):
-  (a) ~~§10.1 燈號盲點~~ **已修(08-03,見 §1)**;遺留一個小切片:follow
-  橙態的 `light_text` 沿用共用表「帶客製 diverge——需人工受控 merge」,與
-  follow 真正語意(WSL 不該有 Windows 沒有的 commit)不貼,需 per-role
-  light_text 結構小改,未排;
+  (a) ~~§10.1 燈號盲點~~ 已修(08-03);~~light_text 小切片~~ 已修(08-04);
   (b) live 版本字串取自 HEAD 的 `pyproject.toml`,**不涵蓋「merge 後忘記重跑
-  `pip install -e`」**的依賴落後情形,要涵蓋需另案做「依賴同步狀態」欄位。
+  `pip install -e`」**的依賴落後情形,要涵蓋需另案做「依賴同步狀態」欄位——
+  更新頁待辦清單目前僅剩此項(加上階段二價值重估,見上)。
+- **0.19.1 升級遺留觀察項**:(a) S7-6 cron 排程送達一輪待自然觸發確認
+  (`_deliver_result` 新增 relay fail-closed 閘門,觀察無誤閘);
+  (b) 本機重跑上游測試套件前必看計畫文件 §11 的 `--ignore` 清單
+  (三組測試會沙箱洩漏:dashboard unified launch/update-flow/pty)。
 - **Streamlit 退役決策**:待並行觀察期(2026-07-24 起)滿一個自然使用週期後拍板。
 - **env 變數清理待使用者手動**:建議移除 `GEMINI_API_KEY`/`GOOGLE_API_KEY`/
   `ANTHROPIC_API_KEY`(防重撿)。`OPENROUTER_API_KEY`:07-29 實測 shell
@@ -153,14 +174,10 @@ follow role 落地(§10.1 燈號盲點修復)+ 0.19.1 受控 merge 定案並啟�
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **【進行中】0.19.1 受控 merge——第 2 步:engineering 隔離 worktree 調查**
-  (`git fetch upstream` → 確認 0.19.1 tag → 隔離 worktree merge 客製 tip
-  `970118870` × 上游、解衝突、沙箱全套測試 → 產計畫文件,仿
-  [wsl-regraft-plan](docs/wsl-regraft-plan.md),不碰 live)。後續:使用者
-  核准 → 主 session live 切換(安全 tag/停 gateway/reset/`pip install -e`/
-  受控重啟/doctor+allowlist 負面+message-key 驗證)→ **立即 push 私有備份**
-  → WSL `ff-only`+`pip install -e`(bot 不用停,07-25 實證)。過程中順帶
-  驗收 follow 燈號三態(merge 後 WSL 藍 → ff 後綠)。
+- **0.19.1 已全程完成**,無進行中作業。日常留意:S7-6 cron 送達一輪
+  (下次排程自然觸發時看 Slack 是否正常);Windows 卡片橙(落後 934)
+  是升級後預期常態,下次想吸收官方就走同一套受控流程(fetch 按鈕可先
+  按一下看最新落後數)。
 - **日常實際使用新 UI**(`webui/` 下 `npm run local` + `readonly-api`),
   累積觀察期經驗;觀察期滿拍板 Streamlit 退役。「Hermes 更新」頁 backup 組
   亮橙=有客製沒 push,立刻處理;sidebar 常駐燈紅=先查

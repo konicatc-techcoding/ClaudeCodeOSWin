@@ -117,7 +117,9 @@ const FOLLOW_ORANGE = comparison({
   diverged: true,
   diverge_commits: ["abc123 wsl-only commit"],
   light: "orange",
-  light_text: "帶客製 diverge——需人工受控 merge",
+  // per-role 覆寫(2026-08-04):follow 的橙不是「帶客製 diverge 需受控 merge」
+  // (那是對官方的正向 diverge),而是反向異常——短文字須貼合語意
+  light_text: "領先/分歧於 Windows 整合 tip——異常,需人工檢查",
   summary: "領先 Windows 整合 tip 2 個 commit——本端不該有 Windows 沒有的 commit,需人工檢查",
 });
 
@@ -324,6 +326,13 @@ test("follow 組:領先 = 異常(橙)——與 upstream 組語意相反", () => 
   // 同一張卡上官方組是綠——證明整體橙是 follow 組帶起來的(§10.1 的盲點已補)
   assert.ok(html.includes("已吸收官方最新"), "官方組須同時呈現為健康");
   assert.ok(html.includes("主導整體燈"), "須標示 follow 為主導組");
+  // per-role light_text(2026-08-04):badge 短文字須貼合 follow 語意,
+  // 不得沿用共用表的「帶客製 diverge——需人工受控 merge」(那是對官方的
+  // 正向 diverge,會誤導使用者以為要去 merge 官方)
+  assert.ok(html.includes("領先/分歧於 Windows 整合 tip——異常,需人工檢查"),
+    "橙態 badge 須用 follow 專屬短文字");
+  assert.ok(!html.includes("帶客製 diverge"),
+    "follow 驅動的橙卡不得出現共用表的 merge 語意文字");
 });
 
 test("follow 組排在最前(WSL 端最該被看見的一條)", () => {
@@ -481,10 +490,15 @@ test("無任何比較基準時誠實提示,不噴例外", () => {
 
 test("原始碼:取數僅經 apiGet、無直連 fetch、view 內唯一 onClick 是 reload", async () => {
   const source = await readFile(join(root, "src", "views", "UpdatePrecheck.tsx"), "utf8");
-  assert.ok(source.includes('apiGet<UpdatePrecheckPayload>("/api/update-precheck")'),
-    "取數須經唯讀 apiGet");
-  assert.ok(!source.includes("fetch("), "不得自行 fetch");
-  assert.ok(!source.includes("<button"), "不得自訂 <button(僅共用 RefreshButton)");
+  // 2026-08-04 起取數 URL 恰為兩個凍結字面:一般讀取,與 fetch 鈕完成後的
+  // fresh=1(繞過 45 秒快取拿新 refs;仍為 GET-only 唯讀端點)
+  assert.match(
+    source,
+    /apiGet<UpdatePrecheckPayload>\(useFresh \? "\/api\/update-precheck\?fresh=1" : "\/api\/update-precheck"\)/,
+    "取數須經唯讀 apiGet(兩個凍結 URL 字面,無其他參數化入口)",
+  );
+  assert.ok(!source.includes("fetch("), "不得自行 fetch(fetch 鈕寫入面隔離於 UpdateFetch.tsx)");
+  assert.ok(!source.includes("<button"), "不得自訂 <button(僅共用 RefreshButton 與獨立 UpdateFetchButton 元件)");
   const onClicks = source.match(/onClick=\{[^}]*\}/g) ?? [];
   for (const oc of onClicks) {
     assert.equal(oc, "onClick={reload}", `view 內 onClick 只能是 reload(讀取),發現:${oc}`);

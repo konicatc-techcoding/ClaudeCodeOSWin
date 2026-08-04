@@ -747,6 +747,31 @@ class UpdatePrecheckEndpointTests(ApiServerTestCase):
         status, _, _ = self._request("/api/update-precheck", method="POST")
         self.assertEqual(status, 405)
 
+    def test_update_precheck_fresh_param_bypasses_cache(self):
+        """`?fresh=1`(2026-08-04,fetch 按鈕完成後的重查):繞過 45 秒 TTL
+        立即重探;無 fresh 或 fresh!=1 → 照舊吃快取。端點維持 GET-only 唯讀。"""
+        count = {"n": 0}
+
+        def counting():
+            count["n"] += 1
+            return {"checked_at": f"t{count['n']}", "remote_note": "x",
+                    "stage": "s", "targets": []}
+
+        data_update._probe = counting
+        first = self._get_json("/api/update-precheck")
+        cached = self._get_json("/api/update-precheck")
+        self.assertEqual(count["n"], 1, "無 fresh → TTL 內吃快取")
+        self.assertEqual(first["checked_at"], cached["checked_at"])
+        fresh = self._get_json("/api/update-precheck?fresh=1")
+        self.assertEqual(count["n"], 2, "fresh=1 → 繞過快取重探")
+        self.assertEqual(fresh["checked_at"], "t2")
+        # fresh 重探結果覆寫快取
+        self.assertEqual(self._get_json("/api/update-precheck")["checked_at"], "t2")
+        self.assertEqual(count["n"], 2)
+        # fresh 非 1 → 不觸發重探(參數面收斂:只認 "1")
+        self._get_json("/api/update-precheck?fresh=yes")
+        self.assertEqual(count["n"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

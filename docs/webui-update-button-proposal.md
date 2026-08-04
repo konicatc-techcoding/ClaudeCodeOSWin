@@ -201,8 +201,10 @@ memory 既定慣例：真實基礎設施操作（重啟 live gateway、動生產
   副作用收在使用者明確動作後）計算 ahead/behind 數。
   （v1.1 更正：原文誤寫「待拍板項 5」，正確是 **§9 待拍板項 2**。）
   → **落地狀況**：ahead/behind ✅ 已落地；**〔重新整理遠端〕fetch 按鈕
-  ❌ 尚未實作，且刻意保留**——§9 待拍板項 2 未拍板前不引入任何網路副作用。
-  目前 UI 上的「重新整理」鈕只是**重跑唯讀預檢**，不 fetch。
+  ✅ 2026-08-04 拍板並實作**（邊界見 §9 項 2 拍板框——bridge 第三群組、
+  四條凍結指令、無 `--prune`、per-remote fail-loud）。UI 上的「重新整理」
+  讀取鈕仍只**重跑唯讀預檢**；fetch 是另一顆明確標示的按鈕，且預檢本身
+  **永不**自動 fetch。
 - **ff 判定**：本地 tip 是否為目標 tip 的祖先（能否 ff）——**這是階段二
   是否給執行鈕的唯一開關**。
 - **diverge 判定**：本地有無目標沒有的 commit（客製分歧）＋若有，列出
@@ -246,7 +248,7 @@ memory 既定慣例：真實基礎設施操作（重啟 live gateway、動生產
 | Web UI view（兩端並列、零執行鈕） | ✅ `webui/src/views/UpdatePrecheck.tsx` |
 | ff 判定／diverge 清單／rescue ref／服務狀態 | ✅ |
 | **live 版本字串** | ✅ **2026-07-25 切片 1 補上**（原 commit `b81f54f` 未含） |
-| **〔重新整理遠端〕fetch 按鈕** | ❌ 刻意未做（§9 待拍板項 2 未拍板） |
+| **〔重新整理遠端〕fetch 按鈕** | ✅ **2026-08-04 拍板並實作**（§9 項 2；第四寫入例外＝bridge 第三群組，四條凍結指令、無 `--prune`、per-remote fail-loud、完成後 `fresh=1` 重查，詳見 §9 項 2 拍板框） |
 | `webui/README.md` 安全邊界節（§6 項 4 的承諾） | ✅ **2026-07-25 切片 0 補上**（原 commit 未含） |
 | §10.1 `follow` role（WSL 跟隨 Windows 計入燈號） | ❌ 刻意未做，僅 docstring 記載限制（需獨立核准） |
 
@@ -504,6 +506,29 @@ push hook／定期自動 push 客製 tip 到私有備份，或在 Desktop 端封
 2. **預檢的遠端資訊**：採建議「預檢只讀本地已知 refs、標示可能過期、
    〔重新整理遠端〕按鈕才 fetch」，或允許預檢自動 fetch（有網路副作用
    但不改工作區）？
+   → **✅ 已拍板（2026-08-04）：採建議選項——按鈕才 fetch，預檢絕不自動
+   fetch**。〔重新整理遠端資訊〕按鈕已實作，為**第四個寫入例外**
+   （bridge 8787 白名單**第三群組**，完全沿用 service-control 群組模式），
+   邊界如下（全部拍板內容，不可放寬）：
+   - **一顆鈕跑全部四條固定指令、零參數**（UI 技術上傳不進任何參數：
+     bridge 不讀 body、route 全字串比對）：Windows repo `git fetch upstream`
+     ／`git fetch origin`；WSL repo（經 `wsl -d Ubuntu --exec`）
+     `git fetch origin`（本機路徑）／`git fetch upstream`。
+   - **禁止事項**：不帶 `--prune`（純加法，絕不刪 refs）；絕無
+     pull/merge/checkout/reset；不碰工作樹、本地 branch、HEAD。
+   - 每條 timeout 60 秒；**per-remote fail-loud**（四條各自回報成敗，
+     一條失敗不中止其餘、不整體靜默）；併發 409；每條各寫一筆 audit
+     （沿用 `logs/webui_bridge_audit.log`）。
+   - **完成後 UI 以 `GET /api/update-precheck?fresh=1` 重查**——`fresh=1`
+     繞過資料層 45 秒 TTL 立即重探並覆寫快取（否則按完看到的還是舊資料，
+     2026-08-04 實測撞到）；重探本身仍是純唯讀查詢。
+   - 憑證：Windows `fetch origin`（https）走既有 credential manager
+     （bridge 同使用者身分），不新增任何憑證存放；憑證失效即該條 fail-loud。
+   - 鎖定：`webui/tests/fetch-remotes.test.mjs`＋
+     `scripts/webui_security_check.py` 第 13 項（第 2／12 項的端點與
+     execFile 枚舉**有意識**擴充 +1 並保持封閉）。
+   - 實作位置：`webui/scripts/bridge.mjs`（`FETCH_COMMANDS`）、
+     `webui/src/UpdateFetch.tsx`（UI，寫入面與唯讀 view 隔離）。
 3. **階段二宿主**：與 service-control 寫入部分同群組（併入 bridge 8787、
    升級操作獨立分組獨立測試，建議），或獨立 server？
    > **⚠ v1.1 加註：這個推薦選項掛在一個尚未存在的東西上。**

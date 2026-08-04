@@ -156,14 +156,28 @@ export type ResidentStatusPayload = {
   // units/gateway 為 null = 該層未探測(前一層未通過即止步,探測零副作用)
   units: Record<string, ResidentUnitState> | null;
   resident_units: string[];
-  gateway: { ready: boolean; state: string | null; detail: string; mtime?: string | null } | null;
+  // gateway pid 活性驗證(2026-08-04 事故修正:狀態檔宣稱 running 但 pid 已死
+  // 曾誤報就緒一天半)。dead=true = pid 已死/被重用(資料層轉紅);
+  // pid_alive: true=驗證過活/null=無法驗證(fail-open,照舊)/false=死。
+  gateway: {
+    ready: boolean;
+    state: string | null;
+    detail: string;
+    mtime?: string | null;
+    dead?: boolean;
+    pid?: number | null;
+    pid_alive?: boolean | null;
+    pid_note?: string;
+  } | null;
 };
 
-// --- Hermes 更新唯讀升級預檢(docs/webui-update-button-proposal.md §3,階段一)---
-// 對應 dashboard/data_update.py::get_update_precheck()。**純唯讀**:UI 只顯示
-// 預檢結果,零執行/升級/同步按鈕(階段二寫入未核准);唯一允許的操作是
-// 「重新整理(重跑唯讀預檢)」的讀取鈕。此邊界由 update-precheck-render.test.mjs
-// 與 scripts/webui_security_check.py 第 11 項靜態鎖定。
+// --- Hermes 更新升級預檢(docs/webui-update-button-proposal.md §3,階段一)---
+// 對應 dashboard/data_update.py::get_update_precheck()。**取數純唯讀**
+// (GET-only,可帶 fresh=1 繞過快取);UI 零升級/合併/同步執行鈕(階段二
+// 寫入未核准)。**唯一寫入例外**:〔重新整理遠端資訊〕fetch 鈕(2026-08-04
+// 拍板,隔離於 UpdateFetch.tsx + bridge 第三群組)——只更新 remote-tracking
+// refs,不碰工作樹。此邊界由 update-precheck-render.test.mjs 與
+// scripts/webui_security_check.py 第 11/13 項靜態鎖定。
 
 export type UpdateLight = "green" | "blue" | "orange" | "red" | "gray";
 
@@ -172,6 +186,12 @@ export type UpdateTargetService = {
   detail?: string;
   ready?: boolean | null;
   state?: string | null;
+  // gateway pid 活性驗證(2026-08-04;Windows 端 service 欄與常駐燈共用
+  // data_resident 同一份 helper):dead=true = 狀態檔宣稱 running 但 pid
+  // 已死/被重用,detail 帶誠實說明(含狀態檔停更時間)。
+  dead?: boolean | null;
+  pid?: number | null;
+  pid_alive?: boolean | null;
   units?: Record<string, ResidentUnitState> | null;
   resident_units?: string[];
 } & Record<string, unknown>;

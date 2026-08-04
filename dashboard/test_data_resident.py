@@ -9,6 +9,12 @@
 - 5 秒 TTL 快取。
 - 唯讀靜態鎖定:subprocess.run 呼叫位點只允許兩個凍結常數;原始碼無任何
   systemd 寫入動詞字面值(start/stop/restart/--terminate/--shutdown)。
+- **gateway pid 活性驗證**(2026-08-04 事故驅動):狀態檔宣稱 running 但
+  pid 死/被重用 → 紅;pid 活+start_time 相符 → 照舊綠;無法驗證 → fail-open
+  照舊+誠實註記。案例涵蓋:pid 活且驗證過/pid 存在但非 gateway(重用,
+  start_time 不符與映像檔非 python 兩型)/pid 死/state 檔不存在/state 檔損毀。
+  process 查詢一律 stub `_windows_process_probe`,不打真 ctypes(不依賴
+  執行機器上的 pid 佈局)。
 
 fixture 一律假資料;不觸碰真實 wsl / %LOCALAPPDATA%。
 執行:.venv/Scripts/python.exe dashboard/test_data_resident.py
@@ -83,18 +89,39 @@ def _completed(argv_hint, stdout, returncode=0):
     return real_subprocess.CompletedProcess(argv_hint, returncode, stdout=stdout, stderr=b"")
 
 
+# 測試用的固定 pid / start_time(epoch 百分秒;與真實檔案同形態)
+FAKE_PID = 12345
+FAKE_START_CS = 178_580_862_847
+
+# _windows_process_probe 的替身回應(各活性情境)
+PROBE_ALIVE_MATCH = {"exists": True, "running": True,
+                     "create_time_cs": FAKE_START_CS,
+                     "image": "C:\\Python313\\python.exe"}
+PROBE_REUSED_TIME = {"exists": True, "running": True,
+                     "create_time_cs": FAKE_START_CS + 90_000,  # 差 15 分鐘
+                     "image": "C:\\Python313\\python.exe"}
+PROBE_REUSED_IMAGE = {"exists": True, "running": True,
+                      "create_time_cs": None, "image": "C:\\Windows\\notepad.exe"}
+PROBE_DEAD = {"exists": False, "running": False, "create_time_cs": None, "image": None}
+
+
 class ResidentProbeTestCase(unittest.TestCase):
     def setUp(self):
         self._orig_subprocess = data_resident.subprocess
         self._orig_gateway_path = data_resident.GATEWAY_STATE_PATH
         self._orig_gateway_ready = data_resident._gateway_ready
+        self._orig_process_probe = data_resident._windows_process_probe
         data_resident._cache = None
         self._tmpdir = Path(tempfile.mkdtemp())
+        # 預設:pid 活且 start_time 相符(既有綠燈情境在活性驗證下仍成立)。
+        # 一律 stub,絕不打真 ctypes——測試不得依賴執行機器上的 pid 佈局。
+        data_resident._windows_process_probe = lambda pid: dict(PROBE_ALIVE_MATCH)
 
     def tearDown(self):
         data_resident.subprocess = self._orig_subprocess
         data_resident.GATEWAY_STATE_PATH = self._orig_gateway_path
         data_resident._gateway_ready = self._orig_gateway_ready
+        data_resident._windows_process_probe = self._orig_process_probe
         data_resident._cache = None
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
@@ -103,9 +130,12 @@ class ResidentProbeTestCase(unittest.TestCase):
         data_resident.subprocess = fake
         return fake
 
-    def _write_gateway_state(self, state: str = "running"):
+    def _write_gateway_state(self, state: str = "running", *,
+                             pid=FAKE_PID, start_time=FAKE_START_CS, **extra):
+        payload = {"gateway_state": state, "pid": pid, "start_time": start_time, **extra}
+        payload = {k: v for k, v in payload.items() if v is not None}
         path = self._tmpdir / "gateway_state.json"
-        path.write_text(json.dumps({"gateway_state": state, "pid": 12345}), encoding="utf-8")
+        path.write_text(json.dumps(payload), encoding="utf-8")
         data_resident.GATEWAY_STATE_PATH = path
         return path
 
@@ -243,6 +273,181 @@ class StateMachineTests(ResidentProbeTestCase):
     def test_gray_systemctl_nonzero_exit(self):
         self._running_with(SYSTEMCTL_ALL_ACTIVE, returncode=1)
         self.assertEqual(data_resident._probe()["light"], "gray")
+
+
+class GatewayLivenessTests(ResidentProbeTestCase):
+    """gateway pid 活性驗證(2026-08-04 事故:gateway 死了一天半仍顯示就緒——
+    因為只讀狀態檔內容,從不驗證 pid。狀態檔是 gateway 自己寫的,死了沒人改)。"""
+
+    def _running_all_active(self):
+        return self._install(FakeSubprocess(
+            _completed(["wsl.exe"], _wsl_list_bytes("Running")),
+            _completed(["wsl.exe"], SYSTEMCTL_ALL_ACTIVE),
+        ))
+
+    # --- 活:照舊 ---------------------------------------------------------
+
+    def test_alive_and_verified_is_green_as_before(self):
+        self._running_all_active()
+        self._write_gateway_state("running")
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "green")
+        gw = payload["gateway"]
+        self.assertTrue(gw["ready"])
+        self.assertTrue(gw["pid_alive"])
+        self.assertEqual(gw["pid"], FAKE_PID)
+        self.assertEqual(gw["detail"], "gateway 就緒")
+        self.assertIn("start_time 相符", gw["pid_note"])
+
+    def test_start_time_tolerance_allows_small_skew(self):
+        data_resident._windows_process_probe = lambda pid: {
+            **PROBE_ALIVE_MATCH, "create_time_cs": FAKE_START_CS + 150}  # +1.5 秒
+        self._running_all_active()
+        self._write_gateway_state("running")
+        self.assertEqual(data_resident._probe()["light"], "green")
+
+    # --- 死/重用:紅,detail 誠實 -----------------------------------------
+
+    def test_claims_running_but_pid_dead_is_red(self):
+        """**事故重演案例**:狀態檔宣稱 running 但 pid 不存在 → 紅,不再誤報就緒。"""
+        data_resident._windows_process_probe = lambda pid: dict(PROBE_DEAD)
+        self._running_all_active()
+        self._write_gateway_state("running")
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "red")
+        gw = payload["gateway"]
+        self.assertFalse(gw["ready"])
+        self.assertTrue(gw["dead"])
+        self.assertIn("宣稱 running", gw["detail"])
+        self.assertIn(f"pid {FAKE_PID} 不存在", gw["detail"])
+        self.assertIn("狀態檔停更於", gw["detail"])
+        self.assertIn("gateway 已死", payload["detail"])
+
+    def test_pid_reused_by_other_process_start_time_mismatch_is_red(self):
+        """pid 重用防誤判:pid 存在但建立時間與 start_time 不符 → 視同死亡。"""
+        data_resident._windows_process_probe = lambda pid: dict(PROBE_REUSED_TIME)
+        self._running_all_active()
+        self._write_gateway_state("running")
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "red")
+        self.assertIn("重用", payload["gateway"]["detail"])
+        self.assertIn("start_time 不符", payload["gateway"]["detail"])
+
+    def test_pid_reused_non_python_image_is_red_when_no_start_time(self):
+        """state 檔無 start_time 時退映像檔名弱驗證:非 python → 重用,紅。"""
+        data_resident._windows_process_probe = lambda pid: dict(PROBE_REUSED_IMAGE)
+        self._running_all_active()
+        self._write_gateway_state("running", start_time=None)
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "red")
+        self.assertIn("notepad.exe", payload["gateway"]["detail"])
+        self.assertIn("重用", payload["gateway"]["detail"])
+
+    def test_process_object_lingering_but_exited_is_red(self):
+        data_resident._windows_process_probe = lambda pid: {
+            "exists": True, "running": False, "create_time_cs": None, "image": None}
+        self._running_all_active()
+        self._write_gateway_state("running")
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "red")
+        self.assertIn("已結束", payload["gateway"]["detail"])
+
+    # --- 無法驗證:fail-open 照舊 + 誠實註記 -------------------------------
+
+    def test_probe_failure_fails_open_with_honest_note(self):
+        """活性檢查自身故障(非 Windows/ctypes 失敗)→ 照舊信任狀態檔,不誤報死。"""
+        data_resident._windows_process_probe = lambda pid: None
+        self._running_all_active()
+        self._write_gateway_state("running")
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "green")
+        gw = payload["gateway"]
+        self.assertTrue(gw["ready"])
+        self.assertIsNone(gw["pid_alive"])
+        self.assertIn("無法驗證", gw["detail"])
+
+    def test_missing_pid_field_fails_open_with_honest_note(self):
+        self._running_all_active()
+        self._write_gateway_state("running", pid=None, start_time=None)
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "green")
+        self.assertIn("無有效 pid 欄位", payload["gateway"]["detail"])
+
+    def test_image_fallback_python_is_weakly_verified_alive(self):
+        """無 start_time 可比對但映像檔是 python → 活(弱驗證,note 誠實)。"""
+        data_resident._windows_process_probe = lambda pid: {
+            **PROBE_ALIVE_MATCH, "create_time_cs": None}
+        self._running_all_active()
+        self._write_gateway_state("running", start_time=None)
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "green")
+        gw = payload["gateway"]
+        self.assertEqual(gw["detail"], "gateway 就緒")  # 弱驗證仍算活,detail 照舊
+        self.assertIn("弱驗證", gw["pid_note"])  # 驗證強度誠實記在 pid_note
+
+    # --- 既有黃燈語意不變(state 檔缺失/損毀/未 running 不是「死」)---------
+
+    def test_state_file_missing_stays_yellow_not_red(self):
+        self._running_all_active()
+        data_resident.GATEWAY_STATE_PATH = self._tmpdir / "not-there.json"
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "yellow", "檔案缺失 = 暖機中,不是死")
+
+    def test_state_file_corrupt_stays_yellow_not_red(self):
+        self._running_all_active()
+        path = self._tmpdir / "gateway_state.json"
+        path.write_text("{not json", encoding="utf-8")
+        data_resident.GATEWAY_STATE_PATH = path
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "yellow")
+        self.assertIn("無法解析", payload["gateway"]["detail"])
+
+    def test_non_running_state_never_probes_pid(self):
+        """state != running(例如 starting)→ 根本不做 pid 檢查(暖機語意不變)。"""
+        calls = []
+        data_resident._windows_process_probe = lambda pid: calls.append(pid) or dict(PROBE_DEAD)
+        self._running_all_active()
+        self._write_gateway_state("starting")
+        payload = data_resident._probe()
+        self.assertEqual(payload["light"], "yellow")
+        self.assertEqual(calls, [], "未宣稱 running 就不驗 pid")
+
+    # --- check_gateway_pid_liveness 純函式邊界 ----------------------------
+
+    def test_liveness_rejects_invalid_pid_values(self):
+        for bad in [None, "23560", True, False, -1, 0, 1.5]:
+            alive, note = data_resident.check_gateway_pid_liveness(bad, FAKE_START_CS)
+            self.assertIsNone(alive, f"{bad!r} 應為無法驗證")
+            self.assertIn("pid", note)
+
+    def test_liveness_uses_start_time_before_image_fallback(self):
+        """start_time 可比對時以它為準——即使映像檔看起來像 python,
+        建立時間不符仍判重用(主判準優先於弱驗證)。"""
+        data_resident._windows_process_probe = lambda pid: dict(PROBE_REUSED_TIME)
+        alive, note = data_resident.check_gateway_pid_liveness(FAKE_PID, FAKE_START_CS)
+        self.assertFalse(alive)
+        self.assertIn("重用", note)
+
+
+class LivenessReadOnlyStaticTests(unittest.TestCase):
+    """活性檢查的唯讀鎖定:只申請查詢權限,原始碼不得出現任何 process 操作 API。"""
+
+    SOURCE = (DASHBOARD_DIR / "data_resident.py").read_text(encoding="utf-8")
+
+    def test_only_query_limited_access_right(self):
+        self.assertIn("_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000", self.SOURCE)
+        # 不得出現任何更高權限旗標或操作 API
+        for forbidden in ["PROCESS_ALL_ACCESS", "PROCESS_TERMINATE", "TerminateProcess",
+                          "OpenProcessToken", "SuspendThread", "DebugActiveProcess",
+                          "WriteProcessMemory", "0x1F0FFF"]:
+            self.assertNotIn(forbidden, self.SOURCE, f"不得出現 process 操作面:{forbidden}")
+
+    def test_no_new_subprocess_or_psutil_dependency(self):
+        # 活性檢查不得引入 psutil(不在本 venv)或任何新的 spawn 位點
+        self.assertNotIn("import psutil", self.SOURCE)
+        self.assertNotIn("Popen", self.SOURCE)
+        call_sites = re.findall(r"subprocess\.run\(\s*(\w+)", self.SOURCE)
+        self.assertEqual(len(call_sites), 2, "subprocess 位點仍恰為兩處凍結常數")
 
 
 class DecodeTests(unittest.TestCase):

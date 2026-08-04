@@ -131,6 +131,9 @@ applicable=False「不適用/無法查詢」,不噴例外、不計入整體燈�
 ## 兩端並列(提案 §4,處理方式不對稱)
 
 - **Windows**:%LOCALAPPDATA%\\hermes\\hermes-agent,直接 `git -C <repo>`。
+  service 欄複用 data_resident._gateway_ready()——自 2026-08-04 起含
+  **gateway pid 活性驗證**(事故:gateway 死了一天半仍顯示就緒;活性 helper
+  一份共用於常駐燈與本模組,細節見 data_resident.py docstring 專節)。
   expect_custom=True:客製 commit 以 **upstream 組**衡量(相對官方的領先數);
   若該數歸零 → 疑似被 reset 到純上游 → **紅**(2026-07-24 事故偵測型防線,
   提案 §6)。注意**不可**以 origin 組衡量——防重演落地後 origin 相等是健康態。
@@ -172,6 +175,12 @@ applicable=False「不適用/無法查詢」,不噴例外、不計入整體燈�
 因只剩 follow 一組計入而自然無需決勝;Windows 端維持既有行為(backup 先於
 upstream)。計入組的摘要**全部併陳**於 advice,不因此漏訊;降級組的資訊仍
 完整輸出於 comparisons(看得到,只是不驅動燈)。
+
+燈號短文字(light_text)以共用 LIGHT_TEXT 表為底、`ROLE_LIGHT_TEXT` 做
+per-role 覆寫(2026-08-04):follow 的橙態顯示「領先/分歧於 Windows 整合
+tip——異常」而非共用表的「帶客製 diverge——需受控 merge」——後者描述的是
+對官方的正向 diverge,與 follow 的反向異常語意不符。target 整體 badge 的
+短文字跟著 `overall_driver` 的 role 走(同一套覆寫)。
 
 容錯:任何探測失敗一律優雅退化為 gray,不噴例外。快取 45 秒 TTL。
 """
@@ -309,6 +318,20 @@ LIGHT_TEXT = {
     "red": "異常——需人工檢查",
     "gray": "無法查詢",
 }
+
+# per-role 短文字覆寫(2026-08-04):共用表的橙態語意是「帶客製 diverge 需
+# 受控 merge 官方」,但 follow 組的橙是**反向異常**——本端不該有 Windows
+# 沒有的 commit(領先/分歧,見 §10.1 拍板語意)。只覆寫語意不貼的格子;
+# 其餘沿用共用表(follow 藍=「可 ff-only 前進」本就貼切,綠/灰同)。
+ROLE_LIGHT_TEXT = {
+    "follow": {"orange": "領先/分歧於 Windows 整合 tip——異常,需人工檢查"},
+}
+
+
+def _light_text_for(role: str | None, light: str) -> str:
+    """比較組/target 的短文字:先查 per-role 覆寫,否則共用表。
+    target 層以 overall_driver 當 role(driver=target/None 時自然落回共用表)。"""
+    return ROLE_LIGHT_TEXT.get(role or "", {}).get(light, LIGHT_TEXT[light])
 
 # 嚴重度排序(整體燈取較嚴重者)
 LIGHT_SEVERITY = {"green": 0, "blue": 1, "gray": 2, "orange": 3, "red": 4}
@@ -581,7 +604,7 @@ def _build_comparison(prefix: tuple[str, ...], remote: str) -> dict:
             **base, "applicable": False, "behind": None, "ahead": None,
             "can_ff": None, "diverged": None, "diverge_commits": [],
             "merge_base": None,
-            "light": "gray", "light_text": LIGHT_TEXT["gray"],
+            "light": "gray", "light_text": _light_text_for(role, "gray"),
             "summary": f"不適用/無法查詢:本地無 {ref} ref(未 fetch 過此 remote)",
         }
     behind = _to_count(_ok_str(_run_git_remote(prefix, _t_behind, remote)))
@@ -599,7 +622,7 @@ def _build_comparison(prefix: tuple[str, ...], remote: str) -> dict:
         **base, "applicable": True, "behind": behind, "ahead": ahead,
         "can_ff": can_ff, "diverged": (ahead > 0) if ahead is not None else None,
         "diverge_commits": diverge_commits, "merge_base": merge_base,
-        "light": light, "light_text": LIGHT_TEXT[light], "summary": summary,
+        "light": light, "light_text": _light_text_for(role, light), "summary": summary,
     }
 
 
@@ -737,7 +760,10 @@ def _end_payload(base: dict, facts: dict, expect_custom: bool, expect_rescue: bo
         "expect_custom": expect_custom,
         "expect_rescue": expect_rescue,
         "light": light,
-        "light_text": LIGHT_TEXT[light],
+        # 整體 badge 的短文字跟著主導組的 role 語意走(WSL 由 follow 驅動的橙
+        # 顯示「領先/分歧於 Windows tip」而非共用表的「帶客製 diverge」);
+        # driver 為 target(紅)/None 時自然落回共用表。
+        "light_text": _light_text_for(driver, light),
         "advice": advice,
         "blocking_reasons": reasons,
         "overall_driver": driver,
@@ -757,6 +783,10 @@ def _probe_windows() -> dict:
     prefix = (GIT_BIN, "-C", str(WINDOWS_REPO_PATH))
     facts = _facts_from_prefix(prefix, str(WINDOWS_REPO_PATH))
     try:
+        # 含 pid 活性驗證(2026-08-04 事故修正):與常駐燈共用 data_resident 的
+        # 同一份 _gateway_ready()/check_gateway_pid_liveness(),不各寫一份。
+        # 狀態檔宣稱 running 但 pid 已死/被重用 → ready=False、dead=True,
+        # detail 誠實寫明(此前只讀檔案內容,gateway 死了一天半仍顯示就緒)。
         gateway = data_resident._gateway_ready()
     except Exception:
         gateway = None
@@ -765,6 +795,9 @@ def _probe_windows() -> dict:
         "detail": gateway.get("detail") if gateway else "無法讀取",
         "ready": gateway.get("ready") if gateway else None,
         "state": gateway.get("state") if gateway else None,
+        "dead": gateway.get("dead") if gateway else None,
+        "pid": gateway.get("pid") if gateway else None,
+        "pid_alive": gateway.get("pid_alive") if gateway else None,
     }
     return _end_payload(base, facts, expect_custom=True, expect_rescue=True, service=service)
 
@@ -814,7 +847,8 @@ def _probe() -> dict:
         "checked_at": _now_iso(),
         "remote_note": "遠端資訊只讀本地已有 refs(<remote>/main),可能過期"
                        "——階段一預檢未執行 fetch",
-        "stage": "唯讀升級預檢(階段一);寫入/執行功能未核准,無任何執行鈕",
+        "stage": "唯讀升級預檢(階段一);升級/合併/同步執行未核准,無升級執行鈕;"
+                 "遠端 fetch(bridge 第三群組)為唯一寫入例外,僅更新 refs",
         "targets": [_probe_windows(), _probe_wsl()],
     }
 
@@ -826,11 +860,17 @@ def _gray_target(target_id: str, label: str) -> dict:
             "comparisons": [], "overall_driver": None}
 
 
-def get_update_precheck() -> dict:
-    """對外唯一入口:45 秒 TTL 快取 + 全域容錯(任何未預期例外 → 兩端灰)。"""
+def get_update_precheck(force: bool = False) -> dict:
+    """對外唯一入口:45 秒 TTL 快取 + 全域容錯(任何未預期例外 → 兩端灰)。
+
+    force=True(api.py 的 `?fresh=1`,2026-08-04 隨〔重新整理遠端資訊〕fetch
+    按鈕引入):**繞過 TTL 立即重新探測**,並以新結果覆寫快取(之後的一般
+    請求也拿到新資料)。用途:bridge 跑完四條 fetch 後,UI 重查預檢必須拿到
+    fetch 後的 refs——否則 45 秒內只會看到舊快取(2026-08-04 實測撞到)。
+    重新探測本身仍是純唯讀 git 查詢,force 不引入任何寫入面。"""
     global _cache
     now = time.monotonic()
-    if _cache is not None and now - _cache[0] < CACHE_TTL_SECONDS:
+    if not force and _cache is not None and now - _cache[0] < CACHE_TTL_SECONDS:
         return _cache[1]
     try:
         payload = _probe()
@@ -839,7 +879,8 @@ def get_update_precheck() -> dict:
             "checked_at": _now_iso(),
             "remote_note": "遠端資訊只讀本地已有 refs(<remote>/main),可能過期"
                            "——階段一預檢未執行 fetch",
-            "stage": "唯讀升級預檢(階段一);寫入/執行功能未核准,無任何執行鈕",
+            "stage": "唯讀升級預檢(階段一);升級/合併/同步執行未核准,無升級執行鈕;"
+                 "遠端 fetch(bridge 第三群組)為唯一寫入例外,僅更新 refs",
             "targets": [
                 _gray_target("windows", "Windows Hermes (live gateway)"),
                 _gray_target("wsl", f"WSL Hermes ({WSL_DISTRO})"),

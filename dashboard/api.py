@@ -204,7 +204,11 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
             # 純唯讀 git 讀取(白名單子指令);兩端並列(Windows/WSL)。WSL 端
             # distro Stopped 不喚醒(複用 data_resident 守門);失敗優雅退化為灰。
             # 45 秒 TTL 快取(git 讀取較重)。**零寫入、零 fetch、無執行入口。**
-            return 200, data_update.get_update_precheck()
+            # `fresh=1`(2026-08-04):繞過 TTL 立即重探並覆寫快取——供
+            # 〔重新整理遠端資訊〕fetch 按鈕完成後取新 refs 用;重探本身
+            # 仍是純唯讀查詢,本端點維持 GET-only 零寫入。
+            fresh = query.get("fresh", ["0"])[0] == "1"
+            return 200, data_update.get_update_precheck(force=fresh)
         if path.startswith("/api/logs/"):
             name = path[len("/api/logs/"):]
             if ".." in name or not _LOG_NAME_RE.match(name):

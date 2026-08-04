@@ -19,19 +19,48 @@ subprocess 只會執行下方兩個凍結常數的唯讀查詢指令,沒有其�
    `--no-legend --plain`);data.py 自 P1 起凍結(Streamlit 零改動鐵律),
    故 parser 鏡像在本模組,由測試以相同 fixture 格式鎖定。
 3. gateway 就緒層:僅當前兩層通過(常駐單元全部 active)才讀
-   %LOCALAPPDATA%\\hermes\\gateway_state.json(**純本機檔案讀取**,零副作用;
-   只抽 gateway_state 一個狀態字串,不展開其他欄位)。gateway 啟動後約
-   3.5 分鐘才寫狀態檔(memory/hermes-gateway-init-slow 教訓),
-   state != running / 檔案缺失 → 黃燈「暖機中」,不誤報綠、也不誤報故障。
+   %LOCALAPPDATA%\\hermes\\gateway_state.json,並(2026-08-04 起)**驗證檔內
+   pid 是否還活著**。gateway 啟動後約 3.5 分鐘才寫狀態檔
+   (memory/hermes-gateway-init-slow 教訓),state != running / 檔案缺失 →
+   黃燈「暖機中」,不誤報綠、也不誤報故障。
+
+## gateway pid 活性驗證(2026-08-04,事故驅動)
+
+**事故**:live gateway 於 08-03 08:04 死亡(pid 16224 不復存在),但本模組與
+升級預檢的 service 欄一直顯示「gateway 就緒」約一天半——因為只讀狀態檔內容,
+從不驗證 `pid` 是否還活著。狀態檔是 gateway **自己**寫的,它死了就沒人改。
+
+**修正**:`check_gateway_pid_liveness()`(本模組;data_update 經
+`_gateway_ready()` 共用同一份,不各寫一份):
+
+- 唯讀、零副作用、便宜:純 ctypes 呼叫
+  `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `GetExitCodeProcess` /
+  `GetProcessTimes` / `QueryFullProcessImageNameW` → 立即 `CloseHandle`。
+  **只申請查詢權限**,技術上不可能 terminate/suspend;無 subprocess、無新依賴
+  (psutil 不在本 venv,不為此新增)。
+- **pid 重用防誤判**:主判準比對 process 建立時間與狀態檔 `start_time`——
+  寫入方(hermes gateway/status.py)在 Windows 上記的是
+  `int(round(psutil.create_time()*100))`(epoch 百分秒),psutil 該值與
+  GetProcessTimes 同源,故同一 process 必相符;容差 ±2 秒(比照 hermes 自身
+  lifecycle_ledger 的防重用判準)。`start_time` 缺失時退而求其次以映像檔名
+  是否為 python 弱驗證,並在 note 誠實標示。
+- **語意**:狀態檔宣稱 running 但 pid 死/被重用 → 常駐燈**紅**、預檢 service
+  欄 ready=false,detail 寫明「狀態檔宣稱 running 但 pid <N> 不存在(狀態檔
+  停更於 <mtime>)」。pid 活且驗證過 → 照舊「gateway 就緒」。
+- **刻意不用 mtime 新鮮度當死活訊號**:gateway 啟動後 ~3.5 分鐘才寫檔、平時
+  也非高頻更新——mtime 舊不代表死;pid 檢查才是直接訊號。mtime 只在判死後
+  用來標註「停更於何時」。
+- **fail-open**:活性檢查自身失敗(非 Windows/ctypes 異常)→ 回 None,照舊
+  信任狀態檔並在 note 註記「未驗證」——驗證機制故障不得誤報死。
 
 五態(提案 §1.2 狀態機):
 
 | light  | 條件 |
 |--------|------|
-| green  | distro Running + 常駐單元全 active + gateway 就緒 |
+| green  | distro Running + 常駐單元全 active + gateway 就緒(pid 活性驗證通過或無法驗證)|
 | yellow | distro Running +(任一單元 activating,或全 active 但 gateway 未就緒/暖機中)|
 | orange | distro Running + 部分常駐單元 active、部分不是 |
-| red    | distro 未運作,或常駐單元全部停止 |
+| red    | distro 未運作,或常駐單元全部停止,或 **gateway 狀態檔宣稱 running 但 pid 已死/被重用** |
 | gray   | 無法查詢(wsl 不存在/逾時/查詢失敗/未預期錯誤)|
 
 容錯慣例(比照 data.py/data_stage3.py):任何探測失敗一律優雅退化為
@@ -155,12 +184,114 @@ def _probe_units() -> dict | None:
     return _parse_wsl_systemctl(proc.stdout or "")
 
 
+# --- gateway pid 活性驗證(2026-08-04;設計理由見模組 docstring 專節)--------
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # 只申請查詢權限,不可能操作 process
+_STILL_ACTIVE_EXIT_CODE = 259                # GetExitCodeProcess:仍在運行
+_WINERROR_ACCESS_DENIED = 5                  # OpenProcess 拒絕存取 = process 存在
+_FILETIME_UNIX_EPOCH_100NS = 116_444_736_000_000_000  # 1601→1970 epoch 位移
+_START_TIME_TOLERANCE_CS = 200               # ±2 秒(比照 hermes lifecycle_ledger)
+
+
+def _windows_process_probe(pid: int) -> dict | None:
+    """唯讀查詢一個 Windows process:存在?仍在運行?建立時間?映像檔?
+
+    只用 ctypes 呼叫 OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) →
+    GetExitCodeProcess / GetProcessTimes / QueryFullProcessImageNameW →
+    **立即 CloseHandle**。查詢權限技術上無法對 process 做任何操作;
+    無 subprocess、無第三方依賴。回傳 dict 或 None(本平台/本次無法查詢,
+    呼叫端 fail-open)。create_time_cs 為 epoch 百分秒(與狀態檔 start_time
+    同單位,見 check_gateway_pid_liveness)。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            if ctypes.get_last_error() == _WINERROR_ACCESS_DENIED:
+                # 存在但無權查詢(非本使用者的 process——gateway 同使用者,
+                # 正常情況不會走到這;誠實回報「存在、身分未知」)
+                return {"exists": True, "running": None,
+                        "create_time_cs": None, "image": None}
+            return {"exists": False, "running": False,
+                    "create_time_cs": None, "image": None}
+        try:
+            running = None
+            exit_code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                running = exit_code.value == _STILL_ACTIVE_EXIT_CODE
+            create_time_cs = None
+            creation, exited, kernel_t, user_t = (wintypes.FILETIME() for _ in range(4))
+            if kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exited),
+                                        ctypes.byref(kernel_t), ctypes.byref(user_t)):
+                filetime = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+                create_time_cs = int(round((filetime - _FILETIME_UNIX_EPOCH_100NS) / 1e5))
+            image = None
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                image = buf.value or None
+            return {"exists": True, "running": running,
+                    "create_time_cs": create_time_cs, "image": image}
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def check_gateway_pid_liveness(pid, expected_start_time) -> tuple[bool | None, str]:
+    """**共用 helper**(常駐燈第三層與 data_update 預檢 service 欄同用一份,
+    經 _gateway_ready() 收斂,不各寫一份):狀態檔宣稱的 gateway pid 是否
+    還活著、且**是同一個 process**(防 pid 重用誤判)。
+
+    回傳 (alive, note):
+    - False → 確定死了/pid 已被別的 process 重用(呼叫端轉紅)
+    - True  → 活著(note 說明驗證強度:start_time 相符/映像檔名弱驗證)
+    - None  → 無法驗證(pid 欄缺失/非 Windows/查詢失敗)——fail-open,
+      呼叫端照舊信任狀態檔,note 誠實註記未驗證(驗證機制故障不得誤報死)
+
+    主判準 = 建立時間比對:狀態檔 start_time 由 gateway 寫入方以
+    psutil create_time()*100(epoch 百分秒)記錄,與 GetProcessTimes 同源,
+    同一 process 必相符;容差 ±2 秒。start_time 缺失 → 映像檔名弱驗證。"""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None, "狀態檔無有效 pid 欄位,活性未驗證"
+    info = _windows_process_probe(pid)
+    if info is None:
+        return None, f"pid {pid} 活性無法驗證(平台不支援或查詢失敗)"
+    if not info["exists"]:
+        return False, f"pid {pid} 不存在"
+    if info["running"] is False:
+        return False, f"pid {pid} 已結束(process 物件殘留但已非運行中)"
+    expected = expected_start_time \
+        if isinstance(expected_start_time, (int, float)) \
+        and not isinstance(expected_start_time, bool) else None
+    create = info.get("create_time_cs")
+    if expected is not None and create is not None:
+        if abs(create - expected) <= _START_TIME_TOLERANCE_CS:
+            return True, f"pid {pid} 運行中,建立時間與狀態檔 start_time 相符"
+        return False, (f"pid {pid} 存在但建立時間與狀態檔 start_time 不符"
+                       f"——pid 已被其他 process 重用")
+    image = (info.get("image") or "")
+    if image:
+        name = image.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if "python" in name:
+            return True, (f"pid {pid} 運行中(start_time 不可比對,"
+                          f"僅以映像檔名 {name} 弱驗證)")
+        return False, f"pid {pid} 存在但映像檔為 {name}(非 python)——pid 已被重用"
+    return True, f"pid {pid} 運行中(身分無法交叉驗證)"
+
+
 def _gateway_ready() -> dict:
-    """第三層:gateway 就緒判定(僅在常駐單元全 active 時被呼叫)。
+    """第三層:gateway 就緒判定(常駐燈在常駐單元全 active 時呼叫;
+    data_update._probe_windows 亦直接呼叫本函式——活性驗證一份共用)。
 
     讀 gateway_state.json 的 gateway_state 欄位(白名單單值抽取):
-    == "running" → 就緒;其他值/檔案缺失/無法解析 → 未就緒(黃燈暖機中,
-    3.5 分鐘慢啟動教訓內建於文字)。純檔案讀取,零副作用。"""
+    == "running" → **再驗證 pid 活性**(2026-08-04 事故修正,見模組 docstring):
+    pid 死/被重用 → ready=False + dead=True(常駐燈紅);活著/無法驗證 → 就緒。
+    其他值/檔案缺失/無法解析 → 未就緒(黃燈暖機中,3.5 分鐘慢啟動教訓內建
+    於文字)。純檔案讀取 + ctypes 唯讀查詢,零副作用。"""
     path = GATEWAY_STATE_PATH
     if path is None:
         return {"ready": False, "state": None,
@@ -175,7 +306,21 @@ def _gateway_ready() -> dict:
         return {"ready": False, "state": None, "detail": "gateway 狀態檔無法解析"}
     state = raw.get("gateway_state") if isinstance(raw, dict) else None
     if state == "running":
-        return {"ready": True, "state": "running", "detail": "gateway 就緒", "mtime": mtime}
+        pid = raw.get("pid")
+        alive, note = check_gateway_pid_liveness(pid, raw.get("start_time"))
+        if alive is False:
+            # 狀態檔是 gateway 自己寫的——它死了就沒人改,內容不可信
+            return {
+                "ready": False, "state": "running", "dead": True,
+                "pid": pid if isinstance(pid, int) else None, "pid_alive": False,
+                "detail": f"狀態檔宣稱 running 但{note}(狀態檔停更於 {mtime})",
+                "mtime": mtime,
+            }
+        detail = "gateway 就緒" if alive else f"gateway 就緒(注意:{note})"
+        return {"ready": True, "state": "running",
+                "pid": pid if isinstance(pid, int) else None,
+                "pid_alive": alive, "pid_note": note,
+                "detail": detail, "mtime": mtime}
     return {
         "ready": False,
         "state": state if isinstance(state, str) else None,
@@ -223,6 +368,10 @@ def _probe() -> dict:
         base["gateway"] = gateway
         if gateway["ready"]:
             return _payload(base, "green", "常駐單元全部 active,gateway 就緒")
+        if gateway.get("dead"):
+            # 2026-08-04 事故修正:狀態檔宣稱 running 但 pid 已死/被重用 → 紅
+            # (不是黃「暖機中」——暖機是「還沒起來」,這是「起來過但死了」)
+            return _payload(base, "red", f"gateway 已死:{gateway['detail']}")
         return _payload(base, "yellow", f"常駐單元全部 active;{gateway['detail']}")
     if activating and not others:
         return _payload(base, "yellow", f"單元啟動中:{'、'.join(activating)}")

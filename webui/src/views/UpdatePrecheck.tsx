@@ -1,10 +1,15 @@
 // Hermes 更新——唯讀升級預檢(階段一;設計正本 docs/webui-update-button-proposal.md §3)。
 //
-// **純唯讀**:本 view 只顯示兩端(Windows/WSL)的升級預檢狀態,**零執行/升級/
-// 同步按鈕**——階段二寫入(ff-only merge/依賴重建/服務重啟)未核准,UI 不得出現
-// 任何操作入口。唯一允許的互動是「重新整理(重跑唯讀預檢)」的讀取鈕(RefreshButton,
-// onClick 只接 reload 重新取數)。此邊界由 update-precheck-render.test.mjs
-// 與 scripts/webui_security_check.py 第 11 項靜態鎖定。
+// **本檔純唯讀**:本 view 只顯示兩端(Windows/WSL)的升級預檢狀態,**零執行/
+// 升級/同步按鈕**——階段二寫入(ff-only merge/依賴重建/服務重啟)未核准。
+// 本檔的互動:「重新整理(重跑唯讀預檢)」讀取鈕(RefreshButton,onClick 只接
+// reload),以及掛載獨立元件 UpdateFetch.tsx 的〔重新整理遠端資訊〕鈕
+// (2026-08-04 拍板的第四個寫入例外,提案 §9 項 2——寫入面**不在本檔**,
+// 集中於 UpdateFetch.tsx + bridge 第三群組;本檔維持無直連網路呼叫、
+// 無自訂按鈕元素的既有靜態鎖定)。此邊界由 update-precheck-render.test.mjs
+// 與 scripts/webui_security_check.py 第 11/13 項靜態鎖定。
+// fetch 完成後以 `fresh=1` 重查預檢(繞過資料層 45 秒快取,否則按完看到的
+// 還是舊資料——2026-08-04 實測教訓)。
 //
 // **多基準**(2026-07-24 防重演落地後的修正):每端同時列出所有比較基準——
 // backup(私有備份/防重演基準:本機與雲端是否同步)、upstream(官方上游:
@@ -22,6 +27,7 @@
 //
 // 五態燈:green 已最新／blue 可 ff-only 前進／orange 帶客製 diverge 需受控
 // merge／red 異常需人工檢查／gray 無法查詢。取數只有 apiGet 一條路。
+import { useRef } from "react";
 import {
   apiGet,
   type UpdateComparison,
@@ -29,6 +35,7 @@ import {
   type UpdatePrecheckPayload,
   type UpdateTarget,
 } from "../api";
+import { UpdateFetchButton } from "../UpdateFetch";
 import { ErrorNotice, InfoNotice, Panel, RefreshButton, useApiData } from "./common";
 
 const LIGHT_COLORS: Record<UpdateLight, string> = {
@@ -199,21 +206,33 @@ export function UpdatePrecheckCards({ payload }: { payload: UpdatePrecheckPayloa
 }
 
 export default function UpdatePrecheckView() {
-  const { data, error, loading, reload } = useApiData(
-    () => apiGet<UpdatePrecheckPayload>("/api/update-precheck"),
-    [],
-  );
+  // fetch 按鈕完成後的下一次取數帶 fresh=1(繞過資料層 45 秒快取拿新 refs);
+  // 一般 reload 照常吃快取。兩個 URL 都是字面常數,無其他參數化入口。
+  const freshNext = useRef(false);
+  const { data, error, loading, reload } = useApiData(() => {
+    const useFresh = freshNext.current;
+    freshNext.current = false;
+    return apiGet<UpdatePrecheckPayload>(useFresh ? "/api/update-precheck?fresh=1" : "/api/update-precheck");
+  }, []);
   return (
     <div className="data-page">
       <div className="page-toolbar">
-        {/* 唯一允許的操作:重新整理(重跑唯讀預檢)——零執行/升級/同步按鈕 */}
+        {/* 本檔的讀取操作:重新整理(重跑唯讀預檢)——仍零執行/升級/同步按鈕。
+            〔重新整理遠端資訊〕fetch 鈕是獨立元件(寫入面在 UpdateFetch.tsx
+            + bridge 第三群組),完成後以 fresh=1 重查。 */}
         <RefreshButton onClick={reload} loading={loading} />
+        <UpdateFetchButton
+          onCompleted={() => {
+            freshNext.current = true;
+            reload();
+          }}
+        />
       </div>
       {error && <ErrorNotice message={error} />}
       {data && (
         <Panel
           title="Hermes 更新——唯讀升級預檢（階段一）"
-          caption="兩端並列，每端同時對所有可辨識基準比較——「Windows 整合 tip（本端是否跟上）」「私有備份/防重演基準」「官方上游」；顯示版本/落後/能否 ff/客製 diverge/rescue ref/服務狀態。不提供任何執行、升級、同步操作（階段二寫入未核准）。遠端資訊只讀本地 refs，可能過期。"
+          caption="兩端並列，每端同時對所有可辨識基準比較——「Windows 整合 tip（本端是否跟上）」「私有備份/防重演基準」「官方上游」；顯示版本/落後/能否 ff/客製 diverge/rescue ref/服務狀態。零升級/合併/同步執行鈕（階段二寫入未核准）；〔重新整理遠端資訊〕為本頁唯一寫入——只 fetch 更新 remote-tracking refs，不碰工作樹與本地 branch。遠端資訊平時只讀本地 refs，可能過期。"
         >
           <UpdatePrecheckCards payload={data} />
         </Panel>

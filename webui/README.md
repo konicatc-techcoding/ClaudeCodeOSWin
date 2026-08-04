@@ -198,6 +198,37 @@ dashboard 操作)以**獨立常數分列**,測試斷言兩群組各自的完整�
 systemd 單元執行任何操作**;枚舉完整性/400/409/exit code/audit/UI 邊界
 逐條鎖定);`scripts/webui_security_check.py` 第 12 項靜態鎖定。
 
+## 〔重新整理遠端資訊〕fetch——bridge 白名單第三群組(2026-08-04 拍板)
+
+設計正本 [docs/webui-update-button-proposal.md](../docs/webui-update-button-proposal.md)
+§9 待拍板項 2(拍板框)。**第四個寫入例外**;完全沿用第二群組模式
+(固定指令集、audit、fail-closed):
+
+- **一顆鈕、零參數**:`POST /api/repo/fetch-remotes`(route 全字串比對,
+  帶 query/子路徑/錯誤方法一律 404;不讀 body)→ bridge 循序跑
+  `FETCH_COMMANDS` 凍結四條:Windows repo `git fetch upstream`/
+  `git fetch origin`;WSL repo(經 `wsl -d Ubuntu --exec`)
+  `git fetch origin`(本機路徑)/`git fetch upstream`。
+- **禁止事項(拍板)**:不帶 `--prune`(純加法,絕不刪 refs);絕無
+  pull/merge/checkout/reset;不碰工作樹、本地 branch、HEAD。fetch 只寫
+  remote-tracking refs——這正是它被單獨核准的原因。
+- **per-remote fail-loud**:四條各自回報成敗(id/exitCode/stderr 尾段),
+  一條失敗不中止其餘、不整體靜默;每條 timeout 60 秒;每條各寫一筆
+  audit(`fetch:<id>`,沿用同一份 `logs/webui_bridge_audit.log`);
+  併發 → 409 + audit。
+- **憑證**:Windows `fetch origin`(https)走既有 credential manager
+  (bridge 同使用者身分),不新增任何憑證存放;憑證失效即該條 fail-loud。
+- **UI**(`src/UpdateFetch.tsx`,掛於「Hermes 更新」頁工具列):執行中
+  防連點;逐條顯示結果;完成後(含部分失敗)以 `?fresh=1` 重查預檢——
+  該參數讓唯讀 API 繞過 45 秒 TTL 立即重探並覆寫快取(重探仍是純唯讀
+  git 查詢)。唯讀 view 檔 `views/UpdatePrecheck.tsx` 維持無直連網路
+  呼叫/無自訂按鈕的既有鎖定,寫入面全部隔離在本元件。
+
+測試:`tests/fetch-remotes.test.mjs`(FAKE git fixture,**絕不對真實
+repo fetch、絕不觸網**;凍結四條/禁區字面/傳參被拒/fail-loud/409/audit
+逐條鎖定);`scripts/webui_security_check.py` 第 13 項靜態鎖定(第 2/12
+項的端點與 execFile 枚舉有意識擴充 +1 並保持封閉)。
+
 ## P3:ClaudeCode CLI(PTY 真終端機,2026-07-24)
 
 設計正本與核准紀錄:`docs/webui-pty-terminal-proposal.md`(v2,含 §3.2
@@ -295,11 +326,16 @@ E2E 過程未在 claude session 內執行任何實質指令。
   (`apps/desktop/electron/main.ts:2584 applyUpdates()`)。**
   理由是 2026-07-24 事故:那三條路徑的 diverged fallback 都是
   `reset --hard origin/main`,會把本機客製整批毀掉。**本頁只「看」,不「動」。**
-- **零執行鈕**:UI 沒有任何執行/升級/同步入口(階段二寫入未核准)。唯一互動是
-  共用的「重新整理」讀取鈕,它**只重跑唯讀預檢,不 fetch、不寫入**。
-  三重鎖定:`views/UpdatePrecheck.tsx` 內不得自訂 `<button>`、view 內唯一
-  `onClick` 只能是 `reload`(渲染測試 + 原始碼靜態斷言 +
+- **零執行鈕(升級面)**:UI 沒有任何執行/升級/同步入口(階段二寫入未核准)。
+  「重新整理」讀取鈕**只重跑唯讀預檢,不寫入**。
+  三重鎖定:`views/UpdatePrecheck.tsx` 內不得自訂 `<button>`、無直連網路
+  呼叫、view 內唯一 `onClick` 只能是 `reload`(渲染測試 + 原始碼靜態斷言 +
   `scripts/webui_security_check.py` 第 11 項)。
+  **2026-08-04 唯一新增的例外**:〔重新整理遠端資訊〕fetch 鈕(§9 項 2
+  拍板,第四寫入例外)——寫入面**不在本 view 檔**,隔離於獨立元件
+  `src/UpdateFetch.tsx` + bridge 第三群組(見下方專節);它只 fetch refs,
+  仍非執行/升級/同步入口。fetch 完成後以 `?fresh=1` 重查預檢(繞過資料層
+  45 秒快取;該參數只觸發**唯讀**重探)。
 - **git 子指令白名單(兩層強制)**:資料層 `dashboard/data_update.py` 只跑
   `rev-parse` / `rev-list` / `merge-base` / `for-each-ref` / `describe` /
   `log` / `status --porcelain` / `remote` / `remote get-url` /

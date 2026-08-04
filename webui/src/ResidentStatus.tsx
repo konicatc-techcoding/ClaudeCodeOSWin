@@ -149,6 +149,11 @@ export function buildUnitLight(status: ResidentStatusPayload | null, unit: strin
   }
   if (info.state === "active") {
     if (unit === GATEWAY_WARMUP_UNIT && status.gateway && !status.gateway.ready) {
+      // gateway pid 已死/被重用(2026-08-04 事故修正)≠ 暖機:暖機是「還沒
+      // 起來」,這是「起來過但死了」——紅燈,不得以黃燈「暖機中」掩蓋。
+      if (status.gateway.dead) {
+        return { light: "red", text: "gateway 已死", detail: `active/${info.sub};${status.gateway.detail}` };
+      }
       return { light: "yellow", text: "暖機中", detail: `active/${info.sub};${status.gateway.detail}` };
     }
     return { light: "green", text: "active", detail: `運作中(active/${info.sub})` };

@@ -42,7 +42,7 @@ const PAGE_META: Record<Exclude<ViewId, "hermes" | "terminal">, { kicker: string
   logs: { kicker: "LOGS", title: "Logs", desc: "log 檔案尾端檢視(唯讀)" },
   sessions: { kicker: "SESSIONS", title: "Hermes Sessions", desc: "Hermes session 唯讀列表——不含訊息內容,不提供全文檢視" },
   credentials: { kicker: "CREDENTIALS", title: "憑證/Lane 狀態", desc: "Capability lane 治理表+憑證治理中繼資訊(唯讀,絕不顯示憑證值)" },
-  update: { kicker: "HERMES UPDATE", title: "Hermes 更新", desc: "唯讀升級預檢:兩端版本/落後/能否 ff/客製 diverge/rescue ref/服務狀態——零執行鈕(階段二未核准)" },
+  update: { kicker: "HERMES UPDATE", title: "Hermes 更新", desc: "升級預檢:兩端版本/落後/能否 ff/客製 diverge/rescue ref/服務狀態——零升級執行鈕(階段二未核准);遠端 fetch 為唯一寫入,僅更新 refs" },
 };
 
 export default function App() {

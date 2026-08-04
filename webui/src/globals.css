@@ -82,10 +82,18 @@ button { color: inherit; }
 
 /* --- P1 資料 view(總覽/Jobs/成本/Memory/Logs;資料來自唯讀 API)--- */
 .data-page { max-width: 1450px; margin: 0 auto; display: grid; gap: 15px; }
-.page-toolbar { display: flex; justify-content: flex-end; }
+.page-toolbar { display: flex; justify-content: flex-end; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
 .refresh-button { padding: 8px 12px; border: 1px solid #343944; border-radius: 8px; color: #aab0bd; background: #1a1d24; font-size: 12px; font-weight: 800; cursor: pointer; }
 .refresh-button:hover { color: #d8dbe4; border-color: #4a5060; }
 .refresh-button:disabled { opacity: .6; cursor: wait; }
+/* 〔重新整理遠端資訊〕fetch 鈕(第四寫入例外,2026-08-04)+ per-remote 結果 */
+.update-fetch { display: grid; gap: 4px; justify-items: end; }
+.update-fetch-note { color: var(--muted-2); font-size: 11px; }
+.update-fetch-failure { margin: 0; color: #f87171; font-size: 12px; }
+.update-fetch-results { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: 12px; text-align: right; }
+.update-fetch-results em { font-style: normal; color: var(--muted-2); word-break: break-all; }
+.update-fetch-ok { color: #3dd49b; }
+.update-fetch-fail { color: #f0a24b; }
 .panel { border: 1px solid var(--line); border-radius: 14px; background: rgba(21,24,31,.94); overflow: hidden; }
 .panel-head { padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--line-soft); }
 .panel-head h2 { margin: 0; font-size: 16px; }

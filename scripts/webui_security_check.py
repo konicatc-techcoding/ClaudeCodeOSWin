@@ -50,6 +50,16 @@ P3 追加(2026-07-24,docs/webui-pty-terminal-proposal.md;只追加、不放寬
       --terminate)技術上無入口;UI 端枚舉與 bridge 一致、二次確認、
       stop 語意明示、bridge 離線按鈕停用;兩群組互不滲透。
 
+追加(2026-08-04,docs/webui-update-button-proposal.md §9 待拍板項 2 拍板;
+只追加、不放寬既有 1–12 項的任何判準——第 2/12 項的端點與 execFile 枚舉
+**有意識**擴充 +1 並保持封閉):
+  13. 遠端 fetch 寫入(白名單第三群組,第四個寫入例外)— FETCH_COMMANDS
+      凍結且恰為拍板四條(Windows upstream/origin + WSL origin/upstream,
+      每條 timeout 60 秒);**無 --prune**(純加法)、無 pull/merge/checkout/
+      reset 字面;per-remote fail-loud(四條各自回報,一條失敗不中止其餘)
+      + 每條 audit;併發 409;UI 寫入面隔離於 UpdateFetch.tsx(零參數 POST、
+      防連點、完成後 fresh=1 重查預檢繞過 45 秒快取)、群組互不滲透。
+
 用法: python scripts/webui_security_check.py
 結束碼: 0=全部通過, 1=任一項失敗
 """
@@ -71,6 +81,7 @@ DATA_RESIDENT = REPO_ROOT / "dashboard" / "data_resident.py"
 DATA_SYSTEMD_WSL = REPO_ROOT / "dashboard" / "data_systemd_wsl.py"
 UPDATE_COMPONENT = WEBUI / "src" / "views" / "UpdatePrecheck.tsx"
 DATA_UPDATE = REPO_ROOT / "dashboard" / "data_update.py"
+UPDATE_FETCH_COMPONENT = WEBUI / "src" / "UpdateFetch.tsx"
 SERVICE_COMPONENT = WEBUI / "src" / "ServiceControl.tsx"
 HERMES_VIEW = WEBUI / "src" / "views" / "Hermes.tsx"
 
@@ -169,18 +180,23 @@ def check_command_whitelist(bridge: str, launcher: str) -> tuple[bool, list[str]
         details.append("未找到凍結的 FIXED_COMMAND 常數或內容被改動")
 
     routes = re.findall(r'request\.method === "(GET|POST)" && request\.url === "([^"]+)"', bridge)
+    # 2026-08-04 有意識擴充:第三群組〔重新整理遠端資訊〕fetch(使用者拍板,
+    # docs/webui-update-button-proposal.md §9 項 2)加入受核准端點枚舉——
+    # 這是擴充白名單,不是放寬檢查:枚舉仍封閉,多一條或少一條都 FAIL。
     expected = {
         ("GET", "/health"),
         ("POST", "/api/hermes/dashboard"),
         ("POST", "/api/hermes/dashboard/reload"),
         ("POST", "/api/hermes/dashboard/stop"),
+        ("POST", "/api/repo/fetch-remotes"),
     }
-    if set(routes) == expected and len(routes) == 4:
-        details.append("第一群組端點恰為四種白名單操作: health / start / reload / stop"
-                       "(第二群組服務控制 route 為枚舉表 lookup,由第 12 項單獨檢查)")
+    if set(routes) == expected and len(routes) == 5:
+        details.append("全字串比對端點恰為五種白名單操作: health / start / reload / stop"
+                       " / fetch-remotes(第三群組,2026-08-04 核准;"
+                       "第二群組服務控制 route 為枚舉表 lookup,由第 12 項單獨檢查)")
     else:
         ok = False
-        details.append(f"第一群組端點不符四種白名單: {routes}")
+        details.append(f"全字串比對端點不符五種白名單: {routes}")
 
     spawn_calls = re.findall(r"spawn\(([^,]+),", bridge + launcher)
     allowed_spawn_first_args = {"command.bin", "process.execPath"}
@@ -578,15 +594,22 @@ def check_update_precheck_readonly(component: str, data_update: str) -> tuple[bo
     details: list[str] = []
     ok = True
 
-    # (a) UI:取數僅經唯讀 apiGet;無直連 fetch
+    # (a) UI:取數僅經唯讀 apiGet;無直連 fetch。2026-08-04 起允許的取數
+    #     URL 恰為兩個字面:一般讀取與 fetch 鈕完成後的 fresh=1(繞過 45 秒
+    #     快取拿新 refs)——仍是 GET-only 唯讀端點,無其他參數化入口。
     if "fetch(" in component:
         ok = False
-        details.append("UpdatePrecheck.tsx 出現直連 fetch(取數必須走唯讀 apiGet)")
-    elif 'apiGet<UpdatePrecheckPayload>("/api/update-precheck")' in component:
-        details.append("取數僅經唯讀 API client(apiGet → GET /api/update-precheck,8799)")
+        details.append("UpdatePrecheck.tsx 出現直連 fetch(取數必須走唯讀 apiGet;"
+                       "fetch 鈕的寫入面必須隔離在 UpdateFetch.tsx)")
+    elif re.search(
+        r'apiGet<UpdatePrecheckPayload>\(\s*useFresh\s*\?\s*"/api/update-precheck\?fresh=1"'
+        r'\s*:\s*"/api/update-precheck"\s*\)', component,
+    ):
+        details.append("取數僅經唯讀 API client(apiGet → GET /api/update-precheck"
+                       ",可帶 fresh=1 繞過快取;URL 恰兩個字面,無參數化入口)")
     else:
         ok = False
-        details.append("未找到預期的唯讀 API 取數呼叫")
+        details.append("未找到預期的唯讀 API 取數呼叫(應為 useFresh 二選一的兩個凍結 URL 字面)")
 
     # (b) UI:零執行入口——view 內不自訂 <button(僅共用 RefreshButton),
     #     且唯一 onClick 是 reload(讀取型重跑預檢),非任何執行/升級/同步動作
@@ -756,12 +779,15 @@ def check_service_control(bridge: str, component: str, hermes_view: str) -> tupl
     else:
         ok = False
         details.append("服務 execFile 呼叫形式與預期固定字面不符")
+    # 2026-08-04 有意識擴充:第三群組 fetch(核准的第四寫入例外)新增一個
+    # execFile 位點——枚舉由 2 → 3,仍封閉(多一處即 FAIL);該位點的指令
+    # 凍結性由第 13 項單獨鎖定。
     exec_calls = len(re.findall(r"execFile\(", bridge))
-    if exec_calls == 2:
-        details.append("bridge 全檔 execFile 位點恰為兩處(taskkill + 服務控制),spawn 面封閉")
+    if exec_calls == 3:
+        details.append("bridge 全檔 execFile 位點恰為三處(taskkill + 服務控制 + fetch-remotes),spawn 面封閉")
     else:
         ok = False
-        details.append(f"execFile 位點 {exec_calls} 處,與預期(2)不符")
+        details.append(f"execFile 位點 {exec_calls} 處,與預期(3)不符")
 
     # (d) 白名單外一律 400 + audit(前綴命中但非枚舉成員)
     if re.search(r"if \(!route\) \{\s*auditService\(", bridge) and "白名單外路徑" in bridge and re.search(
@@ -841,6 +867,110 @@ def check_service_control(bridge: str, component: str, hermes_view: str) -> tupl
     return ok, details
 
 
+def check_fetch_remotes(bridge: str, fetch_component: str, precheck_component: str) -> tuple[bool, list[str]]:
+    """追加第 13 項:〔重新整理遠端資訊〕git fetch(寫入,bridge 白名單第三群組)
+    ——2026-08-04 使用者拍板(docs/webui-update-button-proposal.md §9 待拍板項 2,
+    第四個寫入例外)。只追加、不放寬既有 1–12 項判準(第 2/12 項的端點與
+    execFile 枚舉已**有意識**擴充並保持封閉)。"""
+    details: list[str] = []
+    ok = True
+
+    # (a) 指令集凍結且恰為拍板的四條(順序、repo、remote 全部字面比對;
+    #     一顆鈕零參數——bin/args 無任何插值入口,僅 repo 路徑常數)
+    if re.search(
+        r'FETCH_COMMANDS\s*=\s*Object\.freeze\(\[', bridge,
+    ) and all(m in bridge for m in [
+        '"windows:upstream"', '"windows:origin"', '"wsl:origin"', '"wsl:upstream"',
+        'args: Object.freeze(["-C", WINDOWS_HERMES_REPO, "fetch", "upstream"])',
+        'args: Object.freeze(["-C", WINDOWS_HERMES_REPO, "fetch", "origin"])',
+        'args: Object.freeze(["-d", "Ubuntu", "--exec", "git", "-C", WSL_HERMES_REPO, "fetch", "origin"])',
+        'args: Object.freeze(["-d", "Ubuntu", "--exec", "git", "-C", WSL_HERMES_REPO, "fetch", "upstream"])',
+    ]):
+        details.append("FETCH_COMMANDS 凍結且恰為拍板四條(Win upstream/origin + WSL origin/upstream),零參數化")
+    else:
+        ok = False
+        details.append("FETCH_COMMANDS 不存在或與拍板四條不符")
+
+    # (b) 禁止事項:--prune 與 pull/merge/checkout/reset 的指令字面不得出現
+    #     (剝離 // 註解後掃;fetch 為純加法,絕不刪 refs、絕不碰工作樹)
+    code_only = re.sub(r"(?m)(?<!:)//.*$", "", bridge)
+    forbidden = ["--prune", '"pull"', '"merge"', '"checkout"', '"reset"',
+                 '"rebase"', '"clean"', "--force", "--mirror", "--tags"]
+    found = [f for f in forbidden if f in code_only]
+    if found:
+        ok = False
+        details.append(f"bridge 出現 fetch 禁區字面: {found}")
+    else:
+        details.append("bridge 無 --prune/pull/merge/checkout/reset/--force 等禁區字面(純加法 fetch)")
+
+    # (c) 執行位點:execFile 為「凍結指令 + 展開 args」固定字面;每條 timeout
+    if "execFile(command.bin, [...command.args], { timeout: fetchTimeoutMs }" in bridge:
+        details.append("fetch execFile 呼叫=凍結指令固定字面 + 每條 60 秒 timeout,不可參數化")
+    else:
+        ok = False
+        details.append("fetch execFile 呼叫形式與預期固定字面不符")
+    if re.search(r"FETCH_TIMEOUT_MS\s*=\s*60000", bridge):
+        details.append("每條 fetch timeout 凍結為 60 秒(拍板值)")
+    else:
+        ok = False
+        details.append("FETCH_TIMEOUT_MS 與拍板值(60000)不符")
+
+    # (d) per-remote fail-loud:逐條收集結果、失敗不中止其餘;每條 audit
+    if "results.push({ id: command.id, label: command.label, ...outcome })" in bridge \
+            and "results.every((r) => r.ok)" in bridge:
+        details.append("per-remote fail-loud:四條各自回報 id/exitCode/錯誤,一條失敗不中止其餘")
+    else:
+        ok = False
+        details.append("未找到 per-remote 結果收集(fail-loud)實作")
+    audit_calls = len(re.findall(r"auditFetch\(", bridge))
+    if audit_calls >= 2 and "fetch:${step}" in bridge:
+        details.append(f"auditFetch 共 {audit_calls} 處(每條成敗 + 併發拒絕),沿用同一份 audit log")
+    else:
+        ok = False
+        details.append(f"auditFetch 呼叫僅 {audit_calls} 處或格式不符")
+
+    # (e) 併發防護:進行中再按 → 409 + audit
+    if "fetchInFlight" in bridge and re.search(
+        r"if \(fetchInFlight\) \{\s*auditFetch\([\s\S]{0,200}?statusCode = 409", bridge
+    ):
+        details.append("併發防護:一輪 fetch 進行中再觸發 → 409 + audit")
+    else:
+        ok = False
+        details.append("未找到 fetch 併發防護(409+audit)")
+
+    # (f) UI 寫入面隔離:fetch 鈕獨立於 UpdateFetch.tsx;URL 僅由凍結字面組出;
+    #     防連點;完成後 onCompleted(讓預檢 fresh 重查)
+    if '"http://127.0.0.1:8787"' in fetch_component \
+            and '"/api/repo/fetch-remotes"' in fetch_component \
+            and "`${BRIDGE_URL}${FETCH_REMOTES_ROUTE}`" in fetch_component:
+        details.append("UpdateFetch.tsx 操作 URL 僅由凍結字面組出(bridge 8787 + fetch-remotes route)")
+    else:
+        ok = False
+        details.append("UpdateFetch.tsx 操作 URL 組成與預期不符")
+    if 'method: "POST"' in fetch_component and "body:" not in fetch_component:
+        details.append("UpdateFetch.tsx POST 不帶 body(bridge 端本就不讀 body,雙重保證零參數)")
+    else:
+        ok = False
+        details.append("UpdateFetch.tsx 請求帶了 body 或形式不符(必須零參數)")
+    if "disabled={busy}" in fetch_component and "if (busy) return" in fetch_component:
+        details.append("執行中防連點:busy 期間按鈕停用 + handler 提前返回(雙保險)")
+    else:
+        ok = False
+        details.append("未找到防連點實作")
+    if "onCompleted()" in fetch_component and "freshNext.current = true" in precheck_component:
+        details.append("完成後經 onCompleted 讓預檢以 fresh=1 重查(繞過 45 秒快取)")
+    else:
+        ok = False
+        details.append("未找到 fetch 完成後的 fresh 重查串接")
+    # 群組互不滲透:fetch 元件不打其他 bridge 群組端點
+    if "/api/hermes/" not in fetch_component and "/api/service/" not in fetch_component:
+        details.append("UpdateFetch.tsx 零引用第一/第二群組端點(群組互不滲透)")
+    else:
+        ok = False
+        details.append("UpdateFetch.tsx 引用了其他群組端點(群組滲透)")
+    return ok, details
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -849,7 +979,7 @@ def main() -> int:
 
     missing = [str(p) for p in (BRIDGE, LAUNCHER, VITE_CONFIG, PTY_SERVER,
                                 RESIDENT_COMPONENT, DATA_RESIDENT, DATA_SYSTEMD_WSL,
-                                UPDATE_COMPONENT, DATA_UPDATE,
+                                UPDATE_COMPONENT, DATA_UPDATE, UPDATE_FETCH_COMPONENT,
                                 SERVICE_COMPONENT, HERMES_VIEW) if not p.exists()]
     if missing:
         print(f"FAIL — 檢查標的不存在: {missing}")
@@ -882,6 +1012,11 @@ def main() -> int:
     report.add(
         "WSL 服務控制寫入(v1.1 第二群組:枚舉封閉、模板凍結、400+audit、UI 邊界)",
         *_two(check_service_control(bridge, read(SERVICE_COMPONENT), read(HERMES_VIEW))),
+    )
+    report.add(
+        "遠端 fetch 寫入(2026-08-04 第三群組:四條凍結指令、無 --prune、"
+        "per-remote fail-loud、fresh 重查)",
+        *_two(check_fetch_remotes(bridge, read(UPDATE_FETCH_COMPONENT), read(UPDATE_COMPONENT))),
     )
 
     return 0 if report.render() else 1

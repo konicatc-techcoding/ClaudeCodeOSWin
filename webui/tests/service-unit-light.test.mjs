@@ -94,6 +94,31 @@ test("gateway 暖機:worker 黃燈「暖機中」;telegram 不受影響維持綠
   assert.equal(telegram.text, "active");
 });
 
+test("gateway pid 已死(2026-08-04 事故):worker 紅燈「gateway 已死」,非黃燈暖機", () => {
+  // 事故形態:狀態檔宣稱 running 但 pid 不存在——資料層 dead=true。
+  // 暖機是「還沒起來」,這是「起來過但死了」,不得以黃燈掩蓋。
+  const dead = payload({
+    light: "red",
+    text: "背景服務未運作",
+    gateway: {
+      ready: false,
+      state: "running",
+      dead: true,
+      pid: 16224,
+      pid_alive: false,
+      detail: "狀態檔宣稱 running 但pid 16224 不存在(狀態檔停更於 2026-08-03T00:04:00+00:00)",
+    },
+  });
+  const worker = mod.buildUnitLight(dead, WORKER);
+  assert.equal(worker.light, "red");
+  assert.equal(worker.text, "gateway 已死");
+  assert.ok(worker.detail.includes("pid 16224 不存在"), "detail 須帶出資料層的死亡說明");
+  assert.ok(worker.detail.includes("狀態檔停更於"), "detail 須帶出狀態檔停更時間");
+  // telegram 不受 gateway 影響
+  const telegram = mod.buildUnitLight(dead, TELEGRAM);
+  assert.equal(telegram.light, "green");
+});
+
 test("activating → 黃燈,文字為狀態名 activating", () => {
   const p = payload({ units: { [WORKER]: unitInfo("activating", "auto-restart"), [TELEGRAM]: unitInfo("active", "running") } });
   const { light, text, detail } = mod.buildUnitLight(p, WORKER);
