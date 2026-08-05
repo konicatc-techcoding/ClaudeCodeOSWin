@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-05(第四次收工)
+**最後更新**:2026-08-05(第五次收工,同日第二次)
 
 ---
 
@@ -84,15 +84,17 @@
   (`auth.json`)與 named lane 模型軸(`profiles/*/config.yaml`),**全域/default
   的模型設定沒有任何欄位照得到**——換 default 模型後整個 UI 零變化。現在憑證
   治理頁每列(含 `(global-root)`)並列兩軸:生效 provider/model/來源
-  (`_effective_model_fields()` 單一判定處,lane 表改呼叫同一支)+ 交叉檢查燈
-  (生效 provider 在該 store 憑證條目數為 0 → 橙「可能依賴環境變數」)。
+  (`_effective_model_fields()` 單一判定處,lane 表改呼叫同一支)+ 交叉檢查燈。
   欄位正名「憑證 provider」vs「生效模型 provider」——**撞名正是誤解成因**。
+  **四燈語意(橙 > 黃 > 綠,gray=略過檢查)**:橙=生效 provider 在該 store 憑證
+  條目數為 0(可能靠環境變數)、黃=有條目但配額耗盡(暫時、會自癒)、綠=正常。
 - Stage 3 四條 DoD 已透過 Stage 5 P2 在新載體達成;階段全貌見
   [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md)。
 
 ## 2. 上一個 session 做了什麼
 
-(自 `11254e0` 以來零新 commit,本次全部工作即本收尾 commit;起點=使用者把
+(本次 session 兩個 commit:`b5a402b`(A+B 主交付)、`797b26e`(exhausted 降黃),
+皆已 push;起點=使用者把
 全域 default 模型換成 `openrouter/deepseek-v4-flash-0731` 後「哪裡都看不出來」,
 主軸=**由此追出觀測面第三軸缺口並補上**,附帶四項實測釐清。)
 
@@ -129,6 +131,12 @@
   出自 Nous Research),07-23 清憑證=登出,鏈仍在 → 每輪 cron 探測失敗數次後
   標 unhealthy 跳過,主線不受影響。**沒有殘留設定可清**,消噪只能反向 pin
   provider(等於放棄 fallback,不划算)。知情接受。
+- **`exhausted` 降黃拍板+落地(`797b26e`)**:四燈優先序**橙 > 黃 > 綠**
+  (gray 維持不變——該情形計數本身不可信,不據以升級告警)。規則正本在
+  `_credential_model_consistency()` 的 `_out()`:附加 exhausted 文案後只把
+  green 改判 yellow,orange 走同一條路但不被改寫。前端沿用既有黃 `#fbbf24`
+  (= `ResidentStatus` 同一顆),未自創 token。測試 dashboard 274→277、
+  webui 155→156、security_check 13/13;live 驗證 `gptcoding` green→yellow。
 - STATUS 的「env 變數清理待使用者手動」條目依使用者要求刪除(第 3、4 節各一處)。
 
 ## 3. 卡住/未決的問題
@@ -145,19 +153,16 @@
   **STATUS 的 env 條目已刪,memory 是這條約束的唯一正本**。順帶把
   「07-23 清乾淨的 copilot 憑證會經 `gh_cli` 重生」(gptcoding 08-03、
   nemocoding 07-30 各一筆)寫進去——那是舊待辦「觀察是否有 entry 重生」的答案。
-- ~~`exhausted` 要不要降列燈~~ **已拍板降黃並落地(08-05)**:四燈優先序
-  **橙 > 黃 > 綠**(gray 維持不變,該情形計數不可信)。理由=看板上「綠燈+紅色
-  條目」的張力會讓人漏看。live 驗證 `gptcoding` green→yellow。**殘留邊界**:
-  黃燈只看「整個 store 有無 exhausted 條目」,不區分耗盡的是否為生效 provider
-  的條目(偏保守、寧可誤黃);目前六個 store 皆單一 provider,不觸發此差異,
-  要更精準需再拍板一次。
 - **codex 配額約 08-08 中午恢復後的決策**:屆時要決定 default 改回
   `openai-codex/gpt-5.6-sol` 還是續用 deepseek;三條 codex lane 會自動復原
   (不需動作)。決定後才做上面那條 memory 更新,免得改兩遍。
-- **A+B 殘留邊界(小)**:同頁的 Capability Lane 治理表 `provider` 欄**未跟著
-  正名**(屬 registry 語意,刻意不動)——若兩表並置仍會混淆,再開小改;
-  `entry_count` 的 `0`(pool 有該 provider 但零條目)vs `null`(pool 根本沒有
-  該 provider)語意分岔已由結構化欄位保留可區分性。
+- **憑證頁殘留邊界(三項皆小,知情接受)**:(a) 同頁 Capability Lane 治理表的
+  `provider` 欄**未跟著正名**(屬 registry 語意,刻意不動)——若兩表並置仍會
+  混淆再開小改;(b) **黃燈只看「整個 store 有無 exhausted 條目」,不區分耗盡的
+  是否為生效 provider 的條目**(偏保守、寧可誤黃);目前六個 store 皆單一
+  provider 不觸發,要更精準需再拍板;(c) 文字色與色點的對應方式三燈不一致
+  (橙點 `#fb923c`/橙字 `#f0a24b`、綠字中性灰、黃字與黃點同為 `#fbbf24`),
+  黃字併排時亮一階——化妝品級,一行 CSS 可統一,已向使用者提出未處理。
 - **更新按鈕階段二(寫入型 ff 執行鈕):blocker (a) 已解,但價值待重估**:
   0.19.1 升級提供了首個端到端案例——同時實證 WSL ff 段實際只有三條指令、
   零停機,**按鈕的價值比原提案設想小**。剩 blocker (b):白名單不含 timer
