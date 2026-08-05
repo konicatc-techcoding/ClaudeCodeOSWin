@@ -95,12 +95,30 @@ export type CredentialEntry = {
   label: string | null;
 };
 
+// 「憑證 × 模型」交叉一致性檢查(唯讀告警;判定在 dashboard/data_stage3.py
+// _credential_model_consistency() 完成,前端只渲染,不重算規則)
+export type CredentialConsistency = {
+  light: "green" | "orange" | "gray";
+  text: string;
+  effective_provider: string | null;
+  entry_count: number | null;
+  exhausted_entry_count: number;
+};
+
 export type CredentialProfile = {
   auth_json_exists: boolean;
   error?: string;
   mtime?: string | null;
+  // 憑證軸:此 store 的 auth.json **存了哪些 provider 的憑證**(僅名稱)。
+  // ⚠ 與下面的 effective_provider(模型軸)是兩件不同的事,不可混為一談。
   providers?: string[];
   credential_pool?: Record<string, { entry_count: number; entries: CredentialEntry[] }>;
+  // 模型軸(第三條軸,2026-08-04 補):此 store **現在設定用哪個 provider /
+  // 哪個 model.default**,來源是 config.yaml(profile 自己的或全域的)。
+  effective_provider?: string | null;
+  effective_model?: string;
+  effective_model_source?: "profile" | "global" | "unknown";
+  credential_model_consistency?: CredentialConsistency;
 };
 
 export type CredentialStatus = {

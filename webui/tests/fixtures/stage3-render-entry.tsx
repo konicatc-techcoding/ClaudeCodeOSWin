@@ -5,12 +5,21 @@
 // rendered-HTML 測試形態,改為元件測試)。
 // 本檔只在測試中經 esbuild bundle 使用,不進 app bundle。
 import { renderToStaticMarkup } from "react-dom/server";
-import { CredentialsPage, CREDENTIAL_PAGE_WARNING } from "../../src/views/Credentials";
+import {
+  CredentialsPage,
+  CREDENTIAL_PAGE_WARNING,
+  CREDENTIAL_PROVIDER_LABEL,
+  EFFECTIVE_PROVIDER_LABEL,
+} from "../../src/views/Credentials";
 import { SystemdMetricRow } from "../../src/views/Overview";
 import { ScheduleTable } from "../../src/views/Schedule";
 import { SessionsTable } from "../../src/views/Sessions";
 
 export const WARNING_TEXT = CREDENTIAL_PAGE_WARNING;
+// 兩條 provider 軸的欄名(2026-08-04 正名):測試由此比對,避免測試自己
+// 硬編中文字串而與元件實際欄名脫鉤。
+export const CREDENTIAL_PROVIDER_LABEL_TEXT = CREDENTIAL_PROVIDER_LABEL;
+export const EFFECTIVE_PROVIDER_LABEL_TEXT = EFFECTIVE_PROVIDER_LABEL;
 
 export function renderCredentials(lanes: unknown, credentials: unknown): string {
   return renderToStaticMarkup(

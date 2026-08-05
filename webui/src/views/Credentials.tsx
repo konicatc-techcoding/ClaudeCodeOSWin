@@ -10,11 +10,19 @@
 import {
   apiGet,
   type CapabilityLane,
+  type CredentialConsistency,
   type CredentialEntry,
   type CredentialProfile,
   type CredentialStatus,
 } from "../api";
 import { ErrorNotice, InfoNotice, Panel, RefreshButton, useApiData, WarnNotice } from "./common";
+
+// 交叉檢查燈色(沿用 UpdatePrecheck.tsx 同一組色票,不另立第二套語意色)
+const CONSISTENCY_COLORS: Record<CredentialConsistency["light"], string> = {
+  green: "#34d399",
+  orange: "#fb923c",
+  gray: "#6b7280",
+};
 
 // §3.4 警語:逐字沿用提案文字,不可移除。
 export const CREDENTIAL_PAGE_WARNING =
@@ -57,6 +65,23 @@ export function effectiveModelText(lane: CapabilityLane): string {
 
 // 憑證 entry 欄位白名單(與 dashboard/data_stage3.py CREDENTIAL_ENTRY_ALLOWLIST 一致)
 export const ENTRY_COLUMNS = ["id", "priority", "last_status", "last_refresh", "source", "label"] as const;
+
+// 配額耗盡(Hermes 對 HTTP 429 的既有標記)——資料本來就有,只是過去沒有
+// 視覺呈現;此處只做紅色標示,不提供任何修復/重登入入口(唯讀邊界)。
+export const EXHAUSTED_STATUS = "exhausted";
+
+// ⚠ 命名紀律(2026-08-04):畫面上有兩條 provider 軸,措辭必須一眼可辨——
+// 「憑證 provider」= 此 store 存了誰的憑證;「生效模型 provider」= 現在設定
+// 用誰跑模型。兩者過去都叫 provider,是「改了全域 model.provider 卻看不到
+// 變化」被誤判成 bug 的直接成因。
+export const CREDENTIAL_PROVIDER_LABEL = "憑證 provider";
+export const EFFECTIVE_PROVIDER_LABEL = "生效模型 provider";
+
+export const MODEL_SOURCE_TEXT: Record<string, string> = {
+  profile: "profile 自訂",
+  global: "繼承全域 config.yaml",
+  unknown: "無法查詢",
+};
 
 function cellText(value: unknown): string {
   // null/undefined 顯示明確的「—」而非空白(capability_lanes.yaml 允許
@@ -109,50 +134,119 @@ function EntryTable({ entries }: { entries: CredentialEntry[] }) {
         </tr>
       </thead>
       <tbody>
-        {entries.map((entry, i) => (
-          <tr key={`${entry.id ?? i}`}>
-            {ENTRY_COLUMNS.map((col) => (
-              <td key={col}>{cellText(entry[col])}</td>
-            ))}
-          </tr>
-        ))}
+        {entries.map((entry, i) => {
+          // 配額耗盡:整列上紅底 + last_status 上紅色 pill(資料早就有,
+          // 過去只是沒有視覺呈現)。純標示,無任何操作入口。
+          const exhausted = entry.last_status === EXHAUSTED_STATUS;
+          return (
+            <tr key={`${entry.id ?? i}`} className={exhausted ? "cred-entry-exhausted" : undefined}>
+              {ENTRY_COLUMNS.map((col) =>
+                col === "last_status" && exhausted ? (
+                  <td key={col}>
+                    <span className="cred-status-exhausted" title="此憑證條目配額已耗盡(HTTP 429)">
+                      {cellText(entry[col])}
+                    </span>
+                  </td>
+                ) : (
+                  <td key={col}>{cellText(entry[col])}</td>
+                ),
+              )}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
+  );
+}
+
+// 「生效模型」三欄(模型軸)+ 交叉檢查燈——與下方憑證軸區塊刻意用不同的
+// 標題措辭與視覺,避免兩條 provider 軸再度撞名(2026-08-04 需求核心)。
+export function EffectiveModelBlock({ profile }: { profile: CredentialProfile }) {
+  const check = profile.credential_model_consistency;
+  const sourceText = MODEL_SOURCE_TEXT[profile.effective_model_source ?? "unknown"] ?? "無法查詢";
+  return (
+    <div className="cred-model-axis">
+      <h3>生效模型設定(來源:config.yaml)</h3>
+      <dl className="cred-model-facts">
+        <div>
+          <dt>{EFFECTIVE_PROVIDER_LABEL}</dt>
+          <dd>{cellText(profile.effective_provider)}</dd>
+        </div>
+        <div>
+          <dt>生效模型(model.default)</dt>
+          <dd>{cellText(profile.effective_model)}</dd>
+        </div>
+        <div>
+          <dt>設定來源</dt>
+          <dd>{sourceText}</dd>
+        </div>
+      </dl>
+      {check && (
+        <p className={`cred-consistency cred-consistency-${check.light}`}>
+          <span
+            className="cred-consistency-dot"
+            style={{ background: CONSISTENCY_COLORS[check.light] }}
+            aria-hidden="true"
+          />
+          {check.text}
+        </p>
+      )}
+    </div>
   );
 }
 
 export function ProfileCredentialBlock({ name, profile }: { name: string; profile: CredentialProfile }) {
   const pool = profile.credential_pool ?? {};
   const providerNames = Object.keys(pool);
+  const check = profile.credential_model_consistency;
   return (
     <details className="cred-profile" open={name === "(global-root)"}>
       <summary>
+        {check && (
+          <span
+            className="cred-consistency-dot"
+            style={{ background: CONSISTENCY_COLORS[check.light] }}
+            title={check.text}
+            aria-hidden="true"
+          />
+        )}
         <b>{name}</b>
+        {/* 摺疊狀態下也要看得到生效模型——2026-08-04 的誤解正是「改了全域
+            model.provider,任何一頁都沒變化」,故摘要行就要照得到模型軸 */}
+        <small className="cred-summary-model">
+          {EFFECTIVE_PROVIDER_LABEL} {cellText(profile.effective_provider)} / {cellText(profile.effective_model)}
+        </small>
         <small>
           {!profile.auth_json_exists
             ? "auth.json 不存在"
             : profile.error
               ? `錯誤:${profile.error}`
-              : `${providerNames.length} 個 provider,mtime ${profile.mtime ?? "?"}`}
+              : `${providerNames.length} 個${CREDENTIAL_PROVIDER_LABEL},mtime ${profile.mtime ?? "?"}`}
         </small>
       </summary>
-      {profile.auth_json_exists && !profile.error && (
-        <div className="cred-profile-body">
-          <p className="cred-providers">
-            providers(僅名稱):{(profile.providers ?? []).join(", ") || "(無)"}
-          </p>
-          {providerNames.length === 0 && <InfoNotice message="credential_pool 為空。" />}
-          {providerNames.map((provider) => (
-            <div key={provider} className="cred-pool-block">
-              <h3>
-                {provider}
-                <small>{pool[provider].entry_count} 筆憑證 entry</small>
-              </h3>
-              <EntryTable entries={pool[provider].entries} />
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="cred-profile-body">
+        {/* 模型軸永遠顯示——即使 auth.json 不存在/壞掉,「現在設定用哪個
+            模型」仍是可知且必須看得到的事實(這正是本次補洞的重點) */}
+        <EffectiveModelBlock profile={profile} />
+        {profile.auth_json_exists && !profile.error && (
+          <>
+            <p className="cred-providers">
+              {CREDENTIAL_PROVIDER_LABEL}(此 store 存了哪些 provider 的憑證,僅名稱):
+              {(profile.providers ?? []).join(", ") || "(無)"}
+            </p>
+            {providerNames.length === 0 && <InfoNotice message="credential_pool 為空。" />}
+            {providerNames.map((provider) => (
+              <div key={provider} className="cred-pool-block">
+                <h3>
+                  {CREDENTIAL_PROVIDER_LABEL}:{provider}
+                  <small>{pool[provider].entry_count} 筆憑證 entry</small>
+                </h3>
+                <EntryTable entries={pool[provider].entries} />
+              </div>
+            ))}
+          </>
+        )}
+      </div>
     </details>
   );
 }
@@ -180,7 +274,12 @@ export function CredentialsPage({
 
       <Panel
         title="Hermes 憑證治理狀態"
-        caption="各 profile auth.json 的白名單欄位(id/priority/last_status/last_refresh/source/label + entry 筆數);白名單以外的欄位在資料層即被捨棄。"
+        caption={
+          "每個 store 兩條軸並列:「生效模型設定」來自 config.yaml(現在設定用哪個 provider/model)," +
+          "「憑證 provider」來自 auth.json(此 store 存了哪些 provider 的憑證)——兩者不是同一件事。" +
+          "憑證欄位只取白名單(id/priority/last_status/last_refresh/source/label + entry 筆數),其餘在資料層即被捨棄;" +
+          "交叉檢查燈號為唯讀告警,無任何修復入口。"
+        }
       >
         {!credentials.available ? (
           <InfoNotice message={credentials.reason ?? "此環境無法查詢。"} />

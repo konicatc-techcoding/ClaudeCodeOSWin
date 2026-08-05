@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-04(第三次收工)
+**最後更新**:2026-08-05(第四次收工)
 
 ---
 
@@ -80,45 +80,56 @@
   維護在 `scripts/hermes_extra_pins.txt`、回歸測試 `scripts/tests/`(沙箱
   43 案例)。真實環境 `-DryRun` 試跑通過(零寫入、冪等 skip 正確)。
   下次升級=按 fetch 鈕 → 任一 session 說「升級 hermes」→ 兩次核准。
+- **觀測面第三軸補齊(08-04/05):憑證頁的「模型軸」**。原本只有憑證軸
+  (`auth.json`)與 named lane 模型軸(`profiles/*/config.yaml`),**全域/default
+  的模型設定沒有任何欄位照得到**——換 default 模型後整個 UI 零變化。現在憑證
+  治理頁每列(含 `(global-root)`)並列兩軸:生效 provider/model/來源
+  (`_effective_model_fields()` 單一判定處,lane 表改呼叫同一支)+ 交叉檢查燈
+  (生效 provider 在該 store 憑證條目數為 0 → 橙「可能依賴環境變數」)。
+  欄位正名「憑證 provider」vs「生效模型 provider」——**撞名正是誤解成因**。
 - Stage 3 四條 DoD 已透過 Stage 5 P2 在新載體達成;階段全貌見
   [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md)。
 
 ## 2. 上一個 session 做了什麼
 
-(2026-08-04 同日第二次收工,自 `7b7db32` 以來即本收尾 commit;主軸=
-**0.19.1 受控升級全程執行完畢** + 更新頁待辦優先序 5→2→4 三項交付。)
+(自 `11254e0` 以來零新 commit,本次全部工作即本收尾 commit;起點=使用者把
+全域 default 模型換成 `openrouter/deepseek-v4-flash-0731` 後「哪裡都看不出來」,
+主軸=**由此追出觀測面第三軸缺口並補上**,附帶四項實測釐清。)
 
-- **0.19.1 受控 merge 全程走完(首個端到端案例)**:engineering 隔離
-  worktree merge(整合 tip `aa65ff286`,6 檔衝突全解,上游 tag
-  `v2026.7.30`;沙箱 13,123 passed/408 全環境性)→ 主 session live 切換
-  (rescue tag→停 gateway→ff-only 切 tip(分類器擋 reset,使用者親跑)
-  →`pip install -e`+pins→web build→受控重啟→S7 驗證清單全過)→ push
-  私有備份 → WSL ff-only(venv 實名 `venv` 非 `.venv`)。**follow 燈號
-  三態實戰驗證:綠→藍(落後 2130「該同步了」)→綠**。
-- **升級中處理的事故**:上游測試 mock 不完整致沙箱洩漏(洩漏 dashboard
-  對 live home 跑 1 小時、update-flow 測試殺真 gateway 進程),git 狀態
-  無損、config/.env 未動;洩漏進程已清;**live gateway 實際自 08-03 08:04
-  已死而燈號一直顯示就緒**——催生第 5 項。npm install 弄髒 root
-  package-lock.json(重解析噪音)已 restore。教訓與 --ignore 清單記
-  計畫文件 §11 與 auto-memory。
-- **第 5 項:gateway pid 活性驗證**(`data_resident.py` 共用 helper +
-  `data_update.py` 透傳;ctypes QUERY_LIMITED + start_time 指紋,
-  fail-open;worker 個別燈死態紅而非誤標暖機黃)。live 驗證:活路徑
-  指紋逐位吻合;死路徑 13 條沙箱測試鎖定。
-- **第 2 項:fetch 按鈕拍板+落地**(第四寫入例外/bridge 第三群組,
-  拍板=一顆鈕四條凍結指令/無 prune/per-remote fail-loud/60s timeout;
-  `?fresh=1` cache-bust)。live 實按:四條全 ✓、audit 四筆、404 反向
-  驗證過。提案 §9 項 2 已標拍板。
-- **第 4 項:follow 橙態 per-role light_text**(「領先/分歧於 Windows
-  整合 tip——異常,需人工檢查」)+ 預檢頁副標措辭誠實化(「零升級執行鈕;
-  遠端 fetch 為唯一寫入,僅更新 refs」)。
-- 測試終值:dashboard test_data_update 88/test_data_resident 41、
-  webui 149、typecheck 乾淨、security_check **13/13**,零新增失敗。
-- **(第三輪,`23def3f`)升級流程簡化交付**:規劃拍板(script 化機械尾段
-  + skill 化程序,UI 按鈕評估後暫不做)→ engineering 交付兩支 script
-  (沙箱 43/43,真 PS 5.1;PS 5.1 的 BOM/`$PSScriptRoot` 兩坑已修)→
-  CoS 寫 `/hermes-upgrade` skill → 真實環境 DryRun 試跑通過。memory
-  升級順序段已指向新工具。
+- **實測推翻「換模型要重啟 gateway」**:`agent.log` 15:27 那筆 client
+  是**舊 gateway 進程(改 config 後、重啟前)**用新模型建的,證明
+  `_load_gateway_config()` 的 mtime-keyed 快取一改檔即失效。**換 default
+  模型零重啟即生效**;啟動時 `self.config` 那份快照不影響模型解析路徑。
+  (使用者仍實跑了一次 restart,無害,狀態指紋/綠燈確認正常。)
+- **釐清憑證軸 ≠ 模型軸**:憑證頁 `providers` 欄來自 `auth.json`(此 store
+  存了哪些 provider 的憑證),跟 `config.yaml` 的 `model.provider` 是兩件事,
+  改模型不動它是**正確行為不是 bug**。同名不同軸即誤解成因 → 催生本次交付。
+- **A+B 交付(engineering,9 檔)**:A=每列補生效模型三欄(判定邏輯抽單一處,
+  lane 表複用,global config 只讀一次);B=交叉檢查結構化燈號
+  (`credential_model_consistency`)+ `last_status=exhausted` 紅標。
+  **auth.json 不存在/壞掉時模型區塊照樣顯示**(`default` profile 即此情形)。
+  測試:dashboard 84→**98**、全套 274 passed/1 skipped、webui 149→**155**、
+  typecheck+build 乾淨、security_check **13/13 未減項**;§3.2 白名單六欄
+  一字未擴充,並加回歸釘子鎖住。全程唯讀,未碰 bridge 白名單。
+- **live 驗證通過**:8799 重啟後 `(global-root)` 如實顯示
+  `openrouter / deepseek-v4-flash-0731 / 繼承全域`,交叉檢查**橙**
+  (`entry_count=0`);六列燈號各就各位。**這格橙燈揭露的是真實隱形依賴——
+  global-root 憑證池無 openrouter 條目,default 靠 `OPENROUTER_API_KEY`
+  環境變數在跑**(nemocoding 那筆的 source 即 `env:OPENROUTER_API_KEY`)。
+- **deepseek 新 default 驗證結案**:16:04 / 17:05 兩輪整點 cron 皆
+  `finish_reason=stop`、`end_reason=cron_complete`,`session_model_usage`
+  有實際 token 計費。同時證實 15:04 那輪失敗純屬 codex 配額。
+- **codex 配額耗盡(非設定問題)**:15:04 cron HTTP 429
+  `usage_limit_reached`(plan_type=plus),**約 08-08 中午恢復**;
+  `gptcoding` 憑證 `last_status` 已標 `exhausted`。三條 codex lane
+  (gptcoding/financialresearch/intelligence)期間形同停用——**使用者明示不在意**。
+- **nous 日誌噪音查明並拍板不動**:`config.yaml` **沒有 `auxiliary:` 段**、
+  全檔無 `nous` 字串;18 個 auxiliary 子任務全是內建預設 `provider: auto`。
+  nous 是 `agent/auxiliary_client.py` 內建 auto 鏈的**第 3 順位**(Hermes Agent
+  出自 Nous Research),07-23 清憑證=登出,鏈仍在 → 每輪 cron 探測失敗數次後
+  標 unhealthy 跳過,主線不受影響。**沒有殘留設定可清**,消噪只能反向 pin
+  provider(等於放棄 fallback,不划算)。知情接受。
+- STATUS 的「env 變數清理待使用者手動」條目依使用者要求刪除(第 3、4 節各一處)。
 
 ## 3. 卡住/未決的問題
 
@@ -126,6 +137,26 @@
   是 no-op 的前提是 `main == origin/main`。**一旦有客製 commit 沒 push 到私有
   備份,桌面 Install 鈕就會吃掉它們**——中和繫於「每次客製後都要 push」的人為
   紀律,不是結構保證。升級預檢已會在 `ahead > 0` 時亮橙告警。
+- **memory 應然表已過期,待 `knowledge` 更新(08-05 新增,優先)**:
+  `hermes-profile-intended-config` 的 default 列仍寫 `openai-codex/gpt-5.6-sol`,
+  實際已是 `openrouter/deepseek-v4-flash-0731`——不更新,下次憑證稽核會把新值
+  誤判成漂移。同一則的待辦 (2) 也要改寫:**`OPENROUTER_API_KEY` 從「nemocoding
+  必需」升級為「default 主線必需」**(global-root 憑證池無 openrouter 條目)。
+  **STATUS 的 env 條目已刪,memory 是這條約束的唯一正本**。順帶把
+  「07-23 清乾淨的 copilot 憑證會經 `gh_cli` 重生」(gptcoding 08-03、
+  nemocoding 07-30 各一筆)寫進去——那是舊待辦「觀察是否有 entry 重生」的答案。
+- **`exhausted` 要不要降列燈(08-05 新增,一行規則的事,待決)**:目前
+  `gptcoding` 是**綠燈 + 紅色 exhausted 條目**。列燈只由主規則(provider 有無
+  憑證條目)決定,exhausted 只標在條目上、筆數併進 text。理由=配額耗盡是暫時
+  狀態(約 08-08 自癒),跟「憑證根本不存在」不同性質,混同一顆燈會稀釋語意。
+  使用者是實際看板的人,由其定奪。
+- **codex 配額約 08-08 中午恢復後的決策**:屆時要決定 default 改回
+  `openai-codex/gpt-5.6-sol` 還是續用 deepseek;三條 codex lane 會自動復原
+  (不需動作)。決定後才做上面那條 memory 更新,免得改兩遍。
+- **A+B 殘留邊界(小)**:同頁的 Capability Lane 治理表 `provider` 欄**未跟著
+  正名**(屬 registry 語意,刻意不動)——若兩表並置仍會混淆,再開小改;
+  `entry_count` 的 `0`(pool 有該 provider 但零條目)vs `null`(pool 根本沒有
+  該 provider)語意分岔已由結構化欄位保留可區分性。
 - **更新按鈕階段二(寫入型 ff 執行鈕):blocker (a) 已解,但價值待重估**:
   0.19.1 升級提供了首個端到端案例——同時實證 WSL ff 段實際只有三條指令、
   零停機,**按鈕的價值比原提案設想小**。剩 blocker (b):白名單不含 timer
@@ -174,11 +205,6 @@
   (真 merge/pip/build/gateway 重啟/push)要等下次官方升級首跑驗證;
   skill 已註明首跑先 `-DryRun`。
 - **Streamlit 退役決策**:待並行觀察期(2026-07-24 起)滿一個自然使用週期後拍板。
-- **env 變數清理待使用者手動**:建議移除 `GEMINI_API_KEY`/`GOOGLE_API_KEY`/
-  `ANTHROPIC_API_KEY`(防重撿)。`OPENROUTER_API_KEY`:07-29 實測 shell
-  unset 時 nemocoding 仍成功(key 已在 profile credential pool),「不可
-  移除」可能可放寬——但 pool 的 source 標記仍是 `env:OPENROUTER_API_KEY`,
-  未確認 pool 是否會回頭讀 env 前,先保守不動。
 - UI 欄位名稱可能再調整(使用者提出後隨時小改)。
 - 舊項沿用:07-19 排程首次自動觸發結果待確認;「依任務類型自動選模型」規則引擎
   未實作;Hermes UI 設定維護(profile/allowlist 手改 config.yaml);Tavily key
@@ -189,7 +215,16 @@
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **0.19.1 已全程完成**,無進行中作業。日常留意:S7-6 cron 送達一輪
+- **本次交付已 live 驗證完畢,無進行中作業**。第一步(最小、可立刻做)=
+  **決定 `exhausted` 要不要降列燈**(見第 3 節,一行規則)。
+- **08-08 中午 codex 配額恢復後**:決定 default 改回 `gpt-5.6-sol` 或續用
+  deepseek → 決定後才分派 `knowledge` 更新 memory 應然表(免得改兩遍)。
+  **在那之前 `OPENROUTER_API_KEY` 絕對不能移除**——default 主線靠它。
+- **換 hermes 模型的正確作業程序(本次實證)**:改 `config.yaml`(CLI 或
+  手改)→ **不用重啟任何服務** → 憑證頁按重整即見新值 → 想確認真的在跑,
+  等下一輪整點 cron 或開**新** Telegram thread(舊 thread 24h 內會 resume
+  舊 session)。憑證頁那格橙燈=該 provider 在此 store 無憑證條目,靠環境變數。
+- **0.19.1 已全程完成**。日常留意:S7-6 cron 送達一輪
   (下次排程自然觸發時看 Slack 是否正常);Windows 卡片橙(落後 934)
   是升級後預期常態。**下次想升級:按 fetch 鈕看落後數 → 說「升級
   hermes」觸發 `/hermes-upgrade`**(兩次核准,其餘機械化;首跑先
@@ -208,4 +243,4 @@
   累積真實使用觀察,供日後「依任務類型自動選模型」規則引擎的設計依據。
 - 次優先:拍板 telegram-cos-realtime-proposal(**併入 Telegram 出口格式
   缺口一起議**);排程表「未安裝→n/a」小措辭修正;bridge 三單元雙軌
-  確認;env 變數移除(使用者手動)。
+  確認。

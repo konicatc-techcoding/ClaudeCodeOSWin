@@ -162,9 +162,9 @@ class Stage3TestBase(unittest.TestCase):
         path.write_text(json.dumps({"jobs": jobs, "updated_at": "2026-07-23T00:00:00Z"}),
                         encoding="utf-8")
 
-    def write_global_config(self, default_model: str):
+    def write_global_config(self, default_model: str, provider: str = "FAKE_provider"):
         (self.hermes_home / "config.yaml").write_text(
-            f"model:\n  default: {default_model}\n  provider: FAKE_provider\n",
+            f"model:\n  default: {default_model}\n  provider: {provider}\n",
             encoding="utf-8",
         )
 
@@ -445,17 +445,21 @@ class CredentialStatusTests(Stage3TestBase):
         self.assertFalse(result["available"])
         self.assertEqual(result["profiles"], {})
         # (b) profiles 目錄不存在(只有 global-root 缺檔)
+        # 2026-08-04:每列另補生效模型三欄+交叉檢查(見 CredentialModelAxisTests),
+        # 故改為斷言「憑證軸欄位」子集合相等,不再整包 dict 比對。
         data_stage3.HERMES_HOME = self.hermes_home
         result = data_stage3.get_hermes_credential_status()
         self.assertTrue(result["available"])
-        self.assertEqual(result["profiles"]["(global-root)"], {"auth_json_exists": False})
+        root = result["profiles"]["(global-root)"]
+        self.assertFalse(root["auth_json_exists"])
+        self.assertNotIn("credential_pool", root)
         # (c) 壞 JSON
         (self.hermes_home / "auth.json").write_text("{not valid json", encoding="utf-8")
         result = data_stage3.get_hermes_credential_status()
-        self.assertEqual(
-            result["profiles"]["(global-root)"],
-            {"auth_json_exists": True, "error": "設定檔格式錯誤"},
-        )
+        root = result["profiles"]["(global-root)"]
+        self.assertTrue(root["auth_json_exists"])
+        self.assertEqual(root["error"], "設定檔格式錯誤")
+        self.assertNotIn("credential_pool", root)
 
     def test_profiles_scanned_dynamically(self):
         """profile 清單動態掃描目錄,不硬編(§3.3)。"""
@@ -467,7 +471,213 @@ class CredentialStatusTests(Stage3TestBase):
             set(result["profiles"].keys()),
             {"(global-root)", "alpha_profile", "beta_profile"},
         )
-        self.assertEqual(result["profiles"]["beta_profile"], {"auth_json_exists": False})
+        self.assertFalse(result["profiles"]["beta_profile"]["auth_json_exists"])
+
+
+class CredentialModelAxisTests(Stage3TestBase):
+    """2026-08-04 新增:憑證治理表的「第三條軸」(生效模型)+ 兩軸交叉檢查。
+
+    需求脈絡:憑證軸(`providers` = 此 store 存了哪些 provider 的憑證)與
+    模型軸(config.yaml 的 model.provider = 現在設定用哪個 provider)是兩件
+    不同的事,過去 UI 只照得到前者,導致改了全域 model.provider 卻「哪一頁
+    都沒變化」被誤判為 bug。本組測試把 A(三欄解析)與 B(交叉告警)的規則
+    逐條釘住。"""
+
+    def write_profile_config(self, profile: str, default: str, provider: str):
+        path = self.hermes_home / "profiles" / profile / "config.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"model:\n  default: {default}\n  provider: {provider}\n",
+            encoding="utf-8",
+        )
+
+    def write_pool_auth_json(self, path: Path, pool: dict):
+        """只控制 credential_pool 形狀的精簡 auth.json(providers 取 pool 的 key)。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "version": 1,
+            "providers": {name: {"access_token": FAKE_ACCESS_TOKEN} for name in pool},
+            "credential_pool": pool,
+            "updated_at": "2026-08-04T00:00:00Z",
+        }), encoding="utf-8")
+
+    def entry(self, **overrides) -> dict:
+        e = {
+            "id": "FAKE-entry-1", "label": "TEST_label", "priority": 1,
+            "source": "TEST_source", "last_status": "ok",
+            "last_refresh": "2026-08-04T00:00:00Z",
+            "access_token": FAKE_ACCESS_TOKEN,
+        }
+        e.update(overrides)
+        return e
+
+    def rows(self) -> dict:
+        return data_stage3.get_hermes_credential_status()["profiles"]
+
+    # --- A:生效模型三欄的兩條解析路徑 ---
+
+    def test_global_root_row_reads_global_config_source_global(self):
+        """(global-root) 這列直接讀 HERMES_HOME/config.yaml,source 記為 global。"""
+        self.write_global_config("FAKE-model-global", provider="FAKE-prov-global")
+        self.write_auth_json(self.hermes_home / "auth.json")
+        row = self.rows()["(global-root)"]
+        self.assertEqual(row["effective_model"], "FAKE-model-global")
+        self.assertEqual(row["effective_provider"], "FAKE-prov-global")
+        self.assertEqual(row["effective_model_source"], "global")
+
+    def test_named_profile_own_config_wins_source_profile(self):
+        """named profile 自己的 config.yaml 有 model 值 → source=profile。"""
+        self.write_global_config("FAKE-model-global", provider="FAKE-prov-global")
+        (self.hermes_home / "profiles" / "alpha").mkdir(parents=True)
+        self.write_profile_config("alpha", "FAKE-model-alpha", "FAKE-prov-alpha")
+        row = self.rows()["alpha"]
+        self.assertEqual(row["effective_model"], "FAKE-model-alpha")
+        self.assertEqual(row["effective_provider"], "FAKE-prov-alpha")
+        self.assertEqual(row["effective_model_source"], "profile")
+
+    def test_named_profile_without_config_falls_back_to_global(self):
+        """named profile 無 config.yaml(default profile 的真實情形)→ 繼承全域。"""
+        self.write_global_config("FAKE-model-global", provider="FAKE-prov-global")
+        (self.hermes_home / "profiles" / "default").mkdir(parents=True)
+        row = self.rows()["default"]
+        self.assertEqual(row["effective_model"], "FAKE-model-global")
+        self.assertEqual(row["effective_provider"], "FAKE-prov-global")
+        self.assertEqual(row["effective_model_source"], "global")
+
+    def test_no_config_anywhere_is_fail_soft_unknown(self):
+        """兩邊都讀不到 → 明確空值語意(unknown/無法查詢/None),不拋例外。"""
+        (self.hermes_home / "profiles" / "alpha").mkdir(parents=True)
+        rows = self.rows()  # 完全沒有任何 config.yaml
+        for name in ("(global-root)", "alpha"):
+            self.assertEqual(rows[name]["effective_model"], data_stage3.UNKNOWN_MODEL_TEXT)
+            self.assertEqual(rows[name]["effective_model_source"], "unknown")
+            self.assertIsNone(rows[name]["effective_provider"])
+        # LOCALAPPDATA 未設也不噴例外(整體 available=False)
+        data_stage3.HERMES_HOME = None
+        self.assertFalse(data_stage3.get_hermes_credential_status()["available"])
+
+    def test_bad_profile_config_yaml_falls_back_not_raises(self):
+        self.write_global_config("FAKE-model-global", provider="FAKE-prov-global")
+        path = self.hermes_home / "profiles" / "alpha" / "config.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("model: [::broken", encoding="utf-8")
+        row = self.rows()["alpha"]
+        self.assertEqual(row["effective_model_source"], "global")
+
+    def test_lane_status_behaviour_unchanged_by_refactor(self):
+        """重構共用 _effective_model_fields 後,lane 表行為不變(回歸釘子)。"""
+        data_stage3.CAPABILITY_LANES_PATH.write_text(
+            "lanes:\n"
+            "  - id: native-lane\n    capability: c\n    execution: claude_native\n"
+            "  - id: lane-alpha\n    capability: c\n    execution: hermes_profile\n"
+            "    model: null\n    hermes_profile: alpha\n",
+            encoding="utf-8",
+        )
+        self.write_global_config("FAKE-model-global", provider="FAKE-prov-global")
+        self.write_profile_config("alpha", "FAKE-model-alpha", "FAKE-prov-alpha")
+        lanes = {lane["id"]: lane for lane in data_stage3.get_capability_lane_status()}
+        self.assertEqual(lanes["lane-alpha"]["effective_model_source"], "profile")
+        self.assertEqual(lanes["lane-alpha"]["effective_provider"], "FAKE-prov-alpha")
+        self.assertEqual(lanes["native-lane"]["effective_model"], "(native session)")
+        self.assertEqual(lanes["native-lane"]["effective_model_source"], "native")
+
+    # --- B:憑證 × 模型交叉一致性(三種情形 + 退化) ---
+
+    def test_consistency_green_when_provider_has_entries(self):
+        """情形一:生效 provider 在本 store 有憑證條目 → 綠。"""
+        self.write_global_config("FAKE-model-global", provider="prov-a")
+        self.write_pool_auth_json(self.hermes_home / "auth.json",
+                                  {"prov-a": [self.entry(), self.entry(id="FAKE-entry-2")]})
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "green")
+        self.assertEqual(check["effective_provider"], "prov-a")
+        self.assertEqual(check["entry_count"], 2)
+        self.assertEqual(check["exhausted_entry_count"], 0)
+
+    def test_consistency_orange_when_provider_entry_count_zero(self):
+        """情形二:provider 在 credential_pool 中存在但 entry_count == 0 → 橙。"""
+        self.write_global_config("FAKE-model-global", provider="prov-a")
+        self.write_pool_auth_json(self.hermes_home / "auth.json",
+                                  {"prov-a": [], "prov-b": [self.entry()]})
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "orange")
+        self.assertEqual(check["entry_count"], 0)
+        self.assertIn("prov-a", check["text"])
+        self.assertIn("環境變數", check["text"])
+
+    def test_consistency_orange_when_provider_absent_from_pool(self):
+        """情形三:生效 provider 根本不在 credential_pool 裡 → 橙。
+
+        這正是 2026-08-04 的真實情境:全域 model.provider 改成 openrouter,
+        但 root store 的 credential_pool 只有另一個 provider 的憑證。
+        文案必須誠實說「可能依賴環境變數」,不得斷言壞掉。"""
+        self.write_global_config("FAKE-model-global", provider="prov-missing")
+        self.write_pool_auth_json(self.hermes_home / "auth.json",
+                                  {"prov-a": [self.entry()]})
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "orange")
+        self.assertIsNone(check["entry_count"])
+        self.assertIn("prov-missing", check["text"])
+        self.assertIn("環境變數", check["text"])
+        # 誠實性:不得出現斷言式的壞掉措辭
+        for word in ("壞掉", "失效", "錯誤設定"):
+            self.assertNotIn(word, check["text"])
+
+    def test_exhausted_entries_counted_and_surfaced(self):
+        """附帶規則:last_status == exhausted 的條目要被計數並在文字中點出
+        (allowlist 內既有欄位即足夠,不擴充 allowlist)。"""
+        self.write_global_config("FAKE-model-global", provider="prov-a")
+        self.write_pool_auth_json(self.hermes_home / "auth.json", {
+            "prov-a": [self.entry(last_status="exhausted"), self.entry(id="e2")],
+        })
+        row = self.rows()["(global-root)"]
+        check = row["credential_model_consistency"]
+        self.assertEqual(check["exhausted_entry_count"], 1)
+        self.assertIn("exhausted", check["text"])
+        # 主規則不受影響:有 2 筆條目 → 仍是綠
+        self.assertEqual(check["light"], "green")
+        # entry 層級的 last_status 原樣可見(UI 據此上紅標)
+        statuses = [e["last_status"] for e in row["credential_pool"]["prov-a"]["entries"]]
+        self.assertIn("exhausted", statuses)
+
+    def test_consistency_orange_when_auth_json_missing(self):
+        self.write_global_config("FAKE-model-global", provider="prov-a")
+        (self.hermes_home / "profiles" / "default").mkdir(parents=True)
+        check = self.rows()["default"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "orange")
+        self.assertIn("auth.json", check["text"])
+
+    def test_consistency_gray_when_unknown_or_unparsable(self):
+        """無從比對就誠實說「略過檢查」,不臆測(fail-soft)。"""
+        # (a) 生效 provider 查不到(完全沒有 config.yaml)
+        self.write_pool_auth_json(self.hermes_home / "auth.json", {"prov-a": [self.entry()]})
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "gray")
+        self.assertIsNone(check["effective_provider"])
+        # (b) auth.json 壞掉
+        self.write_global_config("FAKE-model-global", provider="prov-a")
+        (self.hermes_home / "auth.json").write_text("{not valid json", encoding="utf-8")
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "gray")
+        self.assertIn("略過", check["text"])
+
+    def test_new_fields_leak_no_secrets_and_allowlist_unchanged(self):
+        """新增欄位不得帶出任何秘密;§3.2 allowlist 不因本次需求擴充。"""
+        self.assertEqual(
+            data_stage3.CREDENTIAL_ENTRY_ALLOWLIST,
+            ("id", "priority", "last_status", "last_refresh", "source", "label"),
+        )
+        self.write_global_config("FAKE-model-global", provider="prov-a")
+        self.write_auth_json(self.hermes_home / "auth.json")
+        (self.hermes_home / "profiles" / "alpha").mkdir(parents=True)
+        self.write_auth_json(self.hermes_home / "profiles" / "alpha" / "auth.json")
+        result = data_stage3.get_hermes_credential_status()
+        body = json.dumps(result, ensure_ascii=False)
+        for secret in FAKE_SECRETS:
+            self.assertNotIn(secret, body)
+        keys = set(_walk_keys(result))
+        for forbidden in ("access_token", "refresh_token", "agent_key", "suppressed_sources"):
+            self.assertNotIn(forbidden, keys)
 
 
 # ---------------------------------------------------------------------------

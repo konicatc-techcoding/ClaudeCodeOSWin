@@ -134,6 +134,159 @@ test("憑證頁:available=false 顯示無法查詢,不噴例外", () => {
   assert.ok(html.includes("LOCALAPPDATA 未設定"));
 });
 
+// --- 2026-08-04:第三條軸(生效模型)+ 憑證×模型交叉檢查(唯讀告警)---
+
+function credProfile(overrides = {}) {
+  return {
+    auth_json_exists: true,
+    mtime: "2026-08-04T00:00:00+00:00",
+    providers: ["prov-cred"],
+    credential_pool: {
+      "prov-cred": {
+        entry_count: 1,
+        entries: [{
+          id: "FAKE-entry-1", priority: 1, last_status: "ok",
+          last_refresh: "2026-08-04T00:00:00Z", source: "TEST_source", label: "TEST_label",
+        }],
+      },
+    },
+    effective_provider: "prov-model",
+    effective_model: "FAKE-vendor/FAKE-model-x",
+    effective_model_source: "global",
+    credential_model_consistency: {
+      light: "orange",
+      text: "生效模型 provider「prov-model」不在本 store 的 credential_pool 中,可能依賴環境變數",
+      effective_provider: "prov-model",
+      entry_count: null,
+      exhausted_entry_count: 0,
+    },
+    ...overrides,
+  };
+}
+
+test("憑證頁:每列有生效模型三欄,且兩條 provider 軸措辭不撞名", () => {
+  const html = mod.renderCredentials([], {
+    available: true,
+    profiles: { "(global-root)": credProfile() },
+  });
+  // A:三欄實際帶出值
+  assert.ok(html.includes("prov-model"), "生效模型 provider 必須顯示");
+  assert.ok(html.includes("FAKE-vendor/FAKE-model-x"), "生效 model.default 必須顯示");
+  assert.ok(html.includes("繼承全域"), "設定來源(global)必須標示");
+  // 命名正名:兩條軸各自有明確中文欄名,不再都叫 provider
+  assert.ok(html.includes(mod.EFFECTIVE_PROVIDER_LABEL_TEXT));
+  assert.ok(html.includes(mod.CREDENTIAL_PROVIDER_LABEL_TEXT));
+  assert.notEqual(mod.EFFECTIVE_PROVIDER_LABEL_TEXT, mod.CREDENTIAL_PROVIDER_LABEL_TEXT);
+  // 舊的無前綴 "providers(僅名稱)" 措辭不得殘留(那是撞名的成因)
+  assert.ok(!html.includes("providers(僅名稱)"), "撞名的舊欄名不得殘留");
+  // 憑證軸的 provider 名仍在(兩軸並列,不是取代)
+  assert.ok(html.includes("prov-cred"));
+  // 摺疊摘要行也要照得到模型軸(誤解成因:改了全域 provider 卻「哪都沒變」)
+  assert.ok(html.includes("cred-summary-model"));
+});
+
+test("憑證頁:交叉檢查橙燈——文案誠實說「可能依賴環境變數」,不斷言壞掉", () => {
+  const html = mod.renderCredentials([], {
+    available: true,
+    profiles: { "(global-root)": credProfile() },
+  });
+  assert.ok(html.includes("可能依賴環境變數"));
+  assert.ok(html.includes("cred-consistency-orange"), "橙燈 class 必須套用");
+  for (const word of ["壞掉", "失效", "設定錯誤"]) {
+    assert.ok(!html.includes(word), `告警文案不得出現斷言式措辭:${word}`);
+  }
+  // 唯讀邊界:整頁零操作按鈕(沒有清除/重新登入/修復入口)
+  assert.ok(!html.includes("<button"), "憑證頁渲染輸出不得含任何 button");
+});
+
+test("憑證頁:綠燈/灰燈各自套用對應 class,燈號由後端判定不由前端硬算", () => {
+  const green = mod.renderCredentials([], {
+    available: true,
+    profiles: {
+      p: credProfile({
+        credential_model_consistency: {
+          light: "green", text: "生效模型 provider「prov-cred」在本 store 有 1 筆憑證條目",
+          effective_provider: "prov-cred", entry_count: 1, exhausted_entry_count: 0,
+        },
+      }),
+    },
+  });
+  assert.ok(green.includes("cred-consistency-green"));
+  const gray = mod.renderCredentials([], {
+    available: true,
+    profiles: {
+      p: credProfile({
+        effective_provider: null, effective_model: "無法查詢", effective_model_source: "unknown",
+        credential_model_consistency: {
+          light: "gray", text: "生效模型 provider 無法查詢,略過憑證交叉檢查",
+          effective_provider: null, entry_count: null, exhausted_entry_count: 0,
+        },
+      }),
+    },
+  });
+  assert.ok(gray.includes("cred-consistency-gray"));
+  assert.ok(gray.includes("略過憑證交叉檢查"));
+});
+
+test("憑證頁:auth.json 不存在時,生效模型軸仍要顯示(本次補洞的重點)", () => {
+  const html = mod.renderCredentials([], {
+    available: true,
+    profiles: {
+      default: {
+        auth_json_exists: false,
+        effective_provider: "prov-model",
+        effective_model: "FAKE-model-inherited",
+        effective_model_source: "global",
+        credential_model_consistency: {
+          light: "orange", text: "本 store 無 auth.json,生效模型 provider「prov-model」在此無任何憑證條目,可能依賴環境變數或上層設定",
+          effective_provider: "prov-model", entry_count: null, exhausted_entry_count: 0,
+        },
+      },
+    },
+  });
+  assert.ok(html.includes("auth.json 不存在"));
+  assert.ok(html.includes("FAKE-model-inherited"), "無 auth.json 也要看得到生效模型");
+});
+
+test("憑證頁:last_status=exhausted 的條目有紅色標示(class + pill)", () => {
+  const profile = credProfile();
+  profile.credential_pool["prov-cred"].entries[0].last_status = "exhausted";
+  profile.credential_model_consistency.exhausted_entry_count = 1;
+  const html = mod.renderCredentials([], { available: true, profiles: { gptcoding: profile } });
+  assert.ok(html.includes("cred-entry-exhausted"), "耗盡條目的列必須帶標示 class");
+  assert.ok(html.includes("cred-status-exhausted"), "last_status 必須以紅色 pill 呈現");
+  assert.ok(html.includes("exhausted"));
+  // 非耗盡的條目不得誤標
+  const ok = mod.renderCredentials([], { available: true, profiles: { p: credProfile() } });
+  assert.ok(!ok.includes("cred-entry-exhausted"));
+  assert.ok(!ok.includes("cred-status-exhausted"));
+});
+
+test("CSS cascade:耗盡列的紅色標示確實蓋過 .data-table td 的預設色", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { computeStyle } = await import("./helpers/css-cascade.mjs");
+  const css = await readFile(join(root, "src", "globals.css"), "utf8");
+  const chain = [
+    { tag: "div", classes: ["cred-pool-block"] },
+    { tag: "table", classes: ["data-table"] },
+    { tag: "tbody", classes: [] },
+    { tag: "tr", classes: ["cred-entry-exhausted"] },
+    { tag: "td", classes: [] },
+  ];
+  const style = computeStyle(css, chain);
+  assert.equal(style.color, "#f3b1b7", "耗盡列的文字色必須勝出(否則紅標形同不存在)");
+  assert.ok(style.background && style.background.includes("239,111,124"), "耗盡列須有紅色底");
+
+  // 摘要行的模型軸小字必須勝過 `.cred-profile summary small` 的預設灰
+  const summaryChain = [
+    { tag: "details", classes: ["cred-profile"] },
+    { tag: "summary", classes: [] },
+    { tag: "small", classes: ["cred-summary-model"] },
+  ];
+  assert.equal(computeStyle(css, summaryChain).color, "#8fb8e8",
+    "摘要行的生效模型小字須與憑證軸小字顏色可辨,不得被預設灰蓋掉");
+});
+
 test("憑證頁原始碼:禁止對憑證資料做泛型 JSON dump(§3.4 UI 層規則)", async () => {
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(join(root, "src", "views", "Credentials.tsx"), "utf8");

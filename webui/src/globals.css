@@ -151,6 +151,29 @@ button { color: inherit; }
 .cred-pool-block .data-table th:nth-child(4) { width: 22%; } /* last_refresh */
 .cred-pool-block .data-table th:nth-child(5) { width: 13%; } /* source */
 .cred-pool-block .data-table th:nth-child(6) { width: 18%; } /* label */
+/* ---- 第三條軸:生效模型設定 + 憑證×模型交叉檢查(2026-08-04,唯讀告警)----
+   存在理由:憑證軸(auth.json 存了誰的憑證)與模型軸(config.yaml 現在設定
+   用誰)過去在畫面上都叫 provider,導致改了全域 model.provider 卻「哪裡都沒
+   變化」被誤判為 bug。此區塊刻意與下方憑證區塊視覺分離(左側色條+獨立標題)。 */
+/* 摘要行的模型軸小字:與右側憑證軸小字用不同顏色,一眼分辨兩條軸。
+   ⚠ 特異性:`.cred-profile summary small`(0,1,2)會蓋過單一 class(0,1,0),
+   故加 `.cred-profile summary` 前綴 →(0,2,2)勝出,不需 !important。 */
+.cred-profile summary .cred-summary-model { color: #8fb8e8; margin-left: auto; }
+.cred-model-axis { padding: 10px 12px; border: 1px solid var(--line-soft); border-left: 3px solid var(--blue); border-radius: 9px; background: #14161c; display: grid; gap: 9px; }
+.cred-model-axis h3 { margin: 0; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-2); }
+.cred-model-facts { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 9px; }
+.cred-model-facts dt { color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+.cred-model-facts dd { margin: 4px 0 0; color: #e7e9ef; font-size: 14px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; word-break: break-all; }
+.cred-consistency { margin: 0; display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.55; color: #c9cdd7; }
+.cred-consistency-dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; flex: none; box-shadow: 0 0 6px 0 currentColor; }
+.cred-consistency.cred-consistency-orange { color: var(--orange); }
+.cred-consistency.cred-consistency-gray { color: var(--muted); }
+/* 配額耗盡條目的紅色標示(純視覺,無操作入口)。
+   ⚠ 特異性紀律:`.data-table td`(0,1,1)有 color,故列底色/文字色一律以
+   `.cred-pool-block` 前綴 →(0,2,1)勝出,不需 !important
+   (webui/tests/stage3-render.test.mjs 有 cascade 解析測試鎖定此優先權)。 */
+.cred-pool-block .cred-entry-exhausted td { background: rgba(239,111,124,.10); color: #f3b1b7; }
+.cred-status-exhausted { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 800; color: var(--red); background: rgba(239,111,124,.16); border: 1px solid rgba(239,111,124,.45); }
 
 @media (max-width: 1100px) {
   .metric-grid { grid-template-columns: repeat(2,1fr); }

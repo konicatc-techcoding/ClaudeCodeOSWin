@@ -102,6 +102,19 @@ _adapter_module = None
 # entry 內(見模組 docstring 的驗證證據),以 credential_pool 的 key 呈現。
 CREDENTIAL_ENTRY_ALLOWLIST = ("id", "priority", "last_status", "last_refresh", "source", "label")
 
+# ⚠ 2026-08-04:本次「憑證 × 模型交叉檢查」需求**刻意不擴充**上面的 allowlist。
+# 交叉檢查只用到 credential_pool 的 key(provider 名稱)、entry_count,以及
+# 已在 allowlist 內的 `last_status`——三者都不是敏感值,足以完成判定。
+
+# 「查不到生效模型」的統一呈現文字(fail-soft:給明確語意,不留空白、不噴例外)
+UNKNOWN_MODEL_TEXT = "無法查詢"
+
+# 配額耗盡的 last_status 值(Hermes 對 HTTP 429 的既有標記),供交叉檢查計數。
+EXHAUSTED_STATUS = "exhausted"
+
+# 全域 store 在 profiles 表中的固定 key(不是 profiles/ 下的目錄名)
+GLOBAL_ROOT_KEY = "(global-root)"
+
 
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -136,6 +149,52 @@ def _model_config_from_file(config_path: Path) -> dict | None:
     # raw 到此已超出作用域,只有兩個白名單值離開本函式
 
 
+def _global_model_config() -> dict | None:
+    """全域 %LOCALAPPDATA%\\hermes\\config.yaml 的 model 白名單值(fallback 基準)。
+    LOCALAPPDATA 未設 → None(呼叫端一律走 unknown 分支,不噴例外)。"""
+    if HERMES_HOME is None:
+        return None
+    return _model_config_from_file(HERMES_HOME / "config.yaml")
+
+
+def _profile_model_config(profile: str) -> dict | None:
+    """單一 named profile 的 config.yaml model 白名單值;profile 名稱先過
+    `_PROFILE_NAME_RE`(路徑組裝前的輸入驗證,杜絕 `../` 之類)。"""
+    if HERMES_HOME is None or not isinstance(profile, str) or not _PROFILE_NAME_RE.match(profile):
+        return None
+    return _model_config_from_file(HERMES_HOME / "profiles" / profile / "config.yaml")
+
+
+def _effective_model_fields(profile_cfg: dict | None, global_cfg: dict | None) -> dict:
+    """「生效模型」三欄的**唯一判定處**(lane 表與憑證治理表共用同一套規則,
+    不兜兩份平行邏輯):
+
+    - profile 自己的 config.yaml 有 model.default → source "profile"。
+    - 否則 fallback 全域 config.yaml → source "global"。
+    - 兩邊都查不到 → source "unknown" + `UNKNOWN_MODEL_TEXT`/None
+      (本模組 fail-soft 慣例:給明確的「無法查詢」語意,不噴例外、不留空白)。
+
+    `(global-root)` 這條路徑由呼叫端傳 profile_cfg=None——它自己的設定檔
+    **就是**全域 config.yaml,故一律落在 "global" 分支(語意正確,不是 fallback)。"""
+    if profile_cfg and profile_cfg["default"]:
+        return {
+            "effective_model": profile_cfg["default"],
+            "effective_model_source": "profile",
+            "effective_provider": profile_cfg["provider"],
+        }
+    if global_cfg and global_cfg["default"]:
+        return {
+            "effective_model": global_cfg["default"],
+            "effective_model_source": "global",
+            "effective_provider": global_cfg["provider"],
+        }
+    return {
+        "effective_model": UNKNOWN_MODEL_TEXT,
+        "effective_model_source": "unknown",
+        "effective_provider": None,
+    }
+
+
 def _annotate_effective_models(lanes: list[dict]) -> None:
     """對每條 lane 標注「實際生效模型」(就地補三個欄位,不動 registry 原欄位):
 
@@ -147,8 +206,9 @@ def _annotate_effective_models(lanes: list[dict]) -> None:
     - effective_provider:同來源的 model.provider(native/unknown → None)。
 
     資料來源是 %LOCALAPPDATA%\\hermes\\ 的 config.yaml(profile 實際設定),
-    不是 registry——registry 的 model 欄位刻意為 null(不重複記載)。"""
-    global_cfg = _model_config_from_file(HERMES_HOME / "config.yaml") if HERMES_HOME else None
+    不是 registry——registry 的 model 欄位刻意為 null(不重複記載)。
+    profile/global 的判定共用 `_effective_model_fields()`(見該函式)。"""
+    global_cfg = _global_model_config()
     for lane in lanes:
         profile = lane.get("hermes_profile")
         if not isinstance(profile, str) or not _PROFILE_NAME_RE.match(profile):
@@ -156,22 +216,7 @@ def _annotate_effective_models(lanes: list[dict]) -> None:
             lane["effective_model_source"] = "native"
             lane["effective_provider"] = None
             continue
-        profile_cfg = None
-        if HERMES_HOME is not None:
-            profile_cfg = _model_config_from_file(
-                HERMES_HOME / "profiles" / profile / "config.yaml")
-        if profile_cfg and profile_cfg["default"]:
-            lane["effective_model"] = profile_cfg["default"]
-            lane["effective_model_source"] = "profile"
-            lane["effective_provider"] = profile_cfg["provider"]
-        elif global_cfg and global_cfg["default"]:
-            lane["effective_model"] = global_cfg["default"]
-            lane["effective_model_source"] = "global"
-            lane["effective_provider"] = global_cfg["provider"]
-        else:
-            lane["effective_model"] = "無法查詢"
-            lane["effective_model_source"] = "unknown"
-            lane["effective_provider"] = None
+        lane.update(_effective_model_fields(_profile_model_config(profile), global_cfg))
 
 
 def get_capability_lane_status() -> list[dict]:
@@ -256,21 +301,101 @@ def _profile_credential_status(auth_path: Path) -> dict:
     return result
 
 
+def _count_exhausted_entries(pool: dict) -> int:
+    """整個 store 的 credential_pool 中 last_status == "exhausted" 的條目數。
+    `last_status` 早已在 §3.2 allowlist 內(非敏感),不需為此擴充 allowlist。"""
+    total = 0
+    for provider_block in pool.values():
+        if not isinstance(provider_block, dict):
+            continue
+        for entry in provider_block.get("entries") or []:
+            if isinstance(entry, dict) and entry.get("last_status") == EXHAUSTED_STATUS:
+                total += 1
+    return total
+
+
+def _credential_model_consistency(row: dict) -> dict:
+    """「憑證 × 模型」交叉一致性檢查(唯讀告警,2026-08-04)。
+
+    存在理由:憑證軸(auth.json 存了哪些 provider 的憑證)與模型軸
+    (config.yaml 現在設定用哪個 provider)是**兩條不同的軸**,過去 UI 上
+    只看得到前者、欄位名又都叫 provider,導致「改了全域 model.provider 卻
+    什麼都沒變」被誤判成 bug。這裡把兩軸對上,判定結果以結構化欄位輸出
+    (light/text,沿用 data_resident.py / data_update.py 的燈號慣例),
+    不留給前端硬算。
+
+    判定(**純告警、零動作**——沒有任何修復/登入/清除入口):
+
+    - gray  :生效 provider 查不到、或 auth.json 不存在/壞掉 → 無從比對,
+              誠實說「略過檢查」,不臆測。
+    - orange:生效 provider 不在本 store 的 credential_pool、或 entry_count
+              為 0 → 「本 store 無此 provider 的憑證條目,**可能**依賴環境
+              變數」。措辭刻意保守:實測有 provider 就是靠 OPENROUTER_API_KEY
+              之類的環境變數在運作,斷言「壞掉」會是假警報。
+    - green :生效 provider 在本 store 有 N 筆憑證條目。
+
+    附帶(不改變上面的燈號,只補在文字裡;entry 層級的紅色標示由 UI 依
+    已在 allowlist 內的 last_status 呈現):本 store 有幾筆 exhausted 條目。"""
+    provider = row.get("effective_provider")
+    pool = row.get("credential_pool")
+    exhausted = _count_exhausted_entries(pool) if isinstance(pool, dict) else 0
+    base = {"effective_provider": provider if isinstance(provider, str) else None,
+            "entry_count": None, "exhausted_entry_count": exhausted}
+
+    def _out(light: str, text: str) -> dict:
+        if exhausted:
+            text = f"{text};本 store 有 {exhausted} 筆憑證條目配額耗盡(last_status=exhausted)"
+        return {**base, "light": light, "text": text}
+
+    if not isinstance(provider, str) or not provider:
+        return _out("gray", "生效模型 provider 無法查詢,略過憑證交叉檢查")
+    if row.get("error"):
+        return _out("gray", f"auth.json 無法解析,無從比對生效模型 provider「{provider}」,"
+                            "略過憑證交叉檢查")
+    if not row.get("auth_json_exists"):
+        return _out("orange", f"本 store 無 auth.json,生效模型 provider「{provider}」"
+                              "在此無任何憑證條目,可能依賴環境變數或上層設定")
+    if not isinstance(pool, dict) or provider not in pool:
+        return _out("orange", f"生效模型 provider「{provider}」不在本 store 的 credential_pool 中,"
+                              "可能依賴環境變數")
+    entry_count = pool[provider].get("entry_count") if isinstance(pool[provider], dict) else None
+    base["entry_count"] = entry_count if isinstance(entry_count, int) else None
+    if not entry_count:
+        return _out("orange", f"生效模型 provider「{provider}」在本 store 的憑證條目數為 0,"
+                              "可能依賴環境變數")
+    return _out("green", f"生效模型 provider「{provider}」在本 store 有 {entry_count} 筆憑證條目")
+
+
 def get_hermes_credential_status() -> dict:
     """每個已知 Hermes profile(含 global-root)的憑證治理狀態(§3.3)。
 
     只含白名單欄位;profile 清單動態掃描 %LOCALAPPDATA%\\hermes\\profiles\\
     子目錄(目錄名稱不敏感),另固定包含 "(global-root)"。
-    LOCALAPPDATA 未設 → {"available": False, ...},不噴例外。"""
+    LOCALAPPDATA 未設 → {"available": False, ...},不噴例外。
+
+    2026-08-04 起每列另補「第三條軸」(見 _effective_model_fields):
+    effective_provider / effective_model / effective_model_source——**生效
+    模型**的 provider 與 model.default,來源是 config.yaml,與同列既有的
+    `providers`(此 store 存了哪些 provider 的**憑證**)是不同軸、不可混為
+    一談;以及 credential_model_consistency(兩軸交叉的唯讀告警燈號)。"""
     if HERMES_HOME is None:
         return {"available": False, "reason": "LOCALAPPDATA 未設定,此環境無法查詢", "profiles": {}}
 
-    profiles: dict = {"(global-root)": _profile_credential_status(HERMES_HOME / "auth.json")}
+    profiles: dict = {GLOBAL_ROOT_KEY: _profile_credential_status(HERMES_HOME / "auth.json")}
     profiles_dir = HERMES_HOME / "profiles"
     if profiles_dir.is_dir():
         for child in sorted(profiles_dir.iterdir()):
             if child.is_dir():
                 profiles[child.name] = _profile_credential_status(child / "auth.json")
+
+    # 生效模型三欄 + 交叉檢查(全域 config.yaml 只讀一次,不逐 profile 重讀)。
+    # (global-root) 的「自己的設定檔」就是全域 config.yaml → profile_cfg=None
+    # → source 恆為 "global"(語意正確)。
+    global_cfg = _global_model_config()
+    for name, row in profiles.items():
+        profile_cfg = None if name == GLOBAL_ROOT_KEY else _profile_model_config(name)
+        row.update(_effective_model_fields(profile_cfg, global_cfg))
+        row["credential_model_consistency"] = _credential_model_consistency(row)
 
     # §3.2 雙重防護第 2 點:輸出前對整個最終回傳結構跑遞迴掃描(共用正本)。
     # 防的是白名單本身寫錯——寧可誤擋治理欄位,不放過一個真正的秘密值。
@@ -408,9 +533,7 @@ def _systemd_rows() -> list[dict]:
 def _global_model_default() -> str | None:
     """全域 config.yaml 只抽 model.default 一個值(漂移比對基準)。
     白名單讀取實作共用 _model_config_from_file(功能二效模型同一入口)。"""
-    if HERMES_HOME is None:
-        return None
-    config = _model_config_from_file(HERMES_HOME / "config.yaml")
+    config = _global_model_config()
     return config["default"] if config else None
 
 

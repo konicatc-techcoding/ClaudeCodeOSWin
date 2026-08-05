@@ -484,6 +484,25 @@ class Stage3EndpointTests(ApiServerTestCase):
         self.assertEqual(entry["label"], "TEST_label")
         self.assertNotIn("access_token", entry)
 
+    def test_credential_status_carries_effective_model_and_consistency(self):
+        """2026-08-04:憑證頁第三條軸(生效模型)+ 兩軸交叉檢查要真的經 API
+        送到前端——判定在資料層完成,前端不硬算(唯讀,零新增寫入路徑)。"""
+        self._write_fake_auth()
+        (self.hermes_home / "config.yaml").write_text(
+            "model:\n  default: FAKE-model-global\n  provider: prov-not-in-pool\n",
+            encoding="utf-8",
+        )
+        payload = self._get_json("/api/credential-status")
+        row = payload["profiles"]["(global-root)"]
+        self.assertEqual(row["effective_model"], "FAKE-model-global")
+        self.assertEqual(row["effective_provider"], "prov-not-in-pool")
+        self.assertEqual(row["effective_model_source"], "global")
+        check = row["credential_model_consistency"]
+        self.assertEqual(check["light"], "orange")   # pool 裡沒有這個 provider
+        self.assertIn("環境變數", check["text"])
+        # 憑證軸(此 store 存了哪些 provider 的憑證)與模型軸並存、互不覆蓋
+        self.assertEqual(row["providers"], ["fake-provider"])
+
     def test_schedule_table_endpoint(self):
         data_stage3.SYSTEMD_UNIT_DIR.mkdir()
         (data_stage3.SYSTEMD_UNIT_DIR / "hermes-test.timer").write_text(
