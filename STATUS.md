@@ -145,11 +145,12 @@
   **STATUS 的 env 條目已刪,memory 是這條約束的唯一正本**。順帶把
   「07-23 清乾淨的 copilot 憑證會經 `gh_cli` 重生」(gptcoding 08-03、
   nemocoding 07-30 各一筆)寫進去——那是舊待辦「觀察是否有 entry 重生」的答案。
-- **`exhausted` 要不要降列燈(08-05 新增,一行規則的事,待決)**:目前
-  `gptcoding` 是**綠燈 + 紅色 exhausted 條目**。列燈只由主規則(provider 有無
-  憑證條目)決定,exhausted 只標在條目上、筆數併進 text。理由=配額耗盡是暫時
-  狀態(約 08-08 自癒),跟「憑證根本不存在」不同性質,混同一顆燈會稀釋語意。
-  使用者是實際看板的人,由其定奪。
+- ~~`exhausted` 要不要降列燈~~ **已拍板降黃並落地(08-05)**:四燈優先序
+  **橙 > 黃 > 綠**(gray 維持不變,該情形計數不可信)。理由=看板上「綠燈+紅色
+  條目」的張力會讓人漏看。live 驗證 `gptcoding` green→yellow。**殘留邊界**:
+  黃燈只看「整個 store 有無 exhausted 條目」,不區分耗盡的是否為生效 provider
+  的條目(偏保守、寧可誤黃);目前六個 store 皆單一 provider,不觸發此差異,
+  要更精準需再拍板一次。
 - **codex 配額約 08-08 中午恢復後的決策**:屆時要決定 default 改回
   `openai-codex/gpt-5.6-sol` 還是續用 deepseek;三條 codex lane 會自動復原
   (不需動作)。決定後才做上面那條 memory 更新,免得改兩遍。
@@ -215,8 +216,7 @@
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **本次交付已 live 驗證完畢,無進行中作業**。第一步(最小、可立刻做)=
-  **決定 `exhausted` 要不要降列燈**(見第 3 節,一行規則)。
+- **本次交付已 live 驗證完畢,無進行中作業**(含 `exhausted` 降黃,已拍板落地)。
 - **08-08 中午 codex 配額恢復後**:決定 default 改回 `gpt-5.6-sol` 或續用
   deepseek → 決定後才分派 `knowledge` 更新 memory 應然表(免得改兩遍)。
   **在那之前 `OPENROUTER_API_KEY` 絕對不能移除**——default 主線靠它。

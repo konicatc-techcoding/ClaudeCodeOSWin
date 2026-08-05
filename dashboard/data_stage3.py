@@ -324,18 +324,27 @@ def _credential_model_consistency(row: dict) -> dict:
     (light/text,沿用 data_resident.py / data_update.py 的燈號慣例),
     不留給前端硬算。
 
-    判定(**純告警、零動作**——沒有任何修復/登入/清除入口):
+    判定(**純告警、零動作**——沒有任何修復/登入/清除入口),嚴重度
+    **橙 > 黃 > 綠**,gray 自成一類(無從比對):
 
     - gray  :生效 provider 查不到、或 auth.json 不存在/壞掉 → 無從比對,
-              誠實說「略過檢查」,不臆測。
+              誠實說「略過檢查」,不臆測。此時連 entry 計數本身都不可信,
+              故**即使有 exhausted 條目也維持 gray**。
     - orange:生效 provider 不在本 store 的 credential_pool、或 entry_count
               為 0 → 「本 store 無此 provider 的憑證條目,**可能**依賴環境
               變數」。措辭刻意保守:實測有 provider 就是靠 OPENROUTER_API_KEY
-              之類的環境變數在運作,斷言「壞掉」會是假警報。
-    - green :生效 provider 在本 store 有 N 筆憑證條目。
+              之類的環境變數在運作,斷言「壞掉」會是假警報。橙比黃嚴重,
+              **已是橙者不因 exhausted 降為黃**。
+    - yellow:本來會判綠(生效 provider 有憑證條目),但本 store 有
+              exhausted 條目 → 降列燈為黃(2026-08-05 拍板)。理由:看板上
+              「綠燈 + 紅色 exhausted 條目」的張力會讓人漏看;配額耗盡雖是
+              **暫時**狀態(週期重置後自行恢復、非憑證缺失),但期間該 store
+              確實不可用,列燈應該反映。黃色語彙與 data_resident.py 的暖機態
+              同一顆(暫時性、會自行好轉),不另立新色。
+    - green :生效 provider 在本 store 有 N 筆憑證條目,且無 exhausted 條目。
 
-    附帶(不改變上面的燈號,只補在文字裡;entry 層級的紅色標示由 UI 依
-    已在 allowlist 內的 last_status 呈現):本 store 有幾筆 exhausted 條目。"""
+    exhausted 筆數同時以結構化欄位 exhausted_entry_count 輸出(不因改燈而
+    移除);entry 層級的紅色標示由 UI 依已在 allowlist 內的 last_status 呈現。"""
     provider = row.get("effective_provider")
     pool = row.get("credential_pool")
     exhausted = _count_exhausted_entries(pool) if isinstance(pool, dict) else 0
@@ -344,7 +353,14 @@ def _credential_model_consistency(row: dict) -> dict:
 
     def _out(light: str, text: str) -> dict:
         if exhausted:
-            text = f"{text};本 store 有 {exhausted} 筆憑證條目配額耗盡(last_status=exhausted)"
+            text = (f"{text};本 store 有 {exhausted} 筆憑證條目配額耗盡"
+                    "(last_status=exhausted)——屬暫時狀態,配額週期重置後會自行恢復,"
+                    "不是憑證缺失")
+            # 嚴重度 橙 > 黃 > 綠:只有原本判綠的才降為黃。
+            # orange 維持 orange(更嚴重的問題不該被降級);
+            # gray 維持 gray(該情形下計數本身就不可信,不據以升級告警)。
+            if light == "green":
+                light = "yellow"
         return {**base, "light": light, "text": text}
 
     if not isinstance(provider, str) or not provider:

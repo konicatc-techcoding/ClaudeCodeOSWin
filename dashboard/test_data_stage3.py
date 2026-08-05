@@ -634,11 +634,50 @@ class CredentialModelAxisTests(Stage3TestBase):
         check = row["credential_model_consistency"]
         self.assertEqual(check["exhausted_entry_count"], 1)
         self.assertIn("exhausted", check["text"])
-        # 主規則不受影響:有 2 筆條目 → 仍是綠
-        self.assertEqual(check["light"], "green")
+        # 2026-08-05 拍板:原本判綠 + 有 exhausted → 降列燈為黃
+        # (綠燈配紅色條目的張力會讓人漏看;期間該 store 確實不可用)
+        self.assertEqual(check["light"], "yellow")
+        # 文案必須講清楚是「配額耗盡的暫時狀態」,不得被讀成憑證缺失
+        self.assertIn("配額", check["text"])
+        self.assertIn("暫時狀態", check["text"])
+        self.assertIn("自行恢復", check["text"])
         # entry 層級的 last_status 原樣可見(UI 據此上紅標)
         statuses = [e["last_status"] for e in row["credential_pool"]["prov-a"]["entries"]]
         self.assertIn("exhausted", statuses)
+
+    # --- 降列燈優先序釘子(2026-08-05):橙 > 黃 > 綠,gray 自成一類 ---
+
+    def test_green_without_exhausted_stays_green(self):
+        """對照組:沒有 exhausted 就維持綠,且文字不提配額耗盡。"""
+        self.write_global_config("FAKE-model-global", provider="prov-a")
+        self.write_pool_auth_json(self.hermes_home / "auth.json",
+                                  {"prov-a": [self.entry(), self.entry(id="e2")]})
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "green")
+        self.assertEqual(check["exhausted_entry_count"], 0)
+        self.assertNotIn("exhausted", check["text"])
+
+    def test_orange_with_exhausted_stays_orange_not_downgraded_to_yellow(self):
+        """橙比黃嚴重:生效 provider 在本 store 無憑證條目(橙)時,
+        另一個 provider 有 exhausted 條目也不得把燈降成黃。"""
+        self.write_global_config("FAKE-model-global", provider="prov-missing")
+        self.write_pool_auth_json(self.hermes_home / "auth.json",
+                                  {"prov-a": [self.entry(last_status="exhausted")]})
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "orange")
+        self.assertEqual(check["exhausted_entry_count"], 1)
+        # 橙的既有語意不變,exhausted 只補在文字尾巴
+        self.assertIn("環境變數", check["text"])
+        self.assertIn("exhausted", check["text"])
+
+    def test_gray_with_exhausted_stays_gray(self):
+        """gray = 無從比對(計數本身不可信)→ 有 exhausted 也不改燈。"""
+        self.write_pool_auth_json(self.hermes_home / "auth.json",  # 無 config.yaml → provider 未知
+                                  {"prov-a": [self.entry(last_status="exhausted")]})
+        check = self.rows()["(global-root)"]["credential_model_consistency"]
+        self.assertEqual(check["light"], "gray")
+        self.assertEqual(check["exhausted_entry_count"], 1)
+        self.assertIn("略過憑證交叉檢查", check["text"])
 
     def test_consistency_orange_when_auth_json_missing(self):
         self.write_global_config("FAKE-model-global", provider="prov-a")

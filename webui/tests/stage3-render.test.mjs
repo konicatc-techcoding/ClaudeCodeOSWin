@@ -228,6 +228,33 @@ test("憑證頁:綠燈/灰燈各自套用對應 class,燈號由後端判定不�
   assert.ok(gray.includes("略過憑證交叉檢查"));
 });
 
+test("憑證頁:黃燈(配額耗盡)有對應 class 與既有暖機態色票,不自創新色", async () => {
+  const html = mod.renderCredentials([], {
+    available: true,
+    profiles: {
+      gptcoding: credProfile({
+        credential_model_consistency: {
+          light: "yellow",
+          text: "生效模型 provider「prov-cred」在本 store 有 1 筆憑證條目;本 store 有 1 筆憑證條目配額耗盡"
+            + "(last_status=exhausted)——屬暫時狀態,配額週期重置後會自行恢復,不是憑證缺失",
+          effective_provider: "prov-cred", entry_count: 1, exhausted_entry_count: 1,
+        },
+      }),
+    },
+  });
+  assert.ok(html.includes("cred-consistency-yellow"), "黃燈 class 必須套用");
+  // 色點沿用既有暖機態黃(ResidentStatus LIGHT_COLORS.yellow),不得是新色
+  assert.ok(html.includes("#fbbf24"), "黃色點須沿用既有色票 #fbbf24");
+  assert.ok(html.includes("暫時狀態") && html.includes("自行恢復"),
+    "文案須說明是暫時的配額耗盡");
+  assert.ok(!html.includes("<button"), "黃燈仍是唯讀告警,不得出現任何操作按鈕");
+  // CSS 也要有對應的黃色文字規則(否則畫面上只有點是黃的)
+  const { readFile } = await import("node:fs/promises");
+  const css = await readFile(join(root, "src", "globals.css"), "utf8");
+  assert.ok(/\.cred-consistency\.cred-consistency-yellow\s*\{[^}]*#fbbf24/.test(css),
+    "globals.css 須有 cred-consistency-yellow 規則且沿用 #fbbf24");
+});
+
 test("憑證頁:auth.json 不存在時,生效模型軸仍要顯示(本次補洞的重點)", () => {
   const html = mod.renderCredentials([], {
     available: true,

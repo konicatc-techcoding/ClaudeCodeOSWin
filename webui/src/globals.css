@@ -167,6 +167,10 @@ button { color: inherit; }
 .cred-consistency { margin: 0; display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.55; color: #c9cdd7; }
 .cred-consistency-dot { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; flex: none; box-shadow: 0 0 6px 0 currentColor; }
 .cred-consistency.cred-consistency-orange { color: var(--orange); }
+/* 黃 = 配額耗盡的暫時狀態(嚴重度介於綠與橙之間)。色票沿用既有的暖機態黃
+   (.service-note-converging / ResidentStatus LIGHT_COLORS.yellow 同一顆
+   #fbbf24),不另立新語意色 */
+.cred-consistency.cred-consistency-yellow { color: #fbbf24; }
 .cred-consistency.cred-consistency-gray { color: var(--muted); }
 /* 配額耗盡條目的紅色標示(純視覺,無操作入口)。
    ⚠ 特異性紀律:`.data-table td`(0,1,1)有 color,故列底色/文字色一律以

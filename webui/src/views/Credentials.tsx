@@ -17,9 +17,12 @@ import {
 } from "../api";
 import { ErrorNotice, InfoNotice, Panel, RefreshButton, useApiData, WarnNotice } from "./common";
 
-// 交叉檢查燈色(沿用 UpdatePrecheck.tsx 同一組色票,不另立第二套語意色)
+// 交叉檢查燈色(沿用 UpdatePrecheck.tsx / ResidentStatus.tsx 同一組色票,
+// 不另立第二套語意色)。yellow = 配額耗盡的暫時狀態,與 ResidentStatus 的
+// 暖機態同一顆 #fbbf24(語意一致:暫時性、會自行好轉)。
 const CONSISTENCY_COLORS: Record<CredentialConsistency["light"], string> = {
   green: "#34d399",
+  yellow: "#fbbf24",
   orange: "#fb923c",
   gray: "#6b7280",
 };

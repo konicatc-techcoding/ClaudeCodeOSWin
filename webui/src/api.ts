@@ -97,8 +97,10 @@ export type CredentialEntry = {
 
 // 「憑證 × 模型」交叉一致性檢查(唯讀告警;判定在 dashboard/data_stage3.py
 // _credential_model_consistency() 完成,前端只渲染,不重算規則)
+// (嚴重度 orange > yellow > green;yellow = 本來判綠但本 store 有配額耗盡
+// 條目的暫時狀態,2026-08-05 起)
 export type CredentialConsistency = {
-  light: "green" | "orange" | "gray";
+  light: "green" | "yellow" | "orange" | "gray";
   text: string;
   effective_provider: string | null;
   entry_count: number | null;
