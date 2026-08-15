@@ -21,7 +21,7 @@
 | `v0.1-beta` | ✅ 已達成 | 2026-07-04 | `v0.1-alpha` 之上補完全部 event source（Telegram 已在 alpha 完成；這次加上 Cron、RSS）+ Dashboard；76 個單元測試全過，jobs.db 一致性複查零違規 |
 | Cron Adapter | ✅ 已完成 | 2026-07-04 | 無狀態、排程交給 launchd；用臨時 30 秒 plist 驗證過「launchd 真的自己觸發」，正式改裝 `daily-memory-check` 每天 08:00 |
 | RSS Adapter | ✅ 已完成 | 2026-07-04 | 無狀態、抓取/去重/`feedparser` 解析/`enqueue()`；真實 feed（hnrss.org）+ 臨時 launchd smoke test 驗證過，正式改裝 30 分鐘排程 |
-| Dashboard | ✅ 已完成 | 2026-07-04 | Streamlit，localhost-only、read-only（獨立資料層、mode=ro 強制）；用 `streamlit.testing.v1.AppTest` 對真實資料跑過，零例外、密鑰不外洩 |
+| Dashboard | ✅ 已完成 | 2026-07-04 | Streamlit，localhost-only、read-only（獨立資料層、mode=ro 強制）；用 `streamlit.testing.v1.AppTest` 對真實資料跑過，零例外、密鑰不外洩（Streamlit 版本 2026-08-15 退役，由 Stage 5 Web UI 取代） |
 
 ## `v0.1-alpha` 涵蓋範圍
 

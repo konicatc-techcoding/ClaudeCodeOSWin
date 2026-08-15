@@ -12,20 +12,6 @@
       "runtimeExecutable": "${workspaceFolder}/.venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "dashboard.api"],
       "port": 8799
-    },
-    {
-      "name": "dashboard",
-      "runtimeExecutable": "${workspaceFolder}/.venv/Scripts/python.exe",
-      "runtimeArgs": [
-        "-m",
-        "streamlit",
-        "run",
-        "dashboard/app.py",
-        "--server.address=localhost",
-        "--server.headless=true",
-        "--browser.gatherUsageStats=false"
-      ],
-      "port": 8501
     }
   ]
 }

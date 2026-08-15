@@ -133,7 +133,7 @@ button { color: inherit; }
 /* P2:排程健康表模型漂移旗標(只標示、無任何操作入口) */
 .drift-flag { color: #df8a94; font-weight: 800; letter-spacing: .04em; }
 
-/* P2:憑證/Lane 狀態頁的 profile 區塊(對應 Streamlit st.expander) */
+/* P2:憑證/Lane 狀態頁的 profile 區塊(可摺疊 details/summary) */
 .cred-profile { border: 1px solid var(--line-soft); border-radius: 11px; margin-bottom: 10px; background: var(--surface-2); }
 .cred-profile summary { cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: baseline; font-size: 14px; color: #d8dbe3; }
 .cred-profile summary small { color: var(--muted); font-size: 12px; }

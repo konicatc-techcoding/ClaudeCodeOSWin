@@ -11,7 +11,7 @@ import SessionsView from "./views/Sessions";
 import TerminalView from "./views/Terminal";
 import UpdatePrecheckView from "./views/UpdatePrecheck";
 
-// P1:與既有 Streamlit dashboard 對等的五個資料區塊(總覽/Jobs/成本/Memory/Logs,
+// P1:與當時的 Streamlit dashboard(2026-08-15 已退役)對等的五個資料區塊(總覽/Jobs/成本/Memory/Logs,
 // 全部經唯讀 API 取數,見 src/api.ts)+ P0 交付的 Hermes Dashboard view。
 // 所有畫面數字都來自 fetch,零硬編假資料(P0 DoD 第 4 條在 P1 繼續成立)。
 // P2:Stage 3 三項觀測功能——排程健康表(併入總覽,stage3 提案 §4.3)、

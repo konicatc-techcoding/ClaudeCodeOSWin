@@ -16,8 +16,9 @@ subprocess 只會執行下方兩個凍結常數的唯讀查詢指令,沒有其�
 2. systemd 單元層:僅當第 1 層 Running 才跑
    `wsl -d Ubuntu -- systemctl --user list-units ...`(唯讀查詢)。
    輸出格式與 data.get_systemd_status() 相同(unit/load/active/sub 四欄,
-   `--no-legend --plain`);data.py 自 P1 起凍結(Streamlit 零改動鐵律),
-   故 parser 鏡像在本模組,由測試以相同 fixture 格式鎖定。
+   `--no-legend --plain`);data.py 自 P1 起凍結(當時的 Streamlit 零改動鐵律;
+   Streamlit 已於 2026-08-15 退役,data.py 維持不動),故 parser 鏡像在本模組,
+   由測試以相同 fixture 格式鎖定。
 3. gateway 就緒層:僅當前兩層通過(常駐單元全部 active)才讀
    %LOCALAPPDATA%\\hermes\\gateway_state.json,並(2026-08-04 起)**驗證檔內
    pid 是否還活著**。gateway 啟動後約 3.5 分鐘才寫狀態檔

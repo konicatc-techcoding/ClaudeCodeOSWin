@@ -169,7 +169,8 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
             # 2026-07-28:改用 Windows 側經 WSL 的唯讀快照(data_systemd_wsl:
             # 分層守門絕不喚醒 distro、三分支誠實狀態 ok/wsl_down/unavailable、
             # 5 秒 TTL 快取)。data.get_systemd_status() 的裸 systemctl 只在
-            # WSL/Linux 內有效,原樣保留給 deprecated 的 Streamlit app.py。
+            # WSL/Linux 內有效,原為 Streamlit app.py 所用(2026-08-15 退役),
+            # 函式原樣保留、此處不呼叫。
             return 200, data_systemd_wsl.get_wsl_systemd_snapshot()
         if path == "/api/memory/inbox-counts":
             return 200, data.get_memory_inbox_counts()

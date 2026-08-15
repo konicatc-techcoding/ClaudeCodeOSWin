@@ -3,14 +3,14 @@
 
 設計正本:docs/stage3-dashboard-observability-proposal.md(v2)§2–§4;
 載體:docs/webui-migration-proposal.md §4.3(P2)——經 dashboard/api.py 唯讀
-API 曝露給 webui/。**不修改既有 dashboard/data.py**(Streamlit 零改動鐵律),
-Stage 3 新函式全部放這個新模組。路徑 A 的 systemd 狀態原複用
+API 曝露給 webui/。**不修改既有 dashboard/data.py**(P2 當時的 Streamlit 零改動
+鐵律;Streamlit 已於 2026-08-15 退役,data.py 維持不動),Stage 3 新函式全部放這個新模組。路徑 A 的 systemd 狀態原複用
 `data.get_systemd_status()`(stage3 提案 §4.4 DoD 第 6 項:不重新兜平行邏輯);
 2026-07-28 起改複用 `data_systemd_wsl.get_wsl_systemd_snapshot()`——
 readonly-api 跑在 Windows 側,裸 systemctl 不存在,舊路徑永遠 FileNotFoundError
 而把「查不到」誤報成「未安裝」。新快照經 `wsl -d` 包裹、分層守門絕不喚醒
 distro、帶 5 秒快取;「不另兜平行邏輯」的精神不變(單一共用快照,
-data.get_systemd_status() 原樣留給 deprecated 的 Streamlit app.py)。
+data.get_systemd_status() 原為 Streamlit app.py 所用、退役後已無呼叫端,函式原樣保留)。
 
 唯讀鐵律(stage3 提案 §0.5,逐條對應):
 

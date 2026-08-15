@@ -812,7 +812,9 @@ UI 層降級為**純 Vite + React SPA**（剝掉 vinext/wrangler/Cloudflare 託�
 
 1. **Streamlit 並行觀察期自 2026-07-24 起算**（已拍板：一個自然使用週期、
    期間 Streamlit 零維護只讀），期滿後做退役決策並實際移除——這是本
-   stage 唯一剩餘事項。
+   stage 唯一剩餘事項。**✅ 2026-08-15 退役，`dashboard/app.py` 已移除**
+   （連同 `test_app.py`、`streamlit` 相依、launch.json 設定；資料層與唯讀
+   API 全數保留，新 Web UI 為唯一觀測面）。
 2. P2 排程健康表抓到的 `aichain-orchestrator-daily` 失敗屬 Hermes 原生
    cron job 的運營問題，不是 dashboard 缺陷——後續處置由 CoS 依 delegation
    policy 另行分派追蹤。
@@ -851,7 +853,8 @@ UI 層降級為**純 Vite + React SPA**（剝掉 vinext/wrangler/Cloudflare 託�
    驗收**（2026-07-23～24；P0 `bf2bfe2`／P1 `f1b9104`／P2 `3da90ae`／
    P3 `0bbd6c1`，見上方 Stage 5 節完工摘要）。**剩餘：Streamlit 並行
    觀察期（2026-07-24 起算一個自然使用週期）→ 期滿後退役決策**——這是
-   本軌目前唯一的排程中事項；其後的下一步視需要另開新規劃（候選：Stage 4
+   本軌目前唯一的排程中事項（**✅ 2026-08-15 退役，`dashboard/app.py`
+   已移除**，本軌無排程中事項）；其後的下一步視需要另開新規劃（候選：Stage 4
    遺留的「依任務類型自動選模型」規則引擎、`aichain-orchestrator-daily`
    失敗處置追蹤）。
 

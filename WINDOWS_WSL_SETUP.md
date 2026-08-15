@@ -79,11 +79,7 @@ launchd 的核心概念（宣告式常駐設定、crash 自動重啟、固定間
    tail -f logs/hermes/worker.log                # 看 Runtime 自己的 log
    ```
 
-8. **（可選）跑 dashboard**：
-   ```bash
-   .venv/bin/streamlit run dashboard/app.py --server.address=localhost
-   ```
-   總覽頁的「Worker / Adapter 狀態」已改用 `systemctl --user` 查詢，會顯示 systemd 版本的服務名稱。
+8. **（可選）觀測面 Web UI**：Streamlit dashboard（`dashboard/app.py`）已於 2026-08-15 退役，此步驟不再於 WSL 內執行。觀測面改為 Stage 5 Web UI（`webui/` + 唯讀 API `dashboard/api.py`），在 **Windows 側**啟動：`scripts/start_webui_stack.ps1` 或桌面捷徑「AgentOS WebUI」（詳見 `webui/README.md`）；總覽頁的「Worker / Adapter 狀態」經 `wsl -d Ubuntu` 唯讀查詢 systemd，會顯示 systemd 版本的服務名稱。
 
 ## 使用者需要自己確認的事項（到 Windows 機器上才能驗證）
 

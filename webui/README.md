@@ -9,11 +9,12 @@ Worker/D1/R2/drizzle/OpenAI 託管假設),加上 Local Bridge 最小寫入例外
 移除——未接線的區塊不呈現。
 
 **P1 範圍(既有功能對等)**:新增五個資料 view——總覽/Jobs/成本/Memory/
-Logs,與既有 Streamlit dashboard(`dashboard/app.py`)功能對等,全部經
+Logs,與當時既有的 Streamlit dashboard(`dashboard/app.py`)功能對等,全部經
 **唯讀 API**(`dashboard/api.py`,`http://127.0.0.1:8799`)取數。UI 層零
 檔案/資料庫直接存取(§3.3 獨立資料層)——取數只有 `src/api.ts` 的 fetch
-一條路,畫面上零硬編資料。既有 Streamlit dashboard 維持可用、零改動,
-與新 UI 並存(退役時點依提案 §4.3 DoD 第 4 項,在 P2 後才進入觀察期)。
+一條路,畫面上零硬編資料。Streamlit dashboard 在 P2 後進入並行觀察期
+(提案 §4.3 DoD 第 4 項),**已於 2026-08-15 退役並自 repo 移除**——本 Web UI
+是唯一觀測面。
 
 ## 啟動方式
 
@@ -22,6 +23,9 @@ Logs,與既有 Streamlit dashboard(`dashboard/app.py`)功能對等,全部經
 - Node.js `>=22.13.0`(實測環境 v22.23.1)
 - `hermes` 指令可在 PATH 直接執行(實測 hermes v0.18.2)
 - Python venv(repo 根 `.venv`,唯讀 API 使用;零額外套件——stdlib only)
+
+日常一鍵啟動(冪等,四個 port 缺哪個補哪個):`scripts/start_webui_stack.ps1`
+或桌面捷徑「AgentOS WebUI」(`scripts/start_webui_stack.vbs`,零黑窗)。手動分開啟動:
 
 ```bash
 cd webui
@@ -59,7 +63,7 @@ cd .. && .venv/Scripts/python.exe dashboard/api.py   # http://127.0.0.1:8799
 | `/api/jobs?limit&status&source` | `get_recent_jobs()` |
 | `/api/jobs/<id>` | `get_job()` |
 | `/api/cost-summary` | `get_cost_summary()` |
-| `/api/systemd-status` | `dashboard/data_systemd_wsl.py::get_wsl_systemd_snapshot()`(2026-07-28 換源:Windows 側經 `wsl -d Ubuntu` 的唯讀快照,distro 未運作不喚醒、三分支誠實狀態 ok/wsl_down/unavailable、5 秒快取;`data.get_systemd_status()` 的裸 systemctl 原樣留給 deprecated Streamlit) |
+| `/api/systemd-status` | `dashboard/data_systemd_wsl.py::get_wsl_systemd_snapshot()`(2026-07-28 換源:Windows 側經 `wsl -d Ubuntu` 的唯讀快照,distro 未運作不喚醒、三分支誠實狀態 ok/wsl_down/unavailable、5 秒快取;`data.get_systemd_status()` 的裸 systemctl 原為 Streamlit 版所用,Streamlit 2026-08-15 退役後已無呼叫端、函式原樣保留) |
 | `/api/memory/inbox-counts` | `get_memory_inbox_counts()` |
 | `/api/memory/files` | `get_memory_files()` |
 | `/api/domains` | `get_domain_status()` |

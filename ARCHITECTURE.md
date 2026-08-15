@@ -215,7 +215,7 @@ session（吃成本且抓不到 CoS 自己的推理），故資料流維持單�
 
 RSS Adapter（`hermes/adapters/rss.py`）已完成並常駐（每 30 分鐘；目前為 WSL2 systemd timer，launchd 版本為當時 macOS 環境的部署）。無狀態、不做排程判斷，跟 Cron 同一個原則；v0.1 範圍只做抓取/去重/`feedparser` 解析/`enqueue()`，不做摘要邏輯。用真實 feed（`hnrss.org/frontpage`）驗證過完整流程，含 launchd 真實觸發（臨時 30 秒 plist 觀察到 3 次自動觸發）。
 
-Dashboard（`dashboard/app.py` + `dashboard/data.py`）已完成：localhost-only、read-only，手動啟動（不裝 launchd）。Read-only 是技術上強制的——`data.py` 用 `mode=ro` 開 SQLite 連線、完全不 import `hermes/db.py`，不是只靠程式碼自律。涵蓋 worker/adapter 狀態、五種 job 狀態統計、最近 jobs、單筆 job detail、成本統計、memory inbox 數量、log 檢視。
+Dashboard 已完成：localhost-only、read-only，手動啟動（不裝 launchd／systemd）。Read-only 是技術上強制的——`dashboard/data.py` 用 `mode=ro` 開 SQLite 連線、完全不 import `hermes/db.py`，不是只靠程式碼自律。涵蓋 worker/adapter 狀態、五種 job 狀態統計、最近 jobs、單筆 job detail、成本統計、memory inbox 數量、log 檢視。呈現層現為 Stage 5 Web UI（`webui/`，經唯讀 API `dashboard/api.py` 取數，見 [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md) Stage 5 節）；原 Streamlit 版本 `dashboard/app.py` 於 2026-08-15 退役移除，資料層 `data.py` 等模組原樣保留。
 
 Telegram Polling Adapter（`hermes/adapters/telegram.py`）已完成，含 `delivered_at` 回覆追蹤與 12 個 mock 過網路呼叫的單元測試。**Live 驗證已通過**：用真的 bot token 收發過真實訊息，使用者在 Telegram 上確認收到回覆，細節見 `hermes/README.md`。目前已在 WSL2 側以 systemd 常駐（`hermes-telegram.service`）。**2026-07-20 新增**獨立推播進入點 `push_message()`／`push_cli()`（不經過 job queue，直接呼叫既有 `send_message()`）——給 CoS 互動觸發的主動通知用（例如長時間的 Hermes lane 呼叫完成），與 cron／排程觸發的通知（走既有 Slack `bridge_notifier.py`／`#agentos` 慣例）分流；已真實送出測試訊息驗證送達，細節見 [docs/hermes-integration-roadmap.md](docs/hermes-integration-roadmap.md) Stage 4 節。
 

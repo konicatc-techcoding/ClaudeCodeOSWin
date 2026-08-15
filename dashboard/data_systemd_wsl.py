@@ -5,7 +5,8 @@
 `systemctl --user list-units ...`——那是 dashboard 還跑在 WSL 裡的舊設計。
 readonly-api(dashboard/api.py,8799)如今跑在 Windows 側,`systemctl`
 不存在 → FileNotFoundError → 回空 dict → UI 把「查不到」誤報成「未安裝」。
-data.py 自 P1 起凍結(Streamlit 零改動鐵律,app.py 仍用舊函式、行為不變),
+data.py 自 P1 起凍結(當時的 Streamlit 零改動鐵律;Streamlit app.py 已於
+2026-08-15 退役,舊函式已無呼叫端但原樣保留、data.py 維持不動),
 故 Windows 側的等效查詢放在本新模組,由 api.py 與 data_stage3.py 改用。
 
 設計沿用 data_resident.py 的既有模式,不重造:
