@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-15
+**最後更新**:2026-08-27
 
 ---
 
@@ -96,33 +96,67 @@
 
 ## 2. 上一個 session 做了什麼
 
-(本次 session 一個 repo commit:`55e249d`(Streamlit 退役),已 push;另有兩項
-repo 外變更(Hermes 全域 config、auto-memory)。起點=使用者問「還有什麼階段沒做」,
-盤點後拍板三件事並全部完成。)
+(本次 session **repo 端只有這一個 STATUS 快照 commit**——所有實作都落在**版控之外**的
+`HermesWorkspace\HermesAgent\AIChainOrchestrator`、`HermesWorkspace\GptCoding\AIChainClaude`、
+`HermesWorkspace\HermesAgent\DailyAIChainResearchV2` 與 `%LOCALAPPDATA%\hermes`,依 memory
+`feedback_hermes-cron-scripts-no-commit`,那些目錄改完即生效、沒有 commit 這一步。
+起點=使用者問「管理 HermesAgent 的 cron 該跟我說還是開 HermesDesktop」,一路展開成
+AIChain 每日晨報的可靠性整治。)
 
-- **盤點結論**:Roadmap Stage 0–5 全數關閉,無開工中階段;剩餘全是遺留/待拍板
-  議題(已整理成清單,見第 3 節,並建議下次由 `planning` 排成議程)。根 ROADMAP.md
-  里程碑仍只到 `v0.1-beta`、技術債四條自 07-04 未對現況——文件面過時,未處理。
-- **default 模型改回 `openai-codex/gpt-5.6-sol`(engineering,兩輪)**:
-  `%LOCALAPPDATA%\hermes\config.yaml` `model:` 區塊改回與 gptcoding 一致
-  (`gpt-5.6-sol` / `https://chatgpt.com/backend-api/codex`),並刪除 deepseek
-  時期殘留的 `api_mode: chat_completions` 行;備份 `config.yaml.bak.20260815_182728`
-  與 `_205855`。**零重啟**;憑證頁 `(global-root)` 交叉檢查燈**橙→綠**
-  (entry_count=1、`last_status: ok`)。08-05~08-15 的 deepseek 插曲就此結束。
-- **memory 應然表更新(knowledge)**:auto-memory `hermes-profile-intended-config`
-  五列表格不動(改回後 default 列本來就對),補「插曲紀錄」與「換模型免重啟
-  作業程序」兩段;待辦 (2) 改寫為 `OPENROUTER_API_KEY` **維持 nemocoding 必需、
-  不可移除**(default 已不再依賴);待辦 (3) 結案——copilot 憑證經 `gh_cli`
-  重生(gptcoding 08-03、nemocoding 07-30)屬已知行為非漂移。MEMORY.md hook 同步。
-- **Streamlit 退役(engineering,`55e249d`)**:刪 `dashboard/app.py`、`test_app.py`
-  (6 案例皆純 AppTest 渲染層,密鑰不外洩已由 `test_data`/`test_api` 覆蓋,不倒退);
-  `requirements.txt` 移除 streamlit、`.claude/launch.json` 移除 8501;README×2/
-  `WINDOWS_WSL_SETUP`/`ARCHITECTURE` 改指向 `start_webui_stack`;資料層四檔只改
-  docstring 零邏輯;roadmap 兩份補退役註記。測試 dashboard 277→**271**(差額=刪掉
-  的 Streamlit 測試)、hermes 491/scripts 107 不變、security_check **13/13**、
-  webui typecheck+build 乾淨。**未 pip uninstall、未 sync WSL**。
+- **使用者自行停用三個 Hermes cron job**(`garmin-daily-report`/`aichain-orchestrator-daily`/
+  `alpha`,08-25 23:37 從 root store 刪除,非事故)。`aichain-orchestrator-daily`
+  (`fccafba650bb`,`0 8 * * 1-6`,`no_agent`,投遞 `telegram:1034113120`)**待重建**,
+  定義可從 `state-snapshots\20260713-015656-pre-update\cron\jobs.json` 復原。
+- **AIChain 晨報可靠性稽核(engineering,唯讀)**:21 項發現分四類(內容不實/呈現不實/
+  靜默失敗/證據品質)+12 項解法,已發布成 artifact 稽核頁。核心結論=**根因不在 prompt
+  也不在模型**——模型每天寫的自我保留意見被程式在最後一哩丟掉。
+- **已上線的五批改動(全部有 `.bak.20260826*` 備份,二到四層 rollback)**:
+  - **A1**:`run_sequence.py` daily_run 補 `--market-context`。市場報價 0→24 筆、三個
+    bucket 全 true、packet warnings 3→2。報告首次出現 `high` confidence 判斷。
+  - **A5**:`risk_flags`/`contradictions` 渲染回報告(資料本來就在,只差渲染)。
+  - **批次 1**(渲染層大清理):燈號改「把握:高/中/低」(刪 `classify_delta_urgency`
+    與只收公司名的關鍵字表)、`Legacy v1 key insight`/`未提供`/`(n/a)`/`緊迫性`/
+    `判斷依據`/`確定性分級` 全歸零、enum 中文化(僅渲染層)、報告開頭加來源標註+
+    **比對基準日**。203→143 行。同步改 `tests/test_claude_style_report.py`。
+  - **批次 2**(prompt 層):`analysis_role.md` 新增「用詞規範」39 行,禁止 JSON 欄位名
+    與英文術語出現在人類可讀字串,三重防呆保護 enum 不被翻譯。實跑:欄位名 13→1
+    (−92%)、`relay` 15→6(−60%)、**enum 零翻譯、未觸發 repair 重試**。
+  - **移除兩段**:「明日追蹤清單」與「矛盾與待確認」不再渲染(資料仍寫進 JSON,復原
+    只需加回 8 行)。理由=`next_day_focus` 不進 state、隔天模型看不到;`contradictions`
+    的失準是結構性的(08-26 那條「同一篇報導亦同時提及」經查證為**無中生有**)。
+- **兩次真實鏈路執行驗證**(`20260826_111214`、`20260826_143436`,皆 `completed`、
+  Anthropic 各一次過)。四關驗收全過,`outputs/20260826/` 為最終樣本。
+- **蒐集層評估(唯讀)**:查出搜尋主題**由「今天哪些 RSS 壞掉」決定**而非由研究議題
+  決定;`categories.yaml` 79 條查詢裡台股至少 6 條公司↔產業對應寫錯;`--dynamic-search`
+  設定 enabled 但旗標從未傳、且展開順序會截斷掉 `industry_research`;評分的 `memory`
+  權重(0.15)從未實作。產出 A10/A11/A12 三個新規劃項(見第 3、4 節)。
 
 ## 3. 卡住/未決的問題
+
+- **AIChain 晨報:五個已知但未修的缺陷(08-26 稽核,依嚴重度)**:
+  - **A8 與 A12 有強制依賴,不可只做 A8**:Tavily 的觸發條件是「官方 feed 失敗或抓到
+    0 筆」,所以**修好 23 條 feed 反而會讓全文覆蓋率從 6/18 掉到 3/18**。必須先讓
+    Tavily 脫離 feed 健康度綁定。
+  - **Tavily 失敗是全靜默的**:沒 key→靜默 skip、查詢失敗(含 429 額度用盡)→每條例外
+    被個別吞掉、`validator` 九項檢查**無一檢查** `web_search_queries_failed`。額度用盡
+    當天會產出一份沒有全文證據的報告,Telegram 仍顯示 `completed`。列為 **A12-pre**,
+    是任何 Tavily 改動的硬前提(使用者有兩把 1000/月 key 要輪替,更需要先能偵測 429)。
+  - **Slack 送達無驗證**(A3):投遞失敗被 try/except 吞掉,包裝腳本還硬編
+    `print("delivery: slack")`。Telegram 說 completed ≠ 報告有送到。
+  - **`thesis_updates` 的信心變化反映抽樣而非世界**:08-25 與 08-26 入選 18 筆的
+    **URL 交集 = 0**,樣本 100% 不重疊;而本該解決此事的 `thesis_registry` 是空的
+    (只由 v2 的 `thesis_memory_updates` 填充,cron 走 v1)。在 B1 切 v2 前,「二階效應」
+    段的信心上調/下調只能當敘事語氣讀。
+  - **`categories.yaml` 6 條公司↔產業對應寫錯**(榮成=紙器包裝、台光電=CCL、華新科=
+    MLCC、世芯/創意=ASIC、南亞科=DRAM、錸德=光碟片),年份寫死 2024/2025,缺
+    GB300/Vera Rubin 與奇鋐/雙鴻/台達電/日月光等主力標的。這是報告裡「標籤抽取錯誤」
+    的真正源頭。
+- **稽核 artifact 有一處錯誤待更正**:B3 段寫「relay URL 解析只成功 3/18,是既有能力
+  沒發揮」——實際上**該功能從未存在**(`resolved_count` 只是在數有幾筆不是轉址)。真正
+  的槓桿是 `content_enricher`(對直連 100% 成功、對 Google News 轉址 100% 失敗)。
+- **工作樹有四項與本次 session 無關的未 commit 變更**(`webui/src/App.tsx`、
+  `webui/src/globals.css`、`agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`,webui
+  typography patch),本次收尾 commit 刻意未帶入,待使用者決定去留。
 
 - **防重演有一個結構性弱點(持續性風險,務必知道)**:`reset --hard origin/main`
   是 no-op 的前提是 `main == origin/main`。**一旦有客製 commit 沒 push 到私有
@@ -209,25 +243,31 @@ repo 外變更(Hermes 全域 config、auto-memory)。起點=使用者問「還�
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **本次三項拍板皆已落地並驗證,無進行中作業**(default 改回 gpt-5.6-sol、
-  memory 應然表更新、Streamlit 退役已 push)。
-- **建議下一步:分派 `planning` 把第 3 節的「遺留/待拍板議題清單」排成一份帶
-  優先序的議程提案**,再逐項拍板——目前沒有開工中的階段,下一個要做什麼是
-  規劃問題,不是實作問題。
-- **日常留意**:下一輪整點 cron / 首次 gptcoding 呼叫成功後,憑證頁 `gptcoding`
-  黃燈應自動退綠(`last_status` 自癒);若久未退綠再查配額。
-- **下次 `scripts/sync_to_wsl.sh` 時**順帶確認 WSL 側 `dashboard/app.py` 已被
-  `--delete` 清掉。
-- **換 hermes 模型的正確作業程序(08-05 實證、08-15 再走一次)**:改 `config.yaml`
-  → **不用重啟任何服務** → 憑證頁按重整即見新值 → 想確認真的在跑,等下一輪
-  整點 cron 或開**新** Telegram thread。橙燈=該 provider 在此 store 無憑證條目。
-  正本已寫進 auto-memory `hermes-profile-intended-config`。
-- **下次想升級 hermes**:按 fetch 鈕看落後數 → 說「升級 hermes」觸發
-  `/hermes-upgrade`(兩次核准,其餘機械化;首跑先 `-DryRun`)。「Hermes 更新」頁
-  backup 組亮橙=有客製沒 push,立刻處理;sidebar 常駐燈紅=先查
-  `schtasks /query /tn HermesWslKeepAlive`(自癒最壞 15 分鐘)。
-- **A1 已驗收結案**:日常留意首個多輪 named 對話的 episode 落地檔。
-- **lane 通道已全通,可開始真實使用**:前台直接指定(「用 GPT 做 X」),Telegram
-  入口亦可;累積真實使用觀察,供日後「依任務類型自動選模型」規則引擎的設計依據。
+- **① 重建 `aichain-orchestrator-daily` cron job**(使用者的前置關卡「看到合格的報告
+  之後再建」已達成——08-26 新版面真實報告已驗收)。分派 `automation`,守則:落在
+  **root store**(不可在 named profile 下建,否則靜默永不觸發)、`no_agent=true` 故
+  **不需 pin 模型**、`0 8 * * 1-6`、投遞 `telegram:1034113120`;建完驗證 gateway
+  running 且 `cron list` 看得到。**新格式下次執行自動生效,不需額外部署。**
+- **② AIChain 改善的建議順序(engineering 排定,前三項合計約一天半)**:
+  1. **A10 修 `categories.yaml` query 清單**——零成本、零風險、當天生效,全案投報比最高
+  2. **B3-α relay 解析 spike**(半天、零成本、離線拿既有 12 筆 URL 測)——**它的結果
+     決定 A12 要做層級 A(小時級)還是層級 B(天級),先花半天可能省下兩天**
+  3. **A12-pre Tavily 失敗/額度偵測告警 + 雙 key 輪替**——任何 Tavily 改動的硬前提
+  4. A11 修 web_search 的 recency/分類(含來源型別配額下限)→ 5. A12 主力化(層級依
+     spike 決定)→ 6. A8 修官方 feed(**必須在 A12 之後**)→ 7. B3-β → 8. A6 gate →
+     9. B1 切 v2
+  - **`--dynamic-search` 暫緩**:會讓查詢 16→56(約 1230 credits/月),且在 query 清單
+    還是錯的情況下開它只是把錯誤放大 3.5 倍。先把現有來源榨乾。
+  - **待使用者提供**:Tavily dashboard 的方案月額度與本月已用量,以及兩把 key 是否
+    同帳號共用額度池。
+- **③ 更正稽核 artifact 的 relay 段**(見第 3 節最後一項)。
+- **原有的規劃面待辦**(08-15 起未動):分派 `planning` 把第 3 節的「遺留/待拍板議題
+  清單」排成帶優先序的議程提案。目前仍無開工中的 roadmap 階段。
+- **日常留意**:憑證頁 `gptcoding` 黃燈應在下輪 cron 成功後自動退綠;下次
+  `scripts/sync_to_wsl.sh` 順帶確認 WSL 側 `dashboard/app.py` 已被 `--delete` 清掉。
+- **換 hermes 模型的正確程序**:改 `config.yaml` → **不用重啟** → 憑證頁重整即見新值。
+  正本在 auto-memory `hermes-profile-intended-config`。
+- **下次想升級 hermes**:按 fetch 鈕看落後數 → 說「升級 hermes」觸發 `/hermes-upgrade`。
+  「Hermes 更新」頁 backup 組亮橙=有客製沒 push,立刻處理。
 - `memory/inbox/` 有 2 個待整併檔(07-16 episode、07-31 skill catalog),下次
   daily-memory-check 或手動 `/consolidate-memory` 收。
