@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-27
+**最後更新**:2026-08-27(第二次收工)
 
 ---
 
@@ -96,51 +96,71 @@
 
 ## 2. 上一個 session 做了什麼
 
-(本次 session **repo 端只有這一個 STATUS 快照 commit**——所有實作都落在**版控之外**的
-`HermesWorkspace\HermesAgent\AIChainOrchestrator`、`HermesWorkspace\GptCoding\AIChainClaude`、
-`HermesWorkspace\HermesAgent\DailyAIChainResearchV2` 與 `%LOCALAPPDATA%\hermes`,依 memory
-`feedback_hermes-cron-scripts-no-commit`,那些目錄改完即生效、沒有 commit 這一步。
-起點=使用者問「管理 HermesAgent 的 cron 該跟我說還是開 HermesDesktop」,一路展開成
-AIChain 每日晨報的可靠性整治。)
+(接續同日稍早的 `54cd9fc` 快照。**repo 端仍只有 STATUS 與 memory 兩類檔案**——AIChain 的實作全部落在版控之外的 `HermesWorkspace\HermesAgent\AIChainOrchestrator`、
+`HermesWorkspace\HermesAgent\DailyAIChainResearchV2`、`HermesWorkspace\GptCoding\AIChainClaude`
+與 `%LOCALAPPDATA%\hermes`,依 `feedback_hermes-cron-scripts-no-commit`,改完即生效、無 commit。
+所有改動皆有 `.bak.20260827*` 備份。)
 
-- **使用者自行停用三個 Hermes cron job**(`garmin-daily-report`/`aichain-orchestrator-daily`/
-  `alpha`,08-25 23:37 從 root store 刪除,非事故)。`aichain-orchestrator-daily`
-  (`fccafba650bb`,`0 8 * * 1-6`,`no_agent`,投遞 `telegram:1034113120`)**待重建**,
-  定義可從 `state-snapshots\20260713-015656-pre-update\cron\jobs.json` 復原。
-- **AIChain 晨報可靠性稽核(engineering,唯讀)**:21 項發現分四類(內容不實/呈現不實/
-  靜默失敗/證據品質)+12 項解法,已發布成 artifact 稽核頁。核心結論=**根因不在 prompt
-  也不在模型**——模型每天寫的自我保留意見被程式在最後一哩丟掉。
-- **已上線的五批改動(全部有 `.bak.20260826*` 備份,二到四層 rollback)**:
-  - **A1**:`run_sequence.py` daily_run 補 `--market-context`。市場報價 0→24 筆、三個
-    bucket 全 true、packet warnings 3→2。報告首次出現 `high` confidence 判斷。
-  - **A5**:`risk_flags`/`contradictions` 渲染回報告(資料本來就在,只差渲染)。
-  - **批次 1**(渲染層大清理):燈號改「把握:高/中/低」(刪 `classify_delta_urgency`
-    與只收公司名的關鍵字表)、`Legacy v1 key insight`/`未提供`/`(n/a)`/`緊迫性`/
-    `判斷依據`/`確定性分級` 全歸零、enum 中文化(僅渲染層)、報告開頭加來源標註+
-    **比對基準日**。203→143 行。同步改 `tests/test_claude_style_report.py`。
-  - **批次 2**(prompt 層):`analysis_role.md` 新增「用詞規範」39 行,禁止 JSON 欄位名
-    與英文術語出現在人類可讀字串,三重防呆保護 enum 不被翻譯。實跑:欄位名 13→1
-    (−92%)、`relay` 15→6(−60%)、**enum 零翻譯、未觸發 repair 重試**。
-  - **移除兩段**:「明日追蹤清單」與「矛盾與待確認」不再渲染(資料仍寫進 JSON,復原
-    只需加回 8 行)。理由=`next_day_focus` 不進 state、隔天模型看不到;`contradictions`
-    的失準是結構性的(08-26 那條「同一篇報導亦同時提及」經查證為**無中生有**)。
-- **兩次真實鏈路執行驗證**(`20260826_111214`、`20260826_143436`,皆 `completed`、
-  Anthropic 各一次過)。四關驗收全過,`outputs/20260826/` 為最終樣本。
-- **蒐集層評估(唯讀)**:查出搜尋主題**由「今天哪些 RSS 壞掉」決定**而非由研究議題
-  決定;`categories.yaml` 79 條查詢裡台股至少 6 條公司↔產業對應寫錯;`--dynamic-search`
-  設定 enabled 但旗標從未傳、且展開順序會截斷掉 `industry_research`;評分的 `memory`
-  權重(0.15)從未實作。產出 A10/A11/A12 三個新規劃項(見第 3、4 節)。
+- **A10 修 `categories.yaml` query 清單(兩輪,79 → 93 條)**:修正 11 條公司↔產業對應
+  錯誤(榮成=紙器/台光電=CCL/華新科=MLCC/世芯·創意=ASIC/南亞科=DRAM 而 ABF 是南電/
+  錸德=光碟片/世界先進·力積電=晶圓代工/南茂=封測);`超微` 歧義拆成「美超微 Supermicro」
+  與「超微半導體 AMD」兩條(實測分流成功);去掉寫死年份;補 GB300/Vera Rubin;補 12 個
+  主力標的(台達電/光寶科/奇鋐/雙鴻/健策/日月光/京元電/川湖/貿聯/智邦/南電/環球晶)。
+  **先前完全沒有查詢覆蓋的散熱、電源、機構件、網通四個環節都補上了。** 冒煙 93 條 0 失敗、
+  Tavily 零呼叫。榮成/錸德刻意改為**不指名公司的主題查詢**,避免修錯誤時引入新錯誤。
+- **B3-α spike:判定成功**。三種路線實測——離線 base64 解碼 0/60(新格式已移除原始網址)、
+  跟隨轉址 0/5、**batchexecute RPC 47/47**。第二層意外揪出**本機憑證問題**(Windows 憑證
+  存放區被插入自簽根憑證,推測防毒或 HTTPS 檢查代理;`content_enricher` 對台灣財經站台
+  一直抓不到,即使直連)。脆弱度誠實評估:依賴 Google 未公開介面,預估**一到兩年需維護一次**。
+- **B3-β 實作(新增 `relay_resolver.py` 189 行 + 改 `content_enricher.py`)**:
+  **`full_content` 6/18(33%) → 15/18(83%)**、`full_content_coverage_adequate` 由長期
+  False 轉 True、「headline-only inference risk」警告不再觸發。SSL 用 `certifi` 修正
+  (**未使用任何形式的關閉驗證**,有測試把關)。解析只對入選 18 筆做(每天約 24-30 次請求,
+  非蒐集階段的 1224 次)。
+- **URL 寫回**:`primary_url_resolved_count` **3/18 → 18/18**、`google_news_relay_count`
+  15 → 0、「still use Google News relay URLs」警告消失。有反向測試證明計數跟著實際 URL 走、
+  非無條件歸零;`dedup_key` 在 normalize 階段固化故不受影響(有測試釘住)。
+- **蒐集層健康度告警(新增 `collection_health.py` 157 行,合併原 A12-pre)**:三訊號
+  (relay 解析率 <0.5 / web_search 失敗率 >0.3 含 429 單獨辨識 / 官方 feed 失敗率 >0.4),
+  **warning 不擋鏈**(有測試釘死三訊號全爆 `validation.passed` 仍為 True),出口在 Telegram
+  摘要。`not_requested` 不誤報(今日實測驗證)。門檻集中一處供 validator 與 wrapper 共用。
+- **測試**:154 → **168 全綠**。
+- **cron job 重建完成**:`aichain-orchestrator-daily`,**新 id `cd3801e0daed`**
+  (原 `fccafba650bb` 已不存在),`0 8 * * 1-6`,`no_agent=true` 故 model/provider 皆 null
+  (符合守則),deliver `telegram:1034113120`,落在 **root store** 已驗證,gateway running
+  (PID 20756),`next_run_at: 2026-08-28T08:00:00+08:00`。未觸碰 `garmin-daily-report`
+  與 `alpha`(使用者手動停用,不用理)。
+- **Anthropic → Claude Code 換 provider 評估(唯讀)**:查出 **`claude_cli` provider 已完整
+  實作**(改 3 行 config 可跑),但與 `anthropic_api` 有三處不對等(無 JSON repair 重試、
+  不內嵌 103KB packet、無嚴格輸出約束);`--output-format json` 會回信封而破壞 schema
+  (**既有先例 `invoke_cos.sh` 正是用 json,不可照抄**);需 `--add-dir`。路線 B(Hermes lane)
+  **已排除**(argv 121KB 超 Windows 上限 3.7 倍)。成本實查:2026-08 帳單 **$3.84**,但該月
+  **只跑 14 天**(應為約 26 天);滿月 + B3-β 後 packet 變厚,預估約 **$7.5/月**。
+- **memory 新增**:`memory/project_aichain-claude-cli-provider-trial.md`(使用者要求記下的
+  未來規劃,見第 3 節)。
 
 ## 3. 卡住/未決的問題
 
-- **AIChain 晨報:五個已知但未修的缺陷(08-26 稽核,依嚴重度)**:
+- **明天(08-28)第一次自動執行的三個觀察點**:① Telegram 那行 `sources: relay ?/? -
+  feeds 9/23 - tavily ?` 是否正常出現(這會驗掉「wrapper end-to-end 未跑過真實 cron」);
+  ② 18 筆入選裡有沒有出現散熱/電源/機構件/網通(**A10 的真正驗收**——查詢有了不等於
+  進得了報告,18 個名額要競爭);③ **Slack `#ai-chainresearch` 實際有沒有收到**(系統不會
+  主動告訴你,見 S1)。另 `original_relay_url` 欄位可在 `structured/20260828.json` 目視確認。
+- **cron 這個月只跑了 14 天(應約 26 天)且無人察覺**,08-18→08-25 有整整一週空窗。
+  今天做的告警只能報「跑了但品質差」,**「跑都沒跑」它不會出聲**——那要 B2 的新鮮度
+  看門狗(獨立於這條鏈之外的檢查)。
+- **使用者要求記下的未來規劃**:想試把分析改走 `claude_cli`(訂閱制)**看品質會不會更好**
+  ——注意**動機是品質不是省錢**,故 08-27 那份以省錢為前提、結論「不建議改」的評估
+  **不適用**。正本 `memory/project_aichain-claude-cli-provider-trial.md`,含技術前置事實
+  與必踩的坑。等前置項目完成後再規劃;**與 B1 的先後順序需另外拍板**(先切 v2 會讓 schema
+  更嚴格,屆時換 provider 的 JSON 通過率風險更高)。
+- **AIChain 晨報:仍未修的缺陷(08-27 更新,已解決者已移除)**:
   - **A8 與 A12 有強制依賴,不可只做 A8**:Tavily 的觸發條件是「官方 feed 失敗或抓到
     0 筆」,所以**修好 23 條 feed 反而會讓全文覆蓋率從 6/18 掉到 3/18**。必須先讓
     Tavily 脫離 feed 健康度綁定。
-  - **Tavily 失敗是全靜默的**:沒 key→靜默 skip、查詢失敗(含 429 額度用盡)→每條例外
-    被個別吞掉、`validator` 九項檢查**無一檢查** `web_search_queries_failed`。額度用盡
-    當天會產出一份沒有全文證據的報告,Telegram 仍顯示 `completed`。列為 **A12-pre**,
-    是任何 Tavily 改動的硬前提(使用者有兩把 1000/月 key 要輪替,更需要先能偵測 429)。
+  - ~~Tavily 全靜默失敗~~ → **2026-08-27 已解決**(蒐集層健康度告警)。**但雙 key 輪替
+    尚未實作**——使用者有兩把 1000/月 的 key,目前 code 只讀一把、無輪替邏輯,也未確認
+    兩把是否同帳號共用額度池。
   - **Slack 送達無驗證**(A3):投遞失敗被 try/except 吞掉,包裝腳本還硬編
     `print("delivery: slack")`。Telegram 說 completed ≠ 報告有送到。
   - **`thesis_updates` 的信心變化反映抽樣而非世界**:08-25 與 08-26 入選 18 筆的
@@ -243,31 +263,37 @@ AIChain 每日晨報的可靠性整治。)
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **① 重建 `aichain-orchestrator-daily` cron job**(使用者的前置關卡「看到合格的報告
-  之後再建」已達成——08-26 新版面真實報告已驗收)。分派 `automation`,守則:落在
-  **root store**(不可在 named profile 下建,否則靜默永不觸發)、`no_agent=true` 故
-  **不需 pin 模型**、`0 8 * * 1-6`、投遞 `telegram:1034113120`;建完驗證 gateway
-  running 且 `cron list` 看得到。**新格式下次執行自動生效,不需額外部署。**
-- **② AIChain 改善的建議順序(engineering 排定,前三項合計約一天半)**:
-  1. **A10 修 `categories.yaml` query 清單**——零成本、零風險、當天生效,全案投報比最高
-  2. **B3-α relay 解析 spike**(半天、零成本、離線拿既有 12 筆 URL 測)——**它的結果
-     決定 A12 要做層級 A(小時級)還是層級 B(天級),先花半天可能省下兩天**
-  3. **A12-pre Tavily 失敗/額度偵測告警 + 雙 key 輪替**——任何 Tavily 改動的硬前提
-  4. A11 修 web_search 的 recency/分類(含來源型別配額下限)→ 5. A12 主力化(層級依
-     spike 決定)→ 6. A8 修官方 feed(**必須在 A12 之後**)→ 7. B3-β → 8. A6 gate →
-     9. B1 切 v2
-  - **`--dynamic-search` 暫緩**:會讓查詢 16→56(約 1230 credits/月),且在 query 清單
-    還是錯的情況下開它只是把錯誤放大 3.5 倍。先把現有來源榨乾。
-  - **待使用者提供**:Tavily dashboard 的方案月額度與本月已用量,以及兩把 key 是否
-    同帳號共用額度池。
-- **③ 更正稽核 artifact 的 relay 段**(見第 3 節最後一項)。
-- **原有的規劃面待辦**(08-15 起未動):分派 `planning` 把第 3 節的「遺留/待拍板議題
-  清單」排成帶優先序的議程提案。目前仍無開工中的 roadmap 階段。
-- **日常留意**:憑證頁 `gptcoding` 黃燈應在下輪 cron 成功後自動退綠;下次
-  `scripts/sync_to_wsl.sh` 順帶確認 WSL 側 `dashboard/app.py` 已被 `--delete` 清掉。
+- **① 明天(08-28)早上先看那三個觀察點**(見第 3 節第一項)。cron `cd3801e0daed` 已就緒,
+  `next_run_at: 2026-08-28T08:00:00+08:00`,**不需要任何人動手**。
+- **② AIChain 剩餘項目的建議順序**(前置依賴已查明,不可亂排):
+  1. **A11 修 web_search 的 recency/分類**(小時級)——Tavily 三筆的 relevance 全場最高
+     但 `recency=0` 導致 final 分數墊底;且它們靠「無分類桶」保送,結構性限制每天最多 3 筆。
+     **建議一併加來源型別配額下限**(保證 RSS 至少 N 筆、web_search 至少 M 筆),避免日後
+     互相洗版。
+  2. **A12 層級 A**(小時級)——開 `--dynamic-search` 但**必須先把 `financial_media` profile
+     關掉**:查詢計畫是照順序展開後直接截斷,該 profile 光自己就 316 條,不關的話
+     `industry_research`(TrendForce/SemiAnalysis)永遠跑不到、台股零覆蓋。**調低 cap 只會
+     讓覆蓋更窄,不是解法。**
+  3. **A8 修 14 條壞掉的官方 feed**(1 天)——**必須排在 A12 之後**,否則修好 feed 會關掉
+     Tavily 的觸發條件、全文覆蓋反而倒退。先補完整 UA 試三個 403(現用 UA 是**被截斷的**,
+     缺 `Chrome/xxx Safari` 尾段),再人工查八個 404 新網址。
+  4. **A6 evidence gate**(天級)——注意 B3-β 之後 `full_content` 已達 83%、relay 歸零,
+     **原設想的拒發門檻幾乎不可能觸發**,需重新校準;A6 的價值在「不發不可靠的報告」,
+     **不在省錢**(每月只省 0-2 次呼叫)。
+  5. **B2 送達驗證 + 新鮮度看門狗**(天級)——解決「Slack 沒送到沒人知道」與「cron 停跑
+     一週沒人發現」。看門狗**必須獨立於這條鏈之外**。
+  6. **B1 切 v2 契約**(天級,風險最高)——建議最後做。前面做完證據品質拉起來,v2 的嚴格
+     驗證才不會天天失敗;且與 `claude_cli` 試驗有先後順序問題(見第 3 節)。
+- **③ 未排程但已記錄**:`claude_cli` 品質試驗(見第 3 節)、雙 key 輪替、`max_excerpt_chars`
+  成本旋鈕(**目前刻意不動**,先讓它跑滿一個月看實際帳單)、稽核 artifact 的 relay 段更正
+  (該段寫「既有能力沒發揮」,實際上**該功能從未存在**)。
+- **④ 工作樹有四項與本次無關的未 commit 變更**(`webui/src/App.tsx`、`webui/src/globals.css`、
+  `agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`,webui typography patch,session 開始前就在),
+  兩次收尾 commit 都刻意未帶入,**待使用者決定去留**。
+- **原有的規劃面待辦**(08-15 起未動):分派 `planning` 把第 3 節的「遺留/待拍板議題清單」
+  排成帶優先序的議程提案。目前仍無開工中的 roadmap 階段。
 - **換 hermes 模型的正確程序**:改 `config.yaml` → **不用重啟** → 憑證頁重整即見新值。
   正本在 auto-memory `hermes-profile-intended-config`。
 - **下次想升級 hermes**:按 fetch 鈕看落後數 → 說「升級 hermes」觸發 `/hermes-upgrade`。
-  「Hermes 更新」頁 backup 組亮橙=有客製沒 push,立刻處理。
 - `memory/inbox/` 有 2 個待整併檔(07-16 episode、07-31 skill catalog),下次
   daily-memory-check 或手動 `/consolidate-memory` 收。
