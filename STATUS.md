@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-08-27(第二次收工)
+**最後更新**:2026-09-01
 
 ---
 
@@ -96,51 +96,97 @@
 
 ## 2. 上一個 session 做了什麼
 
-(接續同日稍早的 `54cd9fc` 快照。**repo 端仍只有 STATUS 與 memory 兩類檔案**——AIChain 的實作全部落在版控之外的 `HermesWorkspace\HermesAgent\AIChainOrchestrator`、
-`HermesWorkspace\HermesAgent\DailyAIChainResearchV2`、`HermesWorkspace\GptCoding\AIChainClaude`
-與 `%LOCALAPPDATA%\hermes`,依 `feedback_hermes-cron-scripts-no-commit`,改完即生效、無 commit。
-所有改動皆有 `.bak.20260827*` 備份。)
+(涵蓋 08-28 至 09-01。**repo 端仍只有 STATUS 快照**——AIChain 實作全在版控之外的
+`HermesWorkspace\HermesAgent\{AIChainOrchestrator,DailyAIChainResearchV2}`、
+`HermesWorkspace\GptCoding\AIChainClaude` 與 `%LOCALAPPDATA%\hermes`,改完即生效、無 commit。
+所有改動皆有 `.bak.2026082x` / `.bak.2026090x` 備份。)
 
-- **A10 修 `categories.yaml` query 清單(兩輪,79 → 93 條)**:修正 11 條公司↔產業對應
-  錯誤(榮成=紙器/台光電=CCL/華新科=MLCC/世芯·創意=ASIC/南亞科=DRAM 而 ABF 是南電/
-  錸德=光碟片/世界先進·力積電=晶圓代工/南茂=封測);`超微` 歧義拆成「美超微 Supermicro」
-  與「超微半導體 AMD」兩條(實測分流成功);去掉寫死年份;補 GB300/Vera Rubin;補 12 個
-  主力標的(台達電/光寶科/奇鋐/雙鴻/健策/日月光/京元電/川湖/貿聯/智邦/南電/環球晶)。
-  **先前完全沒有查詢覆蓋的散熱、電源、機構件、網通四個環節都補上了。** 冒煙 93 條 0 失敗、
-  Tavily 零呼叫。榮成/錸德刻意改為**不指名公司的主題查詢**,避免修錯誤時引入新錯誤。
-- **B3-α spike:判定成功**。三種路線實測——離線 base64 解碼 0/60(新格式已移除原始網址)、
-  跟隨轉址 0/5、**batchexecute RPC 47/47**。第二層意外揪出**本機憑證問題**(Windows 憑證
-  存放區被插入自簽根憑證,推測防毒或 HTTPS 檢查代理;`content_enricher` 對台灣財經站台
-  一直抓不到,即使直連)。脆弱度誠實評估:依賴 Google 未公開介面,預估**一到兩年需維護一次**。
-- **B3-β 實作(新增 `relay_resolver.py` 189 行 + 改 `content_enricher.py`)**:
-  **`full_content` 6/18(33%) → 15/18(83%)**、`full_content_coverage_adequate` 由長期
-  False 轉 True、「headline-only inference risk」警告不再觸發。SSL 用 `certifi` 修正
-  (**未使用任何形式的關閉驗證**,有測試把關)。解析只對入選 18 筆做(每天約 24-30 次請求,
-  非蒐集階段的 1224 次)。
-- **URL 寫回**:`primary_url_resolved_count` **3/18 → 18/18**、`google_news_relay_count`
-  15 → 0、「still use Google News relay URLs」警告消失。有反向測試證明計數跟著實際 URL 走、
-  非無條件歸零;`dedup_key` 在 normalize 階段固化故不受影響(有測試釘住)。
-- **蒐集層健康度告警(新增 `collection_health.py` 157 行,合併原 A12-pre)**:三訊號
-  (relay 解析率 <0.5 / web_search 失敗率 >0.3 含 429 單獨辨識 / 官方 feed 失敗率 >0.4),
-  **warning 不擋鏈**(有測試釘死三訊號全爆 `validation.passed` 仍為 True),出口在 Telegram
-  摘要。`not_requested` 不誤報(今日實測驗證)。門檻集中一處供 validator 與 wrapper 共用。
-- **測試**:154 → **168 全綠**。
-- **cron job 重建完成**:`aichain-orchestrator-daily`,**新 id `cd3801e0daed`**
-  (原 `fccafba650bb` 已不存在),`0 8 * * 1-6`,`no_agent=true` 故 model/provider 皆 null
-  (符合守則),deliver `telegram:1034113120`,落在 **root store** 已驗證,gateway running
-  (PID 20756),`next_run_at: 2026-08-28T08:00:00+08:00`。未觸碰 `garmin-daily-report`
-  與 `alpha`(使用者手動停用,不用理)。
-- **Anthropic → Claude Code 換 provider 評估(唯讀)**:查出 **`claude_cli` provider 已完整
-  實作**(改 3 行 config 可跑),但與 `anthropic_api` 有三處不對等(無 JSON repair 重試、
-  不內嵌 103KB packet、無嚴格輸出約束);`--output-format json` 會回信封而破壞 schema
-  (**既有先例 `invoke_cos.sh` 正是用 json,不可照抄**);需 `--add-dir`。路線 B(Hermes lane)
-  **已排除**(argv 121KB 超 Windows 上限 3.7 倍)。成本實查:2026-08 帳單 **$3.84**,但該月
-  **只跑 14 天**(應為約 26 天);滿月 + B3-β 後 packet 變厚,預估約 **$7.5/月**。
-- **memory 新增**:`memory/project_aichain-claude-cli-provider-trial.md`(使用者要求記下的
-  未來規劃,見第 3 節)。
+### 排序層整治(08-28~08-31)——問題不在搜尋,在排序
+
+- **intelligence 領域診斷**:08-28 的 801 筆原始採集裡,雙鴻擴產、世界先進擴產、力成獲博通
+  包產能全都撈到了,**是 scorer 丟掉的**。三次獨立驗證(基本面素材全滅、緯穎舊文靠最低分保送、
+  31 筆關稅新聞全滅而電競公關稿入選)。
+- **Tier 0(1/3/4)**:重建 `company_aliases.yaml`(從 TWSE/TPEx OpenAPI 核對,修 10 組錯誤對映
+  含 `Auras→榮成`實為雙鴻、`PTI→豐達`實為力成;新增 12 家);修 `media_credibility` 方向
+  (原本「列入白名單=被懲罰」)並加 official/regulatory 豁免。**項目 3(刪 7 條聚合查詢)查證後
+  停手**——席次會流向無分類桶,品質反而下降。項目 2(訊號組)使用者不做。
+- **A11b + 兩個借自 Manus 腳本的排序設計**:新類別 `tw_ai_component_supply_chain` 置於類別列表
+  **最前**(關鍵:分類是查詢執行順序的產物,放後面會被泛用查詢搶走);`taiwan_relevance` 接收
+  死掉的 `memory` 0.15 權重、含 40 個環節詞;跨桶輪詢取件;`min_final_score: 0.40` 垃圾門檻。
+  **台廠零組件 0/18 → 3/20**。
+- **A11a**:跨日帳本 `state/item_ledger.json`(只記入選項、保留 14 天、排除窗 7 天)、
+  無分類上限改為跨桶共用額度(4→1 席)、web_search 補分類(80 筆入選 0 筆,證明它們過去
+  唯一入場券就是無競爭桶)。**同事件偵測評估後不做**——SK hynix 真同事件相似度 0.398,
+  而「緯創個股概覽 vs 光寶科個股概覽」誤配是 0.892,**誤配是真陽性的 2.2 倍**。
+- **報告可讀性**:新增「今日證據品質」一句話評級(門檻寫進 `report_rules.yaml`)、
+  「台股開盤觀察」只留台股上市櫃且顯示中文名。
+- **08-31 系統性掃描**:再修 10 個問題——5 組重複 canonical(`TSM` 是 `TSMC` 的子字串、
+  `IBI`/`Hon_Hai`/`Apex`/`NanYaPCB`)、`Supermicro` 別名「超微」在台灣指 AMD(改「美超微」)、
+  移除 `ase`/`tel` 裸別名(`'ase'` 命中 increased/based、`'tel'` 命中 intelligence,**每天約
+  65 筆錯誤公司標記**)。
+
+### 市場數據層(09-01)
+
+- **法人買賣超接進 `market_gate`**:資料一直在抓(T86)但 gate 說 `unavailable`,是**被自己截成
+  前 20 名**丟掉的。改為保留全上市 `by_ticker`(26KB,同一請求)。台廠零組件標的命中 1→5 檔。
+  `hyperscaler_capex` 的 `tactical_bias_allowed` **首次翻成 true**(四項條件獨立成立);
+  `ai_hardware_semiconductor` 從 unavailable 變 **contradicted**(台積電 +124 萬 vs 華邦電
+  −3,881 萬,舊碼會讓量體小的一邊決定結論)。門檻寫進 `market_gate.yaml`。
+- **報價名冊 6 → 55 檔**(49 上市 + 6 上櫃,`.TWO` 格式),順帶解掉 canonical→股號正式對照
+  (55 個對到、0 歧義)。**擴大名冊讓判定更嚴不是更鬆**:`ai_hardware_semiconductor` 相對強度
+  從 confirmed 變 contradicted,因為現在看得到南亞科 −0.18%、華邦電 −2.42%。
+  途中拆掉一顆地雷:原本**任一檔報價失敗會讓整個 market_context 變空**。
+- **TPEx 法人買賣超端點打通(尚未接)**:前一輪 8 個候選全 520 是猜錯路徑家族;正解是
+  `www.tpex.org.tw/www/zh-tw/insti/dailyTrade?type=Daily&sect=EW&date=YYYY/MM/DD&response=json`,
+  917 列、口徑與 T86 一致、六檔上櫃股全在內、與 T86 合併零碰撞。**評估後 Yahoo 買賣超排行
+  判定不可用**(只有外資非三大法人、硬上限 100 名、且系統性漏掉非外資主導的賣壓)。
+
+### ★ 架構轉向:分析改走訂閱制(09-01)
+
+- **背景**:使用者判斷現有 web search 調研品質不佳(當日實例:管線抓到三則媒體轉載,
+  而 ChatGPT 抓到 NVIDIA/聯發科**官方聯合發布**本身,管線完全漏掉),決定改用 ChatGPT
+  排程調研 + Claude Code 分析,讓 API 費用歸零。
+- **可行性評估(含一次實測)**:`claude_cli` provider 已實作,但實測發現**兩處新的不對等**——
+  ① claude.exe 在 text 模式把 JSON 包在 markdown fence 裡,而 `claude_cli` 分支漏了剝 fence
+  (`anthropic_api` 分支有),不修 100% 失敗;② **前次 state 未載入**(只給路徑不給內容),
+  模型明說「尚無前次分析狀態可供比較」,跨日迭代會靜默失效。
+  **實測證明 packet 不必內嵌**(`--add-dir` 讓模型自己 Read 可行)。
+- **階段 1 已上線**:`provider.py` 抽出共用 `_build_provider_prompt()`、補 fence 正規化、
+  嵌入 `latest_state.json`、加嚴格輸出約束;`claude_provider.yaml` 切 `provider: claude_cli`
+  (絕對路徑 + `--add-dir`,timeout 1200)。**途中修掉一個自己引入的 regression**:
+  `subprocess.run(text=True)` 未指定 encoding,cp950 遇 `Jalapeño` 的 `ñ` 直接爆;
+  且同一 bug 另一半會讓 stdout **靜默變成 None**(解碼失敗在 reader thread 被吞掉)。
+  驗證:schema valid、無 fence、`key_insights` 5(修前 8)、`active_themes` 7(修前 4/API 10)、
+  305 秒、46 測試全過。
+- **cron 環境憑證查證(唯讀)**:四條環境鏈全通——cron 用 `os.environ.copy()` 只刪不重建
+  (`USERPROFILE` 保留、`ANTHROPIC_API_KEY` 被刪)、gateway 由排程工作以 `razer/Interactive`
+  身分啟動、`claude.exe` 走 `os.homedir()` 有 `USERPROFILE` + process token 雙保險且不看 `HOME`。
+  **附帶好消息**:cron 會刪掉 API key,保證走訂閱不可能誤用 API 計費。
 
 ## 3. 卡住/未決的問題
 
+- **★ 09-02 08:00 是第一次「cron + claude_cli」**,尚未驗證。憑證解析已唯讀查證為高信心,
+  但真實 cron 環境沒跑過。**若失敗**:錯誤在 `AIChainOrchestrator\logs\<run_id>_aichain_claude_daily_auto.log`
+  的 stderr;**回滾一行**——`AIChainClaude\00_CONFIG\claude_provider.yaml` 改回
+  `provider: anthropic_api`,立即生效不必重啟。
+- **故障模式已改變**:分析失敗的原因從「API 回錯誤」變成「**訂閱額度不足**」。
+  **在 08:00 前後大量使用 Claude Code 會跟晨報搶額度。**(本次 session 就撞到兩次用量上限。)
+- **美股報價日期錯亂 bug(已診斷、使用者決定先不修)**:Yahoo 會回傳 `close: null` 的交易日 bar,
+  而 `market_context_collector.py:248-253` 濾掉 null 後**用位置取值**,整個交易日無聲消失。
+  三個獨立錯位放大它:`market_time` 來自 `meta` 不跟著位移、`volume` 又是第三套過濾
+  (實測 08-31 的 NVDA 是「週四價格 + 週五成交量 + 週五時間戳」)。**影響 `us_ai_chain`/
+  `tw_previous_close`/`macro` 三個 bucket**,09-01 報告的「費半重挫、Marvell 暴跌 12.34%」
+  方向是錯的(實際 NVDA +1.49%、MRVL −2.29%)。**是既有 bug 非近期引入**(備份檔有同一段邏輯,
+  且備份 mtime 晚於出錯的執行)。⚠️ **若日後砍掉 RSS 蒐集,市場數據會成為唯一量化證據,
+  這個 bug 就從技術債升級為上線阻斷項——兩個決定綁在一起。**
+- **「ChatGPT 08:00 前產出」尚未驗證**:手上唯一樣本是 **12:25** 產出的(搜尋時間窗結束 12:24,
+  內文有上午 11 點的新聞)。整個新架構壓在這個假設上。**連續觀察 3-5 天之前不應砍掉 RSS。**
+- **Slack 投遞靜默失敗仍在**:`send_ai_report_to_slack()` 各失敗路徑只 `print(stderr); return`,
+  外層 try/except 再吞一次,包裝腳本還硬編 `delivery: slack`。屬階段 3 範圍,本次未動。
+- **`average_volume` 名不副實**:欄位名是三個月均量,實際填的是 5 日視窗前 4 根的平均。
+  任何「爆量/量縮」判斷不可靠。長期存在,與本次改動無關。
+- **待使用者決定的三個下市/不存在條目**:`Great_Wall`(名冊查無)、`SPIL`(矽品已併入日月光)、
+  `Chilisin`(奇力新已併入國巨)。目前 0 命中無立即危害,建議移除但未動。
 - **明天(08-28)第一次自動執行的三個觀察點**:① Telegram 那行 `sources: relay ?/? -
   feeds 9/23 - tavily ?` 是否正常出現(這會驗掉「wrapper end-to-end 未跑過真實 cron」);
   ② 18 筆入選裡有沒有出現散熱/電源/機構件/網通(**A10 的真正驗收**——查詢有了不等於
@@ -263,37 +309,30 @@
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **① 明天(08-28)早上先看那三個觀察點**(見第 3 節第一項)。cron `cd3801e0daed` 已就緒,
-  `next_run_at: 2026-08-28T08:00:00+08:00`,**不需要任何人動手**。
-- **② AIChain 剩餘項目的建議順序**(前置依賴已查明,不可亂排):
-  1. **A11 修 web_search 的 recency/分類**(小時級)——Tavily 三筆的 relevance 全場最高
-     但 `recency=0` 導致 final 分數墊底;且它們靠「無分類桶」保送,結構性限制每天最多 3 筆。
-     **建議一併加來源型別配額下限**(保證 RSS 至少 N 筆、web_search 至少 M 筆),避免日後
-     互相洗版。
-  2. **A12 層級 A**(小時級)——開 `--dynamic-search` 但**必須先把 `financial_media` profile
-     關掉**:查詢計畫是照順序展開後直接截斷,該 profile 光自己就 316 條,不關的話
-     `industry_research`(TrendForce/SemiAnalysis)永遠跑不到、台股零覆蓋。**調低 cap 只會
-     讓覆蓋更窄,不是解法。**
-  3. **A8 修 14 條壞掉的官方 feed**(1 天)——**必須排在 A12 之後**,否則修好 feed 會關掉
-     Tavily 的觸發條件、全文覆蓋反而倒退。先補完整 UA 試三個 403(現用 UA 是**被截斷的**,
-     缺 `Chrome/xxx Safari` 尾段),再人工查八個 404 新網址。
-  4. **A6 evidence gate**(天級)——注意 B3-β 之後 `full_content` 已達 83%、relay 歸零,
-     **原設想的拒發門檻幾乎不可能觸發**,需重新校準;A6 的價值在「不發不可靠的報告」,
-     **不在省錢**(每月只省 0-2 次呼叫)。
-  5. **B2 送達驗證 + 新鮮度看門狗**(天級)——解決「Slack 沒送到沒人知道」與「cron 停跑
-     一週沒人發現」。看門狗**必須獨立於這條鏈之外**。
-  6. **B1 切 v2 契約**(天級,風險最高)——建議最後做。前面做完證據品質拉起來,v2 的嚴格
-     驗證才不會天天失敗;且與 `claude_cli` 試驗有先後順序問題(見第 3 節)。
-- **③ 未排程但已記錄**:`claude_cli` 品質試驗(見第 3 節)、雙 key 輪替、`max_excerpt_chars`
-  成本旋鈕(**目前刻意不動**,先讓它跑滿一個月看實際帳單)、稽核 artifact 的 relay 段更正
-  (該段寫「既有能力沒發揮」,實際上**該功能從未存在**)。
-- **④ 工作樹有四項與本次無關的未 commit 變更**(`webui/src/App.tsx`、`webui/src/globals.css`、
-  `agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`,webui typography patch,session 開始前就在),
-  兩次收尾 commit 都刻意未帶入,**待使用者決定去留**。
-- **原有的規劃面待辦**(08-15 起未動):分派 `planning` 把第 3 節的「遺留/待拍板議題清單」
-  排成帶優先序的議程提案。目前仍無開工中的 roadmap 階段。
-- **換 hermes 模型的正確程序**:改 `config.yaml` → **不用重啟** → 憑證頁重整即見新值。
-  正本在 auto-memory `hermes-profile-intended-config`。
-- **下次想升級 hermes**:按 fetch 鈕看落後數 → 說「升級 hermes」觸發 `/hermes-upgrade`。
-- `memory/inbox/` 有 2 個待整併檔(07-16 episode、07-31 skill catalog),下次
-  daily-memory-check 或手動 `/consolidate-memory` 收。
+- **① 09-02 早上先驗收 cron + claude_cli 的第一次真實執行**(見第 3 節第一項)。
+  約 08:08 出報告,看 Slack `#ai-chainresearch` 有沒有東西即可。
+- **② ChatGPT 調研路線的分階段計畫**(engineering 評估產出,依序):
+  - **階段 0｜觀測(零成本)**:ChatGPT 排程改到 08:00 前,連續 **3-5 個工作日**只看檔案
+    幾點出現。整個架構壓在這個假設上,目前唯一樣本是 12:25 產出的。
+  - **階段 1｜費用歸零** ✅ **已完成上線**(見第 2 節)
+  - **階段 2｜ChatGPT 檔當「補充」證據,不取代 RSS**(1.5-2 天):新寫
+    `chatgpt_research_reader.py`(沿用 `ManusResearchLoadResult` 契約,markdown parser,
+    **檔名日期須嚴格等於執行日**、交叉驗第一行標題、多檔匹配視為異常)。
+    檔案在 `C:\Users\razer\Documents\ChatGPT DailyStockResearch\`(**外層無日期子資料夾**),
+    命名如 `AI產業鏈調研_2026-09-01.md`。並行比較兩週再決定要不要砍 RSS。
+  - **階段 3｜fail-closed + 告警**(0.5-1 天):`verify_manus_packet_inclusion()` 狀態分支反轉、
+    07:30 預檢 + Telegram、reader 加 60 秒×3 重試、**cron 從 `0 8` 挪到 `30 8`**、
+    順手修 Slack 靜默失敗。
+  - **階段 4｜砍 RSS**(0.5 天但風險最高):三個前提都要滿足——階段 2 跑滿兩週且資料證實、
+    Yahoo 位移 bug 已修、實跑確認 `--market-context` 單獨模式下 `daily/{date}.md` 仍 ≥1000 bytes。
+- **③ 已查證可做、尚未排的**:
+  - **接 TPEx 法人買賣超**(約 3 小時)——端點已實測打通,接完六檔上櫃股才有流向,
+    `tw_ai_component_supply_chain` 才有機會被真正評估
+  - **修 Yahoo 報價位移 bug**(2.5-3.5 小時)——timestamp 對齊取值 + 防呆告警 +
+    順手修價量錯位;建議一併開始保存 Yahoo 原始回應到 `raw/`,否則下次同類事故查不出來
+- **原有的規劃面待辦**(08-15 起未動):分派 `planning` 把第 3 節的遺留議題排成帶優先序的議程。
+  目前仍無開工中的 roadmap 階段。
+- **工作樹有四項與 AIChain 無關的未 commit 變更**(`webui/src/App.tsx`、`webui/src/globals.css`、
+  `agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`,webui typography patch),三次收尾 commit
+  都刻意未帶入,**待使用者決定去留**。
+- `memory/inbox/` 有 2 個待整併檔,下次 daily-memory-check 或手動 `/consolidate-memory` 收。
