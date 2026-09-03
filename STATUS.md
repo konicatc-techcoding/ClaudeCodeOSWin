@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-09-01
+**最後更新**:2026-09-03
 
 ---
 
@@ -50,7 +50,9 @@
   移除、streamlit 相依與 8501 launch 設定移除,**新 Web UI 是唯一觀測面**;
   Stage 5 至此無任何剩餘事項。資料層(`dashboard/data*.py`/`api.py`)全數保留。
 - **Roadmap 上 Stage 0–5 全數關閉**,目前沒有「開工中」的階段;剩下的是階段
-  遺留與待拍板議題(見第 3 節),下一個要開的規劃另議。
+  遺留與待拍板議題(見第 3 節),**已有帶優先序的開工順序**(2026-09-03 由 `planning` 產出,
+  補掉 08-15 起掛著的議程項):清場(0) → 止血(1) → 校正脈絡(2) → 規則引擎(3)
+  → 集中拍板(4) → 執行(5) → 收尾(6),序列執行。
 - **Hermes-agent 兩側已升 v0.19.1 且對齊(08-04,首次完整走受控升級流程)**:
   兩側 HEAD 皆 `aa65ff286`(= 客製 tip × 官方 tag `v2026.7.30` 受控 merge,
   engineering 隔離 worktree 產出),live 驗證全過(doctor/allowlist 負面
@@ -96,76 +98,71 @@
 
 ## 2. 上一個 session 做了什麼
 
-(涵蓋 08-28 至 09-01。**repo 端仍只有 STATUS 快照**——AIChain 實作全在版控之外的
-`HermesWorkspace\HermesAgent\{AIChainOrchestrator,DailyAIChainResearchV2}`、
-`HermesWorkspace\GptCoding\AIChainClaude` 與 `%LOCALAPPDATA%\hermes`,改完即生效、無 commit。
-所有改動皆有 `.bak.2026082x` / `.bak.2026090x` 備份。)
+(2026-09-03,單一 session,主題是**系統面盤點與開工順序規劃**——規劃層推進一大格,
+執行層零推進。本次唯一的檔案變更是 `memory/` 兩個檔;webui 那四項未 commit 變更
+第四次刻意未帶入。)
 
-### 排序層整治(08-28~08-31)——問題不在搜尋,在排序
+### 系統面完整盤點(28 項,分六類)
 
-- **intelligence 領域診斷**:08-28 的 801 筆原始採集裡,雙鴻擴產、世界先進擴產、力成獲博通
-  包產能全都撈到了,**是 scorer 丟掉的**。三次獨立驗證(基本面素材全滅、緯穎舊文靠最低分保送、
-  31 筆關稅新聞全滅而電競公關稿入選)。
-- **Tier 0(1/3/4)**:重建 `company_aliases.yaml`(從 TWSE/TPEx OpenAPI 核對,修 10 組錯誤對映
-  含 `Auras→榮成`實為雙鴻、`PTI→豐達`實為力成;新增 12 家);修 `media_credibility` 方向
-  (原本「列入白名單=被懲罰」)並加 official/regulatory 豁免。**項目 3(刪 7 條聚合查詢)查證後
-  停手**——席次會流向無分類桶,品質反而下降。項目 2(訊號組)使用者不做。
-- **A11b + 兩個借自 Manus 腳本的排序設計**:新類別 `tw_ai_component_supply_chain` 置於類別列表
-  **最前**(關鍵:分類是查詢執行順序的產物,放後面會被泛用查詢搶走);`taiwan_relevance` 接收
-  死掉的 `memory` 0.15 權重、含 40 個環節詞;跨桶輪詢取件;`min_final_score: 0.40` 垃圾門檻。
-  **台廠零組件 0/18 → 3/20**。
-- **A11a**:跨日帳本 `state/item_ledger.json`(只記入選項、保留 14 天、排除窗 7 天)、
-  無分類上限改為跨桶共用額度(4→1 席)、web_search 補分類(80 筆入選 0 筆,證明它們過去
-  唯一入場券就是無競爭桶)。**同事件偵測評估後不做**——SK hynix 真同事件相似度 0.398,
-  而「緯創個股概覽 vs 光寶科個股概覽」誤配是 0.892,**誤配是真陽性的 2.2 倍**。
-- **報告可讀性**:新增「今日證據品質」一句話評級(門檻寫進 `report_rules.yaml`)、
-  「台股開盤觀察」只留台股上市櫃且顯示中文名。
-- **08-31 系統性掃描**:再修 10 個問題——5 組重複 canonical(`TSM` 是 `TSMC` 的子字串、
-  `IBI`/`Hon_Hai`/`Apex`/`NanYaPCB`)、`Supermicro` 別名「超微」在台灣指 AMD(改「美超微」)、
-  移除 `ase`/`tel` 裸別名(`'ase'` 命中 increased/based、`'tel'` 命中 intelligence,**每天約
-  65 筆錯誤公司標記**)。
+- 依第 3 節與**實際開檔核對 ROADMAP.md** 產出:需拍板 7、可直接動手 11(合計約半天)、
+  結構性風險 4、觀察待觸發 5、文件過時 1 份、工作樹雜項 2。
+- **核對出 ROADMAP.md 四處與現實脫節**:開頭仍寫「Windows 側 bridge／Task Scheduler
+  是未來選項、**尚未實作**」(實際已上線數月且是主要 runtime,最會誤導新 session 的一句)、
+  Milestone 表停在 `v0.1-beta`(2026-07-04)、「下一步」段落過時、「已知技術債」四項從未複查。
+- 判讀:**系統面沒有任何「做到一半」的實作,全部卡在決策層**。
 
-### 市場數據層(09-01)
+### 開工順序規劃(planning 產出)
 
-- **法人買賣超接進 `market_gate`**:資料一直在抓(T86)但 gate 說 `unavailable`,是**被自己截成
-  前 20 名**丟掉的。改為保留全上市 `by_ticker`(26KB,同一請求)。台廠零組件標的命中 1→5 檔。
-  `hyperscaler_capex` 的 `tactical_bias_allowed` **首次翻成 true**(四項條件獨立成立);
-  `ai_hardware_semiconductor` 從 unavailable 變 **contradicted**(台積電 +124 萬 vs 華邦電
-  −3,881 萬,舊碼會讓量體小的一邊決定結論)。門檻寫進 `market_gate.yaml`。
-- **報價名冊 6 → 55 檔**(49 上市 + 6 上櫃,`.TWO` 格式),順帶解掉 canonical→股號正式對照
-  (55 個對到、0 歧義)。**擴大名冊讓判定更嚴不是更鬆**:`ai_hardware_semiconductor` 相對強度
-  從 confirmed 變 contradicted,因為現在看得到南亞科 −0.18%、華邦電 −2.42%。
-  途中拆掉一顆地雷:原本**任一檔報價失敗會讓整個 market_context 變空**。
-- **TPEx 法人買賣超端點打通(尚未接)**:前一輪 8 個候選全 520 是猜錯路徑家族;正解是
-  `www.tpex.org.tw/www/zh-tw/insti/dailyTrade?type=Daily&sect=EW&date=YYYY/MM/DD&response=json`,
-  917 列、口徑與 T86 一致、六檔上櫃股全在內、與 T86 合併零碰撞。**評估後 Yahoo 買賣超排行
-  判定不可用**(只有外資非三大法人、硬上限 100 名、且系統性漏掉非外資主導的賣壓)。
+- 七批次序列,核心判斷是 **A 類 7 項不該是 7 個 session**,而是 1 個起草 + 1 個集中拍板。
+  拍板排第四不是拖延——前三批要先給它乾淨的工作樹、正確的 runtime 脈絡與草案。
+- **建議 6 項直接結案**(28→22,尚未生效,要等批次 4 拍板):更新按鈕階段二判死
+  (0.19.1 實戰已否證其價值前提)、Lane `provider` 正名改為文件註記、黃燈精準度降級為
+  觀察項、lane session 觀測缺口下半關閉、keepalive watchdog 補「三個月內再發生一次
+  WSL 靜默死亡即升級」的重啟條件、白天撞 WAL 關閉待辦。
+- 產出兩份規劃 artifact(盤點清單、開工順序),**不在版控內**。
 
-### ★ 架構轉向:分析改走訂閱制(09-01)
+### 模型路由脈絡包落地(knowledge)
 
-- **背景**:使用者判斷現有 web search 調研品質不佳(當日實例:管線抓到三則媒體轉載,
-  而 ChatGPT 抓到 NVIDIA/聯發科**官方聯合發布**本身,管線完全漏掉),決定改用 ChatGPT
-  排程調研 + Claude Code 分析,讓 API 費用歸零。
-- **可行性評估(含一次實測)**:`claude_cli` provider 已實作,但實測發現**兩處新的不對等**——
-  ① claude.exe 在 text 模式把 JSON 包在 markdown fence 裡,而 `claude_cli` 分支漏了剝 fence
-  (`anthropic_api` 分支有),不修 100% 失敗;② **前次 state 未載入**(只給路徑不給內容),
-  模型明說「尚無前次分析狀態可供比較」,跨日迭代會靜默失效。
-  **實測證明 packet 不必內嵌**(`--add-dir` 讓模型自己 Read 可行)。
-- **階段 1 已上線**:`provider.py` 抽出共用 `_build_provider_prompt()`、補 fence 正規化、
-  嵌入 `latest_state.json`、加嚴格輸出約束;`claude_provider.yaml` 切 `provider: claude_cli`
-  (絕對路徑 + `--add-dir`,timeout 1200)。**途中修掉一個自己引入的 regression**:
-  `subprocess.run(text=True)` 未指定 encoding,cp950 遇 `Jalapeño` 的 `ñ` 直接爆;
-  且同一 bug 另一半會讓 stdout **靜默變成 None**(解碼失敗在 reader thread 被吞掉)。
-  驗證:schema valid、無 fence、`key_insights` 5(修前 8)、`active_themes` 7(修前 4/API 10)、
-  305 秒、46 測試全過。
-- **cron 環境憑證查證(唯讀)**:四條環境鏈全通——cron 用 `os.environ.copy()` 只刪不重建
-  (`USERPROFILE` 保留、`ANTHROPIC_API_KEY` 被刪)、gateway 由排程工作以 `razer/Interactive`
-  身分啟動、`claude.exe` 走 `os.homedir()` 有 `USERPROFILE` + process token 雙保險且不看 `HOME`。
-  **附帶好消息**:cron 會刪掉 API key,保證走訂閱不可能誤用 API 計費。
+- `memory/hermes-task-category-model-routing-preference.md` 由 14 行擴為約 190 行
+  (+214/-6):18 條既有決策表(「什麼情況 → 選了什麼 → 為什麼」)、現況機制實際值、
+  額度約束的「寫在哪裡／機器可讀與否」判定、三個現存陷阱、15 項脈絡缺口。
+- 四個最有價值的判斷寫在檔案最前面:**既有決策已經是事實上的規則**(草案該形式化而非
+  另起爐灶)、**D8 是唯一「按任務性質選模型」的先例且不應假設可推廣**、**D18「不強制
+  路由」與自動選模型引擎有直接張力**、**額度約束全無機器可讀形式**(配額耗盡的既有
+  處理方式實質上就是使用者當場手改 `config.yaml`)。
+- `memory/MEMORY.md` 索引同步一行,把三個警訊直接放進索引本身,讓下次 recall 掃索引即可見。
+
+### ★ Phase 2f 查證(engineering 唯讀)——推翻了一個假前提
+
+- **「Phase 2f」在專案裡沒有權威定義**。它是 07-20/21 一次長 session 事後貼上的臨時編號,
+  **在三份文件裡指三件不同的事**(`capability_lanes.yaml:298` financialresearch 憑證清理／
+  roadmap:659 lane 轉 active+補文件／使用者自己註解的「讓 subagent 真正呼叫」)。
+  `Phase 2c` 全 repo 零命中;編號從未進過任何 commit message。
+- **前置條件後半明確不成立**:`logs/dispatch_domain/` 共 14 筆、成功率 11/14、
+  **最後一筆 2026-08-03,至今整整一個月零執行**、**14 筆全部帶明確 `--lane` override,
+  自動選路徑一次都沒被走過**、全部是驗證/測試性質,沒有一筆是自然發生的日常任務。
+- **真正的死結是循環依賴**:「工具存在但沒人用」從來沒被排進任何 phase;要累積使用經驗
+  得先有「什麼情況該走 lane」的判準,而那正是規則引擎本身。
+- 附帶澄清:`dispatch_domain.py` docstring 的「不被 CoS／worker.py 呼叫」**今天依然
+  字面為真**(全 repo 無自動呼叫點),與 STATUS 的「端到端驗證有效」不矛盾——兩者描述
+  不同層次(人工觸發跑得通 vs 沒有自動呼叫點)。
 
 ## 3. 卡住/未決的問題
 
-- **★ 09-02 08:00 是第一次「cron + claude_cli」**,尚未驗證。憑證解析已唯讀查證為高信心,
+- **★ 模型路由規則引擎:兩個必須先拍的板(09-03 新增,阻斷批次 3)**:
+  (a) **循環依賴**——「工具存在但沒人用」從未被排進任何 phase,要累積使用經驗得先有
+  判準,判準就是引擎本身;**不該再等一個不存在的 Phase 2f 里程碑**。
+  (b) **規則是建議還是強制**——2026-07-23 已拍板「Hermes = opt-in 執行後端,**不強制
+  路由**」,一個「自動選」的引擎要不要覆蓋這條,尚未拍板。這一題會反過來改寫其他議題
+  的形狀,**必須先於批次 4 的其他議程**。脈絡正本已備齊在
+  `memory/hermes-task-category-model-routing-preference.md`。
+- **`scripts/dispatch_domain.py` docstring 措辭過時(09-03 新增)**:檔頭「接線是
+  Phase 2」與第 2 行「v0.1(Phase 1)」標籤從未更新——2a–2h 全做完,卻沒有一個 phase
+  真的做接線。建議併入批次 2(脈絡校正)與 ROADMAP 一起修。
+- **phase 編號體系本身不可信(09-03 新增)**:2a–2h 是流水帳式事後編號,`2c` 不存在、
+  `2e`/`2f` 一號多義、從未進 commit message。**日後引用 phase 編號前先查證語意**。
+
+- **★ cron + claude_cli 至今仍未驗收(09-02、09-03 兩次排程皆已跑過,無人確認)**。憑證解析已唯讀查證為高信心,
   但真實 cron 環境沒跑過。**若失敗**:錯誤在 `AIChainOrchestrator\logs\<run_id>_aichain_claude_daily_auto.log`
   的 stderr;**回滾一行**——`AIChainClaude\00_CONFIG\claude_provider.yaml` 改回
   `provider: anthropic_api`,立即生效不必重啟。
@@ -228,7 +225,8 @@
   是 no-op 的前提是 `main == origin/main`。**一旦有客製 commit 沒 push 到私有
   備份,桌面 Install 鈕就會吃掉它們**——中和繫於「每次客製後都要 push」的人為
   紀律,不是結構保證。升級預檢已會在 `ahead > 0` 時亮橙告警。
-- **遺留/待拍板議題清單(08-15 盤點,建議由 `planning` 排成一份帶優先序的議程)**:
+- **遺留/待拍板議題清單(08-15 盤點;09-03 已由 `planning` 排成帶優先序的七批次順序,
+  本項僅留作索引)**:
   待拍板=telegram-cos-realtime 草案(併 Telegram 出口格式缺口)、headless session
   記憶失效機制、更新按鈕階段二「還做不做」、launcher `-Restart`、「依任務類型
   自動選模型」規則引擎(需 planning 起草);小修=lane session 觀測缺口下半、
@@ -309,30 +307,26 @@
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **① 09-02 早上先驗收 cron + claude_cli 的第一次真實執行**(見第 3 節第一項)。
-  約 08:08 出報告,看 Slack `#ai-chainresearch` 有沒有東西即可。
-- **② ChatGPT 調研路線的分階段計畫**(engineering 評估產出,依序):
-  - **階段 0｜觀測(零成本)**:ChatGPT 排程改到 08:00 前,連續 **3-5 個工作日**只看檔案
-    幾點出現。整個架構壓在這個假設上,目前唯一樣本是 12:25 產出的。
-  - **階段 1｜費用歸零** ✅ **已完成上線**(見第 2 節)
-  - **階段 2｜ChatGPT 檔當「補充」證據,不取代 RSS**(1.5-2 天):新寫
-    `chatgpt_research_reader.py`(沿用 `ManusResearchLoadResult` 契約,markdown parser,
-    **檔名日期須嚴格等於執行日**、交叉驗第一行標題、多檔匹配視為異常)。
-    檔案在 `C:\Users\razer\Documents\ChatGPT DailyStockResearch\`(**外層無日期子資料夾**),
-    命名如 `AI產業鏈調研_2026-09-01.md`。並行比較兩週再決定要不要砍 RSS。
-  - **階段 3｜fail-closed + 告警**(0.5-1 天):`verify_manus_packet_inclusion()` 狀態分支反轉、
-    07:30 預檢 + Telegram、reader 加 60 秒×3 重試、**cron 從 `0 8` 挪到 `30 8`**、
-    順手修 Slack 靜默失敗。
-  - **階段 4｜砍 RSS**(0.5 天但風險最高):三個前提都要滿足——階段 2 跑滿兩週且資料證實、
-    Yahoo 位移 bug 已修、實跑確認 `--market-context` 單獨模式下 `daily/{date}.md` 仍 ≥1000 bytes。
-- **③ 已查證可做、尚未排的**:
-  - **接 TPEx 法人買賣超**(約 3 小時)——端點已實測打通,接完六檔上櫃股才有流向,
-    `tw_ai_component_supply_chain` 才有機會被真正評估
-  - **修 Yahoo 報價位移 bug**(2.5-3.5 小時)——timestamp 對齊取值 + 防呆告警 +
-    順手修價量錯位;建議一併開始保存 Yahoo 原始回應到 `raw/`,否則下次同類事故查不出來
-- **原有的規劃面待辦**(08-15 起未動):分派 `planning` 把第 3 節的遺留議題排成帶優先序的議程。
-  目前仍無開工中的 roadmap 階段。
-- **工作樹有四項與 AIChain 無關的未 commit 變更**(`webui/src/App.tsx`、`webui/src/globals.css`、
-  `agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`,webui typography patch),三次收尾 commit
-  都刻意未帶入,**待使用者決定去留**。
-- `memory/inbox/` 有 2 個待整併檔,下次 daily-memory-check 或手動 `/consolidate-memory` 收。
+**照批次順序走,序列執行(ROADMAP「不同時開兩個能力」)。**
+
+- **批次 0｜清場(30–45 分)**:① webui 那四項未 commit 變更去留拍板(`App.tsx` +108/-34、
+  `globals.css` +269、`agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`)——**這是所有
+  engineering 批次的前置**;② `memory/inbox/` 兩個待整併檔(`/consolidate-memory`;
+  其中 34KB 那份 hermes session 記錄可能含 lane 使用事實);③ Stage 0.5 殘項查證,過時即刪;
+  ④ 觀察類 5 項各補到期日。
+- **批次 1｜止血**:把「預檢 `ahead>0` 亮橙」升級為主動保護(未 push 的客製 commit 不能被
+  桌面 Install 鈕靜默吃掉);順手修 `dashboard/data_stage3.py:76` 裸 import。
+  **這是清單裡唯一會造成不可逆損失的項目。**
+- **批次 2｜脈絡校正**:ROADMAP.md 四處翻修 + 技術債四項判定,**併入 `dispatch_domain.py`
+  docstring**。要在拍板之前做完。
+- **批次 3｜規則引擎**:性質已改變,**起草前先拍板**(見第 3 節第一項)。脈絡已備齊。
+- **批次 4｜集中拍板(60–90 分)**:議程第 0 項=模型路由的循環依賴與「建議 vs 強制」;
+  接著 `/cos`+Telegram 出口格式(合併議)、headless 記憶失效(傾向做)、launcher `-Restart`、
+  systemd 雙軌、以及 6 項建議結案的確認。**避開 07:30–08:30**(搶晨報訂閱額度)。
+- **批次 5｜執行拍板結果**;**批次 6｜低優先收尾**(三項 UI 小修打包、Hermes UI 設定維護
+  獨立 session、Tavily key、bridge/PTY `/code-review ultra`)。
+
+**與 AIChain 那條線的插隊項**(不在批次內,但時效已過):先確認 09-02/09-03 兩次
+`cron + claude_cli` 的實際結果——看 Slack `#ai-chainresearch` 有沒有東西;失敗證據在
+`AIChainOrchestrator\logs\<run_id>_aichain_claude_daily_auto.log` 的 stderr,回滾一行
+(`claude_provider.yaml` 改回 `provider: anthropic_api`,即時生效)。
