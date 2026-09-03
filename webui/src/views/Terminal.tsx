@@ -188,12 +188,11 @@ export default function TerminalView() {
   return (
     <>
       <header className="topbar">
+        {/* topbar 結構與其餘 view 一致(.page-kicker + h1 平排;頁面說明移到
+            內容區的 .page-caption),見 App.tsx 的 topbar 改版說明 */}
         <div className="page-identity">
-          <span>CLAUDECODE CLI</span>
-          <div>
-            <h1>ClaudeCode CLI</h1>
-            <p>完整前台 claude 終端機(cwd=repo 根,session 即 CoS)——唯一的寫入型 view。</p>
-          </div>
+          <span className="page-kicker">CLAUDECODE CLI</span>
+          <h1>ClaudeCode CLI</h1>
         </div>
         <div className="top-actions">
           <div className="hermes-top-controls">
@@ -220,6 +219,7 @@ export default function TerminalView() {
       </header>
 
       <div className="main-content">
+        <p className="page-caption">完整前台 claude 終端機(cwd=repo 根,session 即 CoS)——唯一的寫入型 view。</p>
         {/* 提案 §7:不可移除的警語(無任何關閉/摺疊控制) */}
         <p className="terminal-warning">{TERMINAL_PAGE_WARNING}</p>
 

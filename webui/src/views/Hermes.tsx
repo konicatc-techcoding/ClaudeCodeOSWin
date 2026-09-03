@@ -77,12 +77,11 @@ export default function HermesView() {
   return (
     <>
       <header className="topbar">
+        {/* topbar 結構與其餘 view 一致(.page-kicker + h1 平排;頁面說明移到
+            內容區的 .page-caption),見 App.tsx 的 topbar 改版說明 */}
         <div className="page-identity">
-          <span>HERMES CONTROL</span>
-          <div>
-            <h1>Hermes Dashboard</h1>
-            <p>在 AgentOS 內啟動並管理 Hermes(僅限本 Bridge 啟動的 process)。</p>
-          </div>
+          <span className="page-kicker">HERMES CONTROL</span>
+          <h1>Hermes Dashboard</h1>
         </div>
         <div className="top-actions">
           <div className="hermes-top-controls">
@@ -107,6 +106,11 @@ export default function HermesView() {
 
       <div className="main-content hermes-content">
         <div className={isOnline ? "hermes-page is-online" : "hermes-page"}>
+          {/* 頁面說明:僅在未上線時顯示——is-online 時 .hermes-page 是
+              滿版高度容器(gap 0),多一個區塊會把 iframe 擠出可視範圍 */}
+          {!isOnline && (
+            <p className="page-caption">在 AgentOS 內啟動並管理 Hermes(僅限本 Bridge 啟動的 process)。</p>
+          )}
           {!isOnline && (
             <section className="hermes-launch-card compact-launch-card">
               <div className="hermes-launch-copy">

@@ -566,8 +566,12 @@ test("cascade:pill 的其他屬性未被 .update-facts span 汙染", async () =>
 test("cascade:對照組——同容器的一般標籤 span 仍為 --muted(證明解析器有反映該規則)", async () => {
   const css = await readFile(join(root, "src", "globals.css"), "utf8");
   const style = computeStyle(css, LABEL_CHAIN);
-  assert.equal(style.color, "#8f96a6", "標籤 span 應維持 --muted 灰");
-  assert.equal(style["text-transform"], "uppercase");
+  // --muted 於排版修正層(2026-08-15)由 #8f96a6 調為 #9aa1b1;
+  // 同層的 .update-facts span 也把 uppercase 改為 none(中文不適用大寫)。
+  // 本測試的目的不變:證明解析器確實反映了 .update-facts span 這條規則,
+  // 一般標籤 span 仍解析為 --muted 灰(與 pill 的 --green 形成對照)。
+  assert.equal(style.color, "#9aa1b1", "標籤 span 應維持 --muted 灰");
+  assert.equal(style["text-transform"], "none");
 });
 
 test("cascade 解析器有偵錯能力:還原成舊的低特異性寫法時,會抓到 color 變灰", async () => {
@@ -578,7 +582,7 @@ test("cascade 解析器有偵錯能力:還原成舊的低特異性寫法時,會�
     .replace(".update-facts .update-tree-dirty {", ".update-tree-dirty {");
   assert.notEqual(buggy, css, "測試前提:必須真的改到規則");
   const style = computeStyle(buggy, chainFor("update-tree-clean"));
-  assert.equal(style.color, "#8f96a6",
+  assert.equal(style.color, "#9aa1b1",
     "bug 版本應被解析器抓出 color 退化為 --muted 灰(證明本測試不是空過)");
 });
 

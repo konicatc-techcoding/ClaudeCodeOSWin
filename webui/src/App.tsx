@@ -16,22 +16,51 @@ import UpdatePrecheckView from "./views/UpdatePrecheck";
 // 所有畫面數字都來自 fetch,零硬編假資料(P0 DoD 第 4 條在 P1 繼續成立)。
 // P2:Stage 3 三項觀測功能——排程健康表(併入總覽,stage3 提案 §4.3)、
 // 憑證/Lane 狀態、Hermes Sessions,全部唯讀。
-
-// P3:ClaudeCode CLI(PTY 真終端機,唯一的寫入型 view)——nav 位置在
-// 總覽與 Jobs 之間(使用者原話指定),設計正本 docs/webui-pty-terminal-proposal.md。
+// P3:ClaudeCode CLI(PTY 真終端機,唯一的寫入型 view),設計正本
+// docs/webui-pty-terminal-proposal.md。
+//
+// 2026-08-15 導覽改版(純呈現層,不動任何 view 的行為與取數):
+//   (a) 十項平鋪 → 三組(觀測/操作/治理)。掃描時先選組再選項,
+//       比一次讀十個標題+十行副標便宜。
+//   (b) 副標只在 active 項顯示——原本十行副標常駐,760px 以下又整個
+//       display:none,本來就不是必要資訊。
+//   (c) ClaudeCode CLI 是唯一寫入型 view,導覽上以 Claude 橘圖示標記,
+//       與唯讀項在視覺上分開(色票沿用 --claude-orange,不新增語意色)。
+//   ⚠ 既有約定:CLI 必須放在「總覽與 Jobs 之間」(拍板過的順序,
+//     tests/ui-static.test.mjs 鎖定)。分組時一度把它移到〔操作〕組首位,
+//     2026-09-03 拍板回復原順序:terminal 留在〔觀測〕組第二位,三組結構保留。
+//     它仍是寫入型 view,以 Claude 橘圖示(nav-icon-write)與唯讀項區分。
 type ViewId = "overview" | "terminal" | "jobs" | "cost" | "memory" | "logs" | "sessions" | "credentials" | "update" | "hermes";
 
-const NAV_ITEMS: ReadonlyArray<{ id: ViewId; icon: string; title: string; sub: string }> = [
-  { id: "overview", icon: "O", title: "總覽", sub: "Worker / Jobs / 排程表" },
-  { id: "terminal", icon: ">", title: "ClaudeCode CLI", sub: "CoS 終端機(前台 session)" },
-  { id: "jobs", icon: "J", title: "Jobs", sub: "List & Detail" },
-  { id: "cost", icon: "$", title: "成本", sub: "Cost Summary" },
-  { id: "memory", icon: "M", title: "Memory", sub: "Inbox & Files" },
-  { id: "logs", icon: "L", title: "Logs", sub: "Tail Viewer" },
-  { id: "sessions", icon: "S", title: "Hermes Sessions", sub: "唯讀 session 列表" },
-  { id: "credentials", icon: "C", title: "憑證/Lane 狀態", sub: "治理中繼資訊(唯讀)" },
-  { id: "update", icon: "U", title: "Hermes 更新", sub: "唯讀升級預檢(階段一)" },
-  { id: "hermes", icon: "H", title: "Hermes Dashboard", sub: "Control & Settings" },
+type NavItem = { id: ViewId; icon: string; title: string; sub: string; write?: true };
+
+// 分組:觀測(唯讀資料)/ 操作(有寫入或外部控制)/ 治理(中繼資訊與升級)
+const NAV_GROUPS: ReadonlyArray<{ label: string; items: ReadonlyArray<NavItem> }> = [
+  {
+    label: "觀測",
+    items: [
+      { id: "overview", icon: "O", title: "總覽", sub: "Worker / Jobs / 排程表" },
+      { id: "terminal", icon: ">", title: "ClaudeCode CLI", sub: "CoS 終端機(前台 session)", write: true },
+      { id: "jobs", icon: "J", title: "Jobs", sub: "List & Detail" },
+      { id: "cost", icon: "$", title: "成本", sub: "Cost Summary" },
+      { id: "memory", icon: "M", title: "Memory", sub: "Inbox & Files" },
+      { id: "logs", icon: "L", title: "Logs", sub: "Tail Viewer" },
+      { id: "sessions", icon: "S", title: "Hermes Sessions", sub: "唯讀 session 列表" },
+    ],
+  },
+  {
+    label: "操作",
+    items: [
+      { id: "hermes", icon: "H", title: "Hermes Dashboard", sub: "Control & Settings", write: true },
+    ],
+  },
+  {
+    label: "治理",
+    items: [
+      { id: "credentials", icon: "C", title: "憑證 / Lane 狀態", sub: "治理中繼資訊(唯讀)" },
+      { id: "update", icon: "U", title: "Hermes 更新", sub: "唯讀升級預檢(階段一)" },
+    ],
+  },
 ];
 
 const PAGE_META: Record<Exclude<ViewId, "hermes" | "terminal">, { kicker: string; title: string; desc: string }> = {
@@ -67,22 +96,32 @@ export default function App() {
             聚合燈——它常駐訂閱 resident 共享 store,輪詢不因切 view 停止。 */}
         <ResidentStatus />
 
-        <p className="nav-label">WORKSPACE</p>
         <nav className="main-nav" aria-label="主要功能">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              className={activeView === item.id ? "nav-item active" : "nav-item"}
-              type="button"
-              onClick={() => setActiveView(item.id)}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              <span>
-                <b>{item.title}</b>
-                <small>{item.sub}</small>
-              </span>
-              <i>›</i>
-            </button>
+          {NAV_GROUPS.map((group) => (
+            <div className="nav-group" key={group.label}>
+              <p className="nav-label">{group.label}</p>
+              {group.items.map((item) => {
+                const active = activeView === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    className={active ? "nav-item active" : "nav-item"}
+                    type="button"
+                    onClick={() => setActiveView(item.id)}
+                  >
+                    {/* 寫入型 view 的圖示走 Claude 橘,唯讀走紫 */}
+                    <span className={item.write ? "nav-icon nav-icon-write" : "nav-icon"}>{item.icon}</span>
+                    <span className="nav-text">
+                      <b>{item.title}</b>
+                      {/* 副標只在 active 項顯示:平時十行說明是雜訊,
+                          需要時(正在這一頁)才有意義 */}
+                      {active && <small>{item.sub}</small>}
+                    </span>
+                    <i>›</i>
+                  </button>
+                );
+              })}
+            </div>
           ))}
         </nav>
       </aside>
@@ -101,16 +140,18 @@ export default function App() {
 
         {activeView !== "hermes" && activeView !== "terminal" && (
           <>
+            {/* topbar 改版:原本 kicker 用 writing-mode 直排(佔 84px 高、
+                可讀性差、只是重複右邊標題),改為標題同列的平排小字;
+                長說明(update 那段近 80 字)自固定高的 header 移入內容區,
+                header 不再被文字撐爆。 */}
             <header className="topbar">
               <div className="page-identity">
-                <span>{PAGE_META[activeView].kicker}</span>
-                <div>
-                  <h1>{PAGE_META[activeView].title}</h1>
-                  <p>{PAGE_META[activeView].desc}</p>
-                </div>
+                <span className="page-kicker">{PAGE_META[activeView].kicker}</span>
+                <h1>{PAGE_META[activeView].title}</h1>
               </div>
             </header>
             <div className="main-content">
+              <p className="page-caption">{PAGE_META[activeView].desc}</p>
               {activeView === "overview" && <Overview />}
               {activeView === "jobs" && <JobsView />}
               {activeView === "cost" && <CostView />}
