@@ -231,11 +231,21 @@
   記憶失效機制、更新按鈕階段二「還做不做」、launcher `-Restart`、「依任務類型
   自動選模型」規則引擎(需 planning 起草);小修=lane session 觀測缺口下半、
   預檢「依賴同步狀態」欄位、排程表 `n/a` 措辭、憑證頁三燈 CSS、bridge 三單元
-  雙軌確認、Stage 0.5 殘項是否早已過時;文件=根 ROADMAP.md 里程碑/技術債過時。
+  雙軌確認;文件=根 ROADMAP.md 里程碑/技術債過時。
+  (**「Stage 0.5 殘項是否早已過時」已於 09-03 查證後結案移除**——三項殘項全數過時:
+  ① financialresearch 自啟腳本→`multiplex_profiles: true`,named profile 不再各自起
+  gateway,腳本本身無存在意義;② 三個殭屍 Startup vbs→兩個 Startup 目錄實地檢查
+  已無任何 vbs;③ sticky profile 緩解→唯一的自動化呼叫路徑 `scripts/dispatch_domain.py`
+  已硬性帶 `--profile`(:598,docstring:18 明文禁止依賴 sticky),慣例另記於
+  `memory/hermes-profile-sticky-vs-ephemeral.md`。)
   各項細節仍散在下方條目,清單只是索引。
 - **`gptcoding` 憑證 `last_status` 仍顯示 `exhausted`(last_refresh 08-02)**:
   該欄只在 lane 被實際呼叫時更新,不代表配額仍耗盡;下次 gptcoding lane 真實
   呼叫成功即自癒、憑證頁黃燈退綠。不需動作,只是別誤讀。
+  (**觸發:下一次真實呼叫 gptcoding lane 時順帶確認**——若呼叫成功但 `last_status`
+  仍是 `exhausted`,那就不是「設計如此」而是欄位更新有 bug,改開 engineering 修;
+  若在 2026-12-31 前都沒有任何真實呼叫發生,直接結案刪除本項——一條一整季沒人用的
+  lane,它的憑證燈號本來就不值得追。)
 - **`dashboard/data_stage3.py:76` 裸 `import data_systemd_wsl`**(08-15 engineering
   附帶觀察):從 repo 根 `import dashboard.data_stage3` 會 `ModuleNotFoundError`,
   現行 api.py 在 `dashboard/` 目錄下起所以沒事;之後有人從 repo 根 import 會踩到。
@@ -273,11 +283,18 @@
   預設 profile 的呈現層缺口。待議,優先級降。
 - **A1 驗收已結案(08-03,紀錄正本=提案 §7)**:唯一留給自然流量的是
   首個多輪 named episode 落地檔的目視(render 有單測釘格式)。
+  (**觸發:下一次 `memory/inbox/` 出現 named profile 的 session 匯入檔時,整併前
+  順手目視一次即結案**——不必為它單獨排 session。**到期:2026-10-28**(與 retention
+  冷啟動同日);屆時若一次 named episode 都沒落地,那要問的不是「格式對不對」而是
+  「named profile 到底有沒有在被使用」,本項改結案並改記為 lane 使用率問題。)
 - **白天手動跑 bridge 掃描可能撞 WAL**(08-02 觀察):忙時段 WSL 經
   /mnt/c 對主 db 快照會輸給高頻寫入(fail-loud 三次重試放棄,設計行為);
   每日 08:05 排程時段實績皆成功。排程時段也開始撞再議重試參數。
-- **retention 冷啟動中**:recall log 自 07-30 起算,覆蓋滿 90 天(約 10 月底)
-  前 retention review 只做升格不汰選——這是設計,不是故障。
+- **retention 冷啟動中**:recall log 自 07-30 起算,覆蓋滿 90 天前 retention review
+  只做升格不汰選——這是設計,不是故障。
+  (**到期:2026-10-28**(07-30 + 90 天)。屆時 daily-memory-check 的 retention review
+  應首次進入「可汰選」狀態;若 10-28 之後跑過一輪仍回報「冷啟動保護生效」,代表
+  recall log 有斷檔或兩側未併集,要查 `logs/recall_log.jsonl` 最早一筆 `ts`。)
 - **keepalive 第二階段(watchdog+toast)拍板暫緩**:殘餘風險=WSL 本身壞掉
   時 tick 靜默重試,只剩 webui 紅燈被動面(知情接受;真發生再升級)。
 - **bridge-scanner/pipeline/notifier 的 systemd 單元**:repo 有、WSL 沒裝
@@ -291,14 +308,22 @@
   `pip install -e`」**的依賴落後情形,要涵蓋需另案做「依賴同步狀態」欄位——
   更新頁待辦清單目前僅剩此項(加上階段二價值重估,見上)。
 - **0.19.1 升級遺留觀察項**:(a) S7-6 cron 排程送達一輪待自然觸發確認
-  (`_deliver_result` 新增 relay fail-closed 閘門,觀察無誤閘);
+  (`_deliver_result` 新增 relay fail-closed 閘門,觀察無誤閘)。**已逾期一個月**
+  (08-04 升級至今無人回報誤閘)。(**到期:2026-09-30**,屆時若仍無任何「該送沒送」
+  的回報,即視為閘門無誤閘、本項結案;若要提前確認,查 hermes 側 cron job 的
+  `last_delivery_error` 是否出現 relay 相關拒絕,一次查詢即可定案。)
   (b) 本機重跑上游測試套件前必看計畫文件 §11 的 `--ignore` 清單
   (三組測試會沙箱洩漏:dashboard unified launch/update-flow/pty)。
 - **升級 script 尚未實戰**:DryRun 與沙箱矩陣全過,但完整寫入路徑
   (真 merge/pip/build/gateway 重啟/push)要等下次官方升級首跑驗證;
   skill 已註明首跑先 `-DryRun`。
 - UI 欄位名稱可能再調整(使用者提出後隨時小改)。
-- 舊項沿用:07-19 排程首次自動觸發結果待確認;「依任務類型自動選模型」規則引擎
+- 舊項沿用(**「07-19 排程首次自動觸發結果待確認」已於 09-03 結案移除**:掛了一個半月
+  無人確認,且已被更強的證據取代——WSL `systemctl --user list-timers` 顯示
+  `hermes-cron-daily-memory-check` / `hermes-bridge` / `hermes-rss` 三個 timer
+  今日(09-03)08:00 / 08:10 / 15:00 皆正常觸發、next_run 持續推進,排程鏈長期運作
+  已是既成事實;「首次那一輪」的個別結果已無回溯價值也無證據可查):
+  「依任務類型自動選模型」規則引擎
   未實作;Hermes UI 設定維護(profile/allowlist 手改 config.yaml);Tavily key
   明文存放;WSL 部署複本需 `scripts/sync_to_wsl.sh` 手動同步(07-29 已實跑
   兩輪,流程順;注意 `.claude/settings*.json` 是 sync 排除項,WSL 側權限

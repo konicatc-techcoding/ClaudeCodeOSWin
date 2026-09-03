@@ -195,7 +195,7 @@ STATUS.md 掛最久的待拍板項之一。本檔是這個主題的**單一脈�
 12. exhausted 的正確判讀方式（「不代表仍耗盡」）只在文件裡——直接讀 `auth.json` 的引擎會誤判。
 13. **配額耗盡時該降級到哪條 lane**：08-05 那次是使用者手動換全域 default 到 deepseek，沒寫成規則，也沒寫進 `fallback_lane`。
 14. **規則正本該放哪個檔案**——使用者當初列為待答核心問題之一，至今無答案。
-15. `memory/inbox/` 尚有兩份未整併檔案（`20260731_hermes-skill-catalog-update.md`、`hermes_session_20260716_*.md` 34KB），若含模型選擇相關事實，本脈絡包未涵蓋。
+15. ~~`memory/inbox/` 兩份未整併檔案可能含模型選擇事實~~ → **已解（2026-09-03 整併完成，inbox 清空）：兩份都不含模型選擇事實，本脈絡包無缺口。** 逐檔查證結果：(a) `20260731_hermes-skill-catalog-update.md` 是 Hermes 側技能目錄異動通知，與 lane／模型路由無關（併入 [[reference_hermes_skill_catalog]]）；(b) `hermes_session_20260716_*.md`（34KB、67 則訊息）主題是「AI news cron job 的 Slack 投遞為何沒送達」，全文 **`lane`／`capability`／`dispatch_domain` 零命中**，唯一與模型沾邊的是一張 07-16 的 profile→模型快照（default=`gpt-5.6-terra`、codereviewer=`gpt-5.6-sol`、financialresearch=nemotron、gptcoding=gpt-5.6-terra），且已被第 3 節既有決策表與 auto-memory 的應然配置表涵蓋、更新（併入 [[hermes-cron-store-binding-gateway-alignment]] 的 `[SILENT]` 排查層）。**結論本身有用：即使是使用者親自操作 Hermes 的長 session，也沒有留下任何「按任務性質選模型／選 lane」的痕跡——這與第 1 節「自動選路徑從未被走過」互相印證，缺口 10（判準無既有樣本）依然成立。**
 
 ## 7. How to apply（重提與起草時怎麼接手）
 

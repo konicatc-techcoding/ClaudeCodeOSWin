@@ -1,6 +1,6 @@
 ---
 name: hermes-cron-store-binding-gateway-alignment
-description: Hermes 原生 cron job 落在哪個 store，由「建立當下該行程解析到的 HERMES_HOME」動態決定（context override > HERMES_HOME env > 平台預設 global root）。前台 hermes CLI 會套 sticky active profile，把 home 綁到該 profile；背景真正在跑的是 root/default gateway（use_cron_store(root)）。若在沒有 gateway 在跑的 active profile 底下 create，job 靜默永不觸發。守則：job 所在 store 與有 daemon 在 tick 的 store 必須同一個 home
+description: Hermes 原生 cron job 落在哪個 store，由「建立當下該行程解析到的 HERMES_HOME」動態決定（context override > HERMES_HOME env > 平台預設 global root）。前台 hermes CLI 會套 sticky active profile，把 home 綁到該 profile；背景真正在跑的是 root/default gateway（use_cron_store(root)）。若在沒有 gateway 在跑的 active profile 底下 create，job 靜默永不觸發。守則：job 所在 store 與有 daemon 在 tick 的 store 必須同一個 home。另含「cron job 看起來成功卻沒送達」的三層排查順序（`[SILENT]` 刻意不投遞 → gateway/平台未設定 → store 對齊 → 模型 pin fail-closed）
 metadata:
   type: reference
 ---
@@ -41,6 +41,19 @@ cron job 落在哪個 store，由「**建立當下那個行程解析到的 `HERM
 1. 要建立「會被實際執行」的 cron job：先 `hermes profile use <root gateway 對應的 profile>` 把 sticky profile 對齊到 live gateway 的 home，再 `hermes cron create`；或透過 root gateway 服務介面（如 Telegram `/cron`，目前這批 job 就是這樣建立的）建立，天然落在 root store。
 2. 建立後一定驗證：`hermes cron status` 要顯示 "Gateway is running" 且 `hermes cron list` 看得到該 job，才代表 store 與 daemon 對齊、會觸發。
 3. 要用 CLI 查/管理現有 root store 的 job：同樣要把 CLI 綁到 root home（`hermes profile use` 對齊）。**實測即使 shell 顯式設 `HERMES_HOME=root`，CLI 仍被 sticky profile 覆蓋而顯示空**——所以正解是切 profile，或（如 [[hermes-cron-model-pin-convention]] 那次 pin）走底層 `use_cron_store(root)` 直接對 root store 操作、繞過 CLI 綁定。
+
+## 第三個層次：`last_status: ok` + `last_delivery_error: null` **不等於訊息真的送出**（2026-07-16 實測）
+
+同一個 AI news job（`9a65cc2347c8`）在 07-16 也發生過「Slack 收不到」，但根因既不是 store 歸屬、也不是模型 pin，而是**第三個層次**——排查時務必分開：
+
+- **`[SILENT]` 是刻意不投遞**：cron prompt 內建規則「真的沒東西可報就回 `[SILENT]`」，agent 回 `[SILENT]` 時系統**不建立任何投遞訊息**。此時 `last_status: ok`、`last_delivery_error: null` **都成立**，因為那兩個欄位只反映「有沒有 transport error」，不反映「有沒有送出一則訊息」。→ **要驗證投遞能力，必須讓 job 產出非 `[SILENT]` 的內容，否則測了等於沒測。**
+- **gateway 沒跑時的錯誤長相不同**：同日稍早一次執行的失敗訊息是 `platform 'slack' not configured/enabled`（job 執行 `execution_success: true`、投遞失敗）。看到這一句要往「gateway 未運行／該 profile 的 Slack 平台未設定」查，不是往 channel ID 查。
+- **channel 權限已排除**：改用 `hermes send`／Slack `chat.postMessage` 直送 `C0BHG2195BL`（`#ai-news`）成功（`ok: true`，bot `Hermes-Agent`）——**Slack bot 對該 channel 具備發文權限這件事已實證，日後不必再懷疑**。
+- 附帶事實：job 的 `deliver` 欄位在 `%LOCALAPPDATA%\hermes\cron\jobs.json` 內確認為 `slack:C0BHG2195BL`，即該 job 一直在 global root store（與上方「事實校準」一致）。
+
+排查順序建議：先看 artifact 的 `Response` 是不是 `[SILENT]`（是→本層，不是故障）→ 再看有沒有 transport 錯誤字串（gateway/平台設定層）→ 再看 store/gateway 對齊（本檔主題）→ 再看模型 pin fail-closed（[[hermes-cron-model-pin-convention]]）。
+
+> 來源：Telegram session `20260716_095131_9079a5b4`（經 session adapter 匯入 inbox，2026-09-03 整併）。
 
 ## 證據路徑（供日後查閱）
 
