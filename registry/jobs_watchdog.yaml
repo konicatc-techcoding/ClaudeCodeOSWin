@@ -1,0 +1,84 @@
+# registry/jobs_watchdog.yaml — v0.1（F5：jobs.db 新鮮度看門狗設定）
+#
+# 消費者：scripts/jobs_freshness_watchdog.py（對 jobs.db 全程唯讀，
+# 告警走 hermes send CLI → Slack，完全不經過 claude -p／invoke_cos.sh）。
+#
+# 為什麼要有這個檔：2026-08-05 起 CoS 執行鏈（claude 登入失效）全線
+# dead_letter，整整 28 天沒有任何人察覺——因為既有通知只看得到「管線內
+# 部的失敗事件」，看不到「跑都沒跑」。看門狗補的就是這個洞。
+#
+# 三態判準（門檻在本檔，程式不硬編）：
+#   healthy         有 enqueue、有 completed，且 dead_letter 比例未超標
+#   executor_dead   有 enqueue（或有終結中的 job），但 window 內零 completed
+#                   ——執行端死了（2026-08 的情況）
+#   trigger_dead    連 enqueue 都沒有（且這個 source 本來就該定期進件）
+#                   ——觸發端死了（timer／task 掛掉，STATUS 記載的「cron
+#                   這個月只跑了 14 天且無人察覺」）
+#   executor_degraded  有 completed，但 dead_letter 佔終結數比例超標
+#   inconclusive    有新 enqueue、還沒有任何終結結果、也沒有卡住太久的
+#                   backlog ——正常的「還在跑」，不告警（避免噪音）
+
+version: 1
+
+defaults:
+  # 觀察窗（小時）。48 小時的依據：受監控的最慢節奏是每日一次的 cron
+  # （08:00 timer / HermesBridgeDaily 08:05），而 WSL 是 on-demand，
+  # 偶爾睡過一天是已知且可接受的行為。24 小時窗會把「單日跳過」誤報成
+  # 故障；48 小時窗容忍一次跳過，但仍能在故障第二天就叫出來
+  # ——相對於這次的 28 天靜默，偵測延遲降低兩個數量級。
+  lookback_hours: 48
+
+  # window 內至少要看到幾筆 enqueue 才算「觸發端還活著」。1 是最保守的
+  # 下限：只回答「有沒有在跑」，不評價量。（cron 每日 1 筆、rss 每日
+  # 數十筆，實際值遠高於 1，不會擦邊誤報。）
+  min_expected_enqueued: 1
+
+  # 「卡住」判準：queued/running 的 job 存在超過這個時數還沒終結。
+  # 2 小時的依據：worker 單筆上限 JOB_TIMEOUT_SECONDS=600 秒＋最多 3 次
+  # 嘗試＋backoff 上限 1800 秒 → 正常最壞約 1.5 小時內必定終結。
+  # 超過 2 小時仍是 queued＝worker 沒在消化。
+  stuck_backlog_hours: 2
+
+  # dead_letter 佔「終結 job（completed + dead_letter）」的比例門檻。
+  # 0.5＝一半以上的工作最終死信；正常期（2026-07）cron 的比例遠低於此。
+  dead_letter_ratio_threshold: 0.5
+
+  # 比例判準的最小樣本數——樣本太小時比例沒有意義（1 筆死信＝100%）。
+  min_terminal_sample: 4
+
+# 受監控的 source。只有列在這裡的才會被評估。
+# expect_enqueue: true  → 這個 source 有自己的排程觸發器，window 內零
+#                          enqueue 就是「觸發端死了」
+# expect_enqueue: false → 事件驅動（人或外部事件才進件），零 enqueue 是
+#                          正常狀態，不會被判成 trigger_dead
+sources:
+  - id: cron
+    expect_enqueue: true
+    lookback_hours: 48        # 每日一次；容忍一天跳過
+    description: cron adapter（daily-memory-check，WSL timer 08:00）
+
+  - id: rss
+    expect_enqueue: true
+    lookback_hours: 24        # 每 30 分鐘一次；24 小時零進件已是明確異常
+    description: RSS adapter（WSL hermes-rss.timer，每 30 分鐘）
+
+  - id: bridge_episode_triage
+    expect_enqueue: false     # 有新 episode 才進件
+    description: bridge triage（HermesBridgeDaily 觸發，但進件量取決於 episode）
+
+  - id: telegram
+    expect_enqueue: false     # 使用者傳訊息才進件
+    description: Telegram adapter
+
+  - id: hermes
+    expect_enqueue: false     # Hermes 背景任務，人工/外部觸發
+    description: Hermes 背景任務
+
+alert:
+  # Slack 頻道：比照 bridge_notifier.py 的正式頻道 #agentos。
+  channel: C0BHE9NFW0P
+  # send 指令前綴（shlex 切割，可含參數——測試以 mock 腳本注入）。
+  send_cli: hermes
+  # message-key 命名空間。實際 key＝<prefix>:<date>:<state fingerprint>，
+  # 同一天同一組狀態重跑不會重複投遞（hermes send ledger 第二層冪等）。
+  message_key_prefix: agentos-watchdog

@@ -59,6 +59,64 @@ def write_job_log(job_id: str, lines: list[str]):
             f.write(line.rstrip("\n") + "\n")
 
 
+ERROR_MESSAGE_MAX_CHARS = 500       # error_message 欄位（DB）總長上限
+ERROR_RESULT_MAX_CHARS = 300        # 失敗 JSON 的 result 文字截斷長度
+ERROR_RAW_STDOUT_MAX_CHARS = 200    # 無法解析成 JSON 時的裸截斷長度
+
+
+def build_failure_message(returncode: int, stdout: str, stderr: str) -> str:
+    """組出「有診斷價值」的 error_message（F2）。
+
+    背景：`claude -p --output-format json` 把錯誤寫在 **stdout 的 JSON 裡**
+    （例如 `{"is_error": true, "subtype": "error_during_execution",
+    "result": "Not logged in · Please run /login"}`），stderr 常常是空的。
+    原本只取 stderr → error_message 永遠是 `... exit code 1: `，是
+    2026-08~09 全線 dead_letter「28 天查不出原因」的直接放大器。
+
+    敏感內容取捨（**刻意的設計限制**）：stdout 是 CoS 的完整輸出，可能
+    含使用者資料，而 error_message 會落進 jobs.db（並被 dashboard／
+    webui 讀取顯示）。所以這裡只做三件事，且**只在失敗路徑**（呼叫端
+    僅在 returncode != 0 時使用本函式）：
+      1. stderr 有東西就優先用 stderr（診斷價值高、幾乎不含使用者資料）。
+      2. stderr 為空才看 stdout，且**優先取結構化錯誤欄位**
+         （subtype／is_error）＋僅在該 payload 自稱是錯誤時才附上
+         `result` 文字（成功 payload 的 result＝CoS 給使用者的完整答案，
+         正是最不該入庫的東西——那種情況只記 metadata）。
+      3. `result` 仍截斷至 300 字元；連 JSON 都解析不出來時才裸截斷
+         stdout，且只留 200 字元（無結構＝無法判斷內容性質，取最少量）。
+    """
+    stderr_text = (stderr or "").strip()
+    if stderr_text:
+        detail = stderr_text[:ERROR_MESSAGE_MAX_CHARS]
+    else:
+        detail = _stdout_failure_detail(stdout)
+    return f"invoke_cos.sh exit code {returncode}: {detail}"[:ERROR_MESSAGE_MAX_CHARS]
+
+
+def _stdout_failure_detail(stdout: str) -> str:
+    stdout_text = (stdout or "").strip()
+    if not stdout_text:
+        return "(stdout 與 stderr 皆為空)"
+    try:
+        payload = json.loads(stdout_text)
+    except (json.JSONDecodeError, ValueError):
+        return f"(stderr 空；stdout 非 JSON) {stdout_text[:ERROR_RAW_STDOUT_MAX_CHARS]}"
+    if not isinstance(payload, dict):
+        return f"(stderr 空；stdout JSON 非物件) {stdout_text[:ERROR_RAW_STDOUT_MAX_CHARS]}"
+    subtype = payload.get("subtype")
+    is_error = payload.get("is_error")
+    detail = f"(stderr 空；取自 stdout JSON) subtype={subtype} is_error={is_error}"
+    looks_like_error = bool(is_error) or (subtype is not None and subtype != "success")
+    result = payload.get("result")
+    if looks_like_error and isinstance(result, str) and result.strip():
+        detail += f" result={result.strip()[:ERROR_RESULT_MAX_CHARS]}"
+    elif not looks_like_error:
+        # payload 自稱成功卻 exit != 0：矛盾本身就是線索，但 result 是
+        # 給使用者的完整答案，不入庫（見上方敏感內容取捨）。
+        detail += " result=（payload 自稱成功，內容不入庫）"
+    return detail
+
+
 def process_job(job: dict):
     # Stage 2.5c（提案 §7.5）：source-specific execution routing——triage
     # source 走專屬入口點（invoke_cos_triage.sh）、triage 專屬 timeout、
@@ -110,7 +168,9 @@ def process_job(job: dict):
         log_lines.append(f"stderr: {proc.stderr[:2000]}")
 
     if proc.returncode != 0:
-        msg = f"invoke_cos.sh exit code {proc.returncode}: {proc.stderr[:500]}"
+        # F2：stderr 為空時 fallback 到 stdout 的結構化錯誤欄位
+        # （claude -p --output-format json 把錯誤寫在 stdout）。
+        msg = build_failure_message(proc.returncode, proc.stdout, proc.stderr)
         log_lines.append(f"FAILED: {msg}")
         write_job_log(job_id, log_lines)
         db.mark_failed(job_id, msg)
@@ -129,6 +189,11 @@ def process_job(job: dict):
 
     cost = result_json.get("total_cost_usd")
 
+    # 注意（F2 診斷附註）：本分支在「登入失效」這類故障中是**到不了的**
+    # ——`claude -p` 該情況下 exit code 非 0，上面的 returncode 分支先攔截。
+    # 但它不是普遍意義上的死碼：只要出現「exit code 0 但 payload 自稱失敗
+    # ／subtype != success」的組合（例如未來版本改變 exit code 語意），這裡
+    # 仍是唯一的攔截點。故保留不動（刪除＝行為變更）。
     if result_json.get("is_error") or result_json.get("subtype") != "success":
         msg = f"CoS 回報失敗: subtype={result_json.get('subtype')} is_error={result_json.get('is_error')}"
         log_lines.append(f"FAILED: {msg} (cost_usd={cost})")

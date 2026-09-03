@@ -1,0 +1,49 @@
+# hermes/systemd/hermes-jobs-watchdog.service — F5（jobs.db 新鮮度看門狗）
+#
+# **狀態：未安裝、未排程。** 本檔只是「掛載方式的具體形狀」，是否安裝由
+# 使用者決定（2026-09-03 交付時未執行任何安裝動作、未建立任何排程工作）。
+#
+# 一次性執行單元：跑一輪 scripts/jobs_freshness_watchdog.py 就結束。
+# 它偵測的是「跑都沒跑」——有沒有進件（觸發端）、有沒有 completed
+# （執行端），詳見該 script 檔頭與 registry/jobs_watchdog.yaml。
+#
+# **刻意沒有搭配的 .timer**（與 scanner/pipeline/notifier 三件組不同）：
+# 使用者 2026-07-23 起把 bridge 排程權移交 Windows Task Scheduler
+# （`HermesBridgeDaily`），且明確不要再多建排程工作。所以本 unit 的觸發
+# 方式是**掛在既有的 `HermesBridgeDaily` 動作字串尾端**：
+#
+#   wsl.exe -d Ubuntu -- bash -lc 'systemctl --user start hermes-bridge-scanner.service ;
+#     systemctl --user start hermes-bridge-pipeline.service ;
+#     systemctl --user start hermes-bridge-notifier.service ;
+#     systemctl --user start hermes-jobs-watchdog.service'
+#
+# 前三個 service 之間本來就用 `;`（不是 `&&`）串接，所以**前面任一步失敗
+# 都不會讓看門狗被跳過**——這正是它該有的獨立性。
+#
+# 安裝方式（**不要用 hermes/systemd/install.sh**：那個 script 看到「沒有
+# .timer」會把單元當常駐服務 `enable --now`，語意錯誤）：
+#
+#   ln -sf ~/dev/ClaudeCodeOSWin/hermes/systemd/hermes-jobs-watchdog.service \
+#          ~/.config/systemd/user/hermes-jobs-watchdog.service
+#   systemctl --user daemon-reload
+#   # 不 enable、不建 timer——只由 Windows Task Scheduler 的動作觸發
+#
+# 失敗語意：看門狗 exit 3（偵測到異常，告警已送出）或 exit 1（看門狗本身
+# 失敗）都會讓 unit 進入 failed 狀態——**這是刻意的**：Slack 通知之外多
+# 一個本機可觀測面（`systemctl --user list-units --failed`）。不設 Restart。
+#
+# 依賴邊界：本 unit 完全不經過 claude / invoke_cos.sh；只讀 jobs.db ＋
+# 呼叫 hermes send CLI。CoS 執行鏈整條死掉時它仍然會跑、仍然會叫。
+
+[Unit]
+Description=AgentOS jobs.db freshness watchdog (one-shot; triggered by Windows Task Scheduler HermesBridgeDaily)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/ClaudeCodeOSWin
+ExecStart=%h/dev/ClaudeCodeOSWin/.venv/bin/python3 %h/dev/ClaudeCodeOSWin/scripts/jobs_freshness_watchdog.py
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+SuccessExitStatus=0
+
+StandardOutput=append:%h/dev/ClaudeCodeOSWin/logs/hermes/jobs_watchdog_systemd.stdout.log
+StandardError=append:%h/dev/ClaudeCodeOSWin/logs/hermes/jobs_watchdog_systemd.stderr.log

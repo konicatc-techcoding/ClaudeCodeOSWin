@@ -48,6 +48,25 @@ wsl --shutdown
 - `hermes-bridge-notifier.service` + `.timer` — `bridge_notifier.py notify`（Stage 2.7b 新增；**timer 已 disable+mask，排程權在 Windows Task Scheduler，見下**）。走預設頻道（`bridge_notifier.py` 的 `DEFAULT_CHANNEL`＝正式頻道 `#agentos`）與預設 send-cli。notifier 對 jobs.db 唯讀，失敗（含 `hermes` CLI 不可用）→ fail loud、unit failed，不落 `notification_log`，下輪補送
 - `install.sh` / `uninstall.sh` — 安裝/移除腳本，用法跟原本 `hermes/launchd/install.sh` 一致，只是底層換成 `systemctl --user`
 
+## jobs.db 新鮮度看門狗（F5，2026-09-03 新增；**尚未安裝、尚未排程**）
+
+- `hermes-jobs-watchdog.service`（**刻意沒有 .timer**）— 跑一輪
+  `scripts/jobs_freshness_watchdog.py`：對 jobs.db 唯讀，判斷每個 source 是
+  「健康／執行端死了／觸發端死了」，異常時經 `hermes send` 送 Slack。
+  門檻在 `registry/jobs_watchdog.yaml`。
+- **它存在的理由**：既有通知（notifier）只看得見管線內部事件，看不見
+  「整條 CoS 鏈死了」——2026-08-05 起全線 dead_letter 靜默 28 天。看門狗
+  完全不經過 `claude -p`／`invoke_cos.sh`，所以鏈死掉時它還活著。
+- **建議掛載點（不新建排程工作）**：在 Windows Task Scheduler 既有的
+  `HermesBridgeDaily` 動作字串尾端，追加第四個
+  `systemctl --user start hermes-jobs-watchdog.service`（三件組之間本來就是
+  `;` 串接，前面失敗不會跳過看門狗）。安裝＝`ln -sf` + `daemon-reload`，
+  **不要用 install.sh**（無 .timer 會被當常駐服務 `enable --now`）。
+  細節與其他評估過的掛載選項見該 unit 檔頭註解。
+- **殘留風險（誠實記載）**：掛在 `HermesBridgeDaily` 上，代表那個 task 本身
+  失效時看門狗也跟著沉默。要覆蓋這個縫，得有一個獨立於 Windows Task
+  Scheduler 之外的觸發源——不在本次範圍（使用者明確不要新建排程工作）。
+
 ## bridge 三件組的排程模型（2026-07-23 起）
 
 **排程權已移交 Windows Task Scheduler**：`hermes-bridge-scanner/pipeline/notifier`
