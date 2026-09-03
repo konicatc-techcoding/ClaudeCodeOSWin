@@ -217,9 +217,6 @@
 - **稽核 artifact 有一處錯誤待更正**:B3 段寫「relay URL 解析只成功 3/18,是既有能力
   沒發揮」——實際上**該功能從未存在**(`resolved_count` 只是在數有幾筆不是轉址)。真正
   的槓桿是 `content_enricher`(對直連 100% 成功、對 Google News 轉址 100% 失敗)。
-- **工作樹有四項與本次 session 無關的未 commit 變更**(`webui/src/App.tsx`、
-  `webui/src/globals.css`、`agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`,webui
-  typography patch),本次收尾 commit 刻意未帶入,待使用者決定去留。
 
 - **防重演有一個結構性弱點(持續性風險,務必知道)**:`reset --hard origin/main`
   是 no-op 的前提是 `main == origin/main`。**一旦有客製 commit 沒 push 到私有
@@ -334,11 +331,18 @@
 
 **照批次順序走,序列執行(ROADMAP「不同時開兩個能力」)。**
 
-- **批次 0｜清場(30–45 分)**:① webui 那四項未 commit 變更去留拍板(`App.tsx` +108/-34、
-  `globals.css` +269、`agentos-ui-patch/`、`CLAUDE-CODE-PROMPT.md`)——**這是所有
-  engineering 批次的前置**;② `memory/inbox/` 兩個待整併檔(`/consolidate-memory`;
-  其中 34KB 那份 hermes session 記錄可能含 lane 使用事實);③ Stage 0.5 殘項查證,過時即刪;
-  ④ 觀察類 5 項各補到期日。
+- **批次 0｜清場——✅ 已完成(2026-09-03)**,四項全數結案,`git status` 乾淨:
+  ① webui 那四項未 commit 變更(擱置 19 天)——`App.tsx`/`globals.css` 加上收尾修復
+  隨 commit `ae1eff1` 上線(156/156 綠、typecheck 零錯誤、零新增 `!important`);
+  規格與落地經驗整理成
+  [docs/webui-typography-proposal.md](docs/webui-typography-proposal.md)
+  (含三個規格書沒寫到的坑與兩項未解);素材包 `agentos-ui-patch/` 與根目錄逐字
+  複本 `CLAUDE-CODE-PROMPT.md` 已移出 repo 至
+  `~/dev/_archive/agentos-ui-patch-20260815/`(MD5 一致性驗證後刪除複本)。
+  **engineering 批次的前置已解除。**
+  ② `memory/inbox/` 已清空(commit `3d14da8`),兩份歸檔進 `.processed/`;
+  ③ Stage 0.5 三項殘項查證後全數過時、已結案移除(見第 3 節);
+  ④ 觀察類 5 項全補上到期日/觸發條件,其中 07-19 首次自動觸發直接結案。
 - **批次 1｜止血**:把「預檢 `ahead>0` 亮橙」升級為主動保護(未 push 的客製 commit 不能被
   桌面 Install 鈕靜默吃掉);順手修 `dashboard/data_stage3.py:76` 裸 import。
   **這是清單裡唯一會造成不可逆損失的項目。**
