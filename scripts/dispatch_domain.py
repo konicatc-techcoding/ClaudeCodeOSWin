@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/dispatch_domain.py — v0.1（Phase 1）
+"""scripts/dispatch_domain.py — Domain Execution Router（現況：手動 CLI 觸發）
 
 Domain Execution Router：CoS 分類出 owner／category 之後，實際「執行」一個
 delegated domain task 的跨平台 adapter。CoS 分類與整合邏輯不在這裡；這個
@@ -53,9 +53,33 @@ console codepage 影響。用 subprocess 呼叫本腳本時，請用
 環境常見 cp950/cp936，內含繁體中文訊息的 JSON 用 locale 解碼會直接
 UnicodeDecodeError）。
 
-範圍界線（Phase 1，見任務交付說明）：
+觸發方式（這是目前的實際設計，不是待接線的中間狀態）：
+  - 不被 CoS／worker.py 呼叫，也沒有任何自動呼叫點（全 repo 查證：只有
+    .claude/agents/engineering.md、.claude/agents/intelligence.md 與
+    delegation_policy.md 的 prompt 層文字說明，以及
+    scripts/test_dispatch_domain.py 的 unit test 會提到本腳本）。
+  - 唯一觸發途徑是人或 subagent 自主判斷「這個任務不適合預設能力」之後，
+    手動下這支 CLI，並明確帶 --capability／--lane。不帶 --capability 時會
+    回落到 agents.yaml 的 default_capability（engineering／intelligence 都是
+    claude_native），也就是選不到 Hermes lane——所以「要走 lane」必須是明講的。
+  - 之所以停在手動觸發：「什麼情況下該走哪條 lane」的判準尚不存在。那是
+    「依任務類型自動選模型」規則引擎要解的問題，屬待拍板議題，不是本腳本
+    缺一段接線程式碼。
+
+現況注意事項（讀這支腳本前先知道）：
+  - --category 只被原樣寫進 JSON envelope 與 log，完全不參與 lane 選擇——
+    lane 只由 owner + capability(+ --lane) 決定（見 select_lane）。
+  - fallback_lane 目前是死路徑：select_lane／執行段完整實作了 fallback 與
+    fallback_success／fallback_failed 狀態，capability_lanes.yaml 也定義了
+    這個欄位，但 registry 裡 0 條 lane 填了它，因此永遠不會被觸發。
+  - validate_lane() 對 execution=route_model 仍檢查 route.via == "openrouter"。
+    這是 2026-07-20 移除 OpenRouter 之後的殘留驗證：所有 route 現在都是
+    via=native，這個條件已不可能滿足。目前無害（registry 裡沒有任何
+    execution: route_model 的 lane），但日後要新增這類 lane 會當場撞上這道
+    永遠不成立的檢查——屆時要先決定「還要不要支援 execution: route_model」。
+
+其他範圍界線：
   - 不修改 worker.py／db.py／systemd／timer／人工核准佇列。
-  - 不被 CoS／worker.py 呼叫——這是獨立、可單獨測試的 adapter，接線是 Phase 2。
   - 不讀取／輸出 .env、token、API key；不碰 memory/*.md。
   - Hermes lane 的 fake/mock executable 測試見 scripts/test_dispatch_domain.py。
 """

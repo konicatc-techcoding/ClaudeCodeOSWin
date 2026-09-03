@@ -116,7 +116,7 @@ Stage 3 四條 DoD 已透過 Stage 5 P2 在新載體達成。剩餘：**Streamli
 
 ---
 
-## Stage 0.5 — 平台收尾清單（部分完成；殘項為非阻塞）
+## Stage 0.5 — 平台收尾清單 ✅ 全數結案（2026-09-03；最後三項殘項查證後判定過時）
 
 > **進度更新（2026-07-09，見 [stage1-checkpoint.md](stage1-checkpoint.md) 第 2／5 節）**：
 > default gateway 排程修復、profile 診斷（不刪 profile 的非破壞建議）、gateway 未啟動
@@ -130,7 +130,7 @@ Stage 3 四條 DoD 已透過 Stage 5 P2 在新載體達成。剩餘：**Streamli
 | default gateway 排程／自啟（含原 `Hermes_Gateway` Scheduled Task 問題） | ✅ 已修復（Stage 1 期間） | — |
 | nemocoding／gptcoding gateway 未啟動 | ✅ 根因查明結案（非效能問題；診斷見 checkpoint） | — |
 | profile 處置 | ✅ 診斷完成，採「不刪 profile」建議 | — |
-| financialresearch 自啟腳本修復（腳本已壞） | ⏳ 殘項（非阻塞） | engineering |
+| financialresearch 自啟腳本修復（腳本已壞） | ✅ 結案：已過時（2026-09-03 查證）——Hermes 改 `multiplex_profiles: true` 後 named profile 不再各自起 gateway，該腳本本身已無存在意義 | — |
 | codereviewer profile 去留（從未裝自啟） | ✅ 使用者拍板移除（2026-07-20，Phase 2a 稽核）；Windows 側實際刪除由 automation 平行處理；本 repo 側登記收尾見 `registry/capability_lanes.yaml` | — |
 
 > **Phase 2d 補記（2026-07-20）**：剩餘四條 `hermes-*` capability lane（`hermes-gptcoding`、
@@ -139,8 +139,8 @@ Stage 3 四條 DoD 已透過 Stage 5 P2 在新載體達成。剩餘：**Streamli
 > 轉 `active`；其中三條（openai-codex 訂閱制）的 `cost_tier` 也依真實呼叫回報的
 > `usage.cost_status: included` 由 `unknown` 改記 `included`。詳見
 > `registry/capability_lanes.yaml`。
-| 三個殭屍 Startup vbs 清除 | ⏳ 殘項（非阻塞） | automation |
-| sticky profile 緩解（自動化一律 `--profile default` 的習慣／機制化） | ⏳ 殘項（非阻塞） | engineering／automation |
+| 三個殭屍 Startup vbs 清除 | ✅ 結案：已過時（2026-09-03 查證）——兩個 Startup 目錄實地檢查已無任何 vbs | — |
+| sticky profile 緩解（自動化一律 `--profile default` 的習慣／機制化） | ✅ 結案：已過時（2026-09-03 查證）——唯一的自動化呼叫路徑 `scripts/dispatch_domain.py` 已硬性帶 `--profile`（:598，docstring:18 明文禁止依賴 sticky）；慣例另記於 `memory/hermes-profile-sticky-vs-ephemeral.md` | — |
 
 ---
 
@@ -351,7 +351,7 @@ inbox（headless 只能新增 inbox 檔案，符合既有邊界）。之後由�
 1. ✅ **原 Stage 1 DoD 1／2 實走**：完成。idempotency 修正（adapter deterministic 檔名＋
    `.processed` 掃描＋exit code 3）已完成並下發部署側。
 2. ✅ **前置決策三項**：已拍板並記錄（見上節）。
-3. ⏳ **非阻塞殘留**：Stage 0.5 四殘項（見上表）。Windows 側 `git init` **已完成**
+3. ✅ **非阻塞殘留**：Stage 0.5 殘項已於 2026-09-03 查證後全數結案（三項判定過時，非「未完成」，見上表）。Windows 側 `git init` **已完成**
    （2026-07-09，baseline commit `03c7a0e`「stage1 checkpoint baseline before bridge」，
    敏感檔案經 `git check-ignore` 逐項驗證後排除；後續變更均已入版控）。
 
@@ -888,8 +888,8 @@ UI 層降級為**純 Vite + React SPA**（剝掉 vinext/wrangler/Cloudflare 託�
 | WSL 互斥限制 vs 自動化 | WSL 側排程任務在 Windows Hermes 運行時無法一般讀取 state.db | 側別已拍板 WSL 側（決策 1）：bridge 一律走 snapshot／immutable 讀取路徑；DoD 1 直接驗證 |
 | `immutable=1` 讀 live db 的快照一致性（2026-07-12 更新：緩解措施已隨 2.4d 改變，見右欄） | 讀到不一致快照 | **已更新**：不再只靠「`ended_at` 已設」這個單一判準降低風險——2.4d 起 episode 的切刀 trigger 是 `ended`／`archived`／`inactivity`／`manual` 四選一，快照一致性改由「同一次 scan snapshot 內固定 boundary」＋ importer 匯入時以 `source_content_hash` 重算比對（提案 stage2.4d §4.5）共同保證，不一致直接 `needs_review`（fail-closed），不落地 |
 | `messages.content` 含敏感資料 | 敏感內容進入長期記憶正本 | 匯入政策已定稿（memory-taxonomy 4.3 guardrails，fail-closed）；adapter 明確不過濾，責任在落地前判斷層 |
-| sticky profile 被 UI 切換 | 不帶 `--profile` 的 CLI 自動化讀錯 db | 所有自動化一律明確 `--profile default`（Stage 0 報告既有結論）；緩解機制列 Stage 0.5 殘項 |
-| gateway 自啟不齊（Stage 0.5 殘項未清） | session 資料累積不完整，Stage 2 價值打折 | 殘項非阻塞，建議與 Stage 2 平行清完 |
+| sticky profile 被 UI 切換 | 不帶 `--profile` 的 CLI 自動化讀錯 db | 所有自動化一律明確 `--profile default`（Stage 0 報告既有結論）；緩解已落地：`scripts/dispatch_domain.py` 硬性帶 `--profile`（原列 Stage 0.5 殘項，2026-09-03 結案） |
+| ~~gateway 自啟不齊（Stage 0.5 殘項未清）~~ **已解除**（2026-09-03：殘項全數結案且判定過時；multiplex_profiles 上線後不再有「各 profile 自啟」這個問題） | session 資料累積不完整，Stage 2 價值打折 | — |
 | ~~Windows 開發正本無版控~~ **已解**（2026-07-09 `git init`，baseline `03c7a0e`） | （解除前）程式層 rollback 只能靠 WSL pre-sync tarball；bridge 這種長期演化元件無變更歷史 | 已完成 `git init` 與 baseline commit，後續變更均入版控；git-based sync 仍列 sync plan v0.2 升級路徑；rollback 現況索引見 checkpoint 第 6 節 |
 | state.db 訊息數相對 Stage 0 基準下降（2026-07-09 觀察） | 若是讀錯 profile db，bridge 會處理錯的資料集 | Stage 2 DoD 5 基準複查；讀取一律 `--profile default` ＋ snapshot |
 | **bridge_state schema v1 與拍板欄位清單有出入**（2026-07-10 新增） | 不先對齊就實作，會產生兩套欄位語意並存 | 對齊明文列為 Stage 2 實作第一步（memory-bridge-state.md 第 6 節）；schema／測試／文件三者同動 |
