@@ -76,7 +76,15 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import redact  # 輸出前掃描共用正本(慣例統一過,本模組無憑證資料)
+# 相容兩種匯入路徑（1-2 修正）:`dashboard/` 沒有 __init__.py,api.py 是把
+# dashboard/ 插進 sys.path 後以 **top-level** 名稱匯入;但從 repo 根做
+# `import dashboard.<mod>`（namespace package)時 top-level 名稱不存在 →
+# ModuleNotFoundError。故先試相對匯入(有 parent package 時成立),失敗才退回
+# top-level。兩條路徑都可用,現行 api.py 啟動方式行為不變。
+try:
+    from . import redact  # 輸出前掃描共用正本(慣例統一過,本模組無憑證資料)
+except ImportError:  # 無 parent package(api.py 的 sys.path 匯入方式)
+    import redact
 
 # --- 凍結的探測指令(唯讀;subprocess 只允許這兩個常數,無其他 spawn 位點)---
 WSL_DISTRO = "Ubuntu"

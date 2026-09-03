@@ -73,8 +73,17 @@ from pathlib import Path
 
 import yaml
 
-import data_systemd_wsl  # 路徑 A 複用共用 systemd 快照(WSL 包裹、守門不喚醒、5 秒快取)
-import redact  # 憑證掃描共用正本(webui-migration §3.4:共用實作,不複製貼上)
+# 相容兩種匯入路徑（1-2 修正）:`dashboard/` 沒有 __init__.py,api.py 是把
+# dashboard/ 插進 sys.path 後以 **top-level** 名稱匯入;但從 repo 根做
+# `import dashboard.<mod>`（namespace package)時 top-level 名稱不存在 →
+# ModuleNotFoundError。故先試相對匯入(有 parent package 時成立),失敗才退回
+# top-level。兩條路徑都可用,現行 api.py 啟動方式行為不變。
+try:
+    from . import data_systemd_wsl  # 路徑 A 複用共用 systemd 快照(WSL 包裹、守門不喚醒、5 秒快取)
+    from . import redact  # 憑證掃描共用正本(webui-migration §3.4:共用實作,不複製貼上)
+except ImportError:  # 無 parent package(api.py 的 sys.path 匯入方式)
+    import data_systemd_wsl
+    import redact
 
 ROOT = Path(__file__).resolve().parent.parent
 

@@ -1026,7 +1026,16 @@ class Stage3ImportGuardTests(unittest.TestCase):
                 for alias in node.names:
                     found.add(alias.name)
             elif isinstance(node, ast.ImportFrom):
-                found.add(node.module or "")
+                # 1-2 修正後 data_stage3 用 `from . import X` 相對匯入（相容
+                # `import dashboard.data_stage3` 與 api.py 的 top-level 兩種路徑）。
+                # 相對匯入的 node.module 是 None,若直接 add("") 會讓白名單失去
+                # 鎖定力(所有 `from . import 任意模組` 都變成同一個 "")——
+                # 故改記 alias 名稱,守門強度不變。
+                if node.module:
+                    found.add(node.module)
+                else:
+                    for alias in node.names:
+                        found.add(alias.name)
         normalized = set()
         for name in found:
             if name.startswith("datetime"):

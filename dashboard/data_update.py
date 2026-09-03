@@ -191,8 +191,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import data_resident  # 複用:distro 無喚醒守門、WSL 單元探測、Windows gateway 就緒
-import redact  # 輸出前掃描共用正本(慣例統一過;本模組無憑證資料,防禦性)
+# 相容兩種匯入路徑（1-2 修正）:`dashboard/` 沒有 __init__.py,api.py 是把
+# dashboard/ 插進 sys.path 後以 **top-level** 名稱匯入;但從 repo 根做
+# `import dashboard.<mod>`（namespace package)時 top-level 名稱不存在 →
+# ModuleNotFoundError。故先試相對匯入(有 parent package 時成立),失敗才退回
+# top-level。兩條路徑都可用,現行 api.py 啟動方式行為不變。
+try:
+    from . import data_resident  # 複用:distro 無喚醒守門、WSL 單元探測、Windows gateway 就緒
+    from . import redact  # 輸出前掃描共用正本(慣例統一過;本模組無憑證資料,防禦性)
+except ImportError:  # 無 parent package(api.py 的 sys.path 匯入方式)
+    import data_resident
+    import redact
 
 # --- 目標 repo 路徑(唯讀讀取;路徑寫死,無參數化入口)-------------------
 _local_app_data = os.environ.get("LOCALAPPDATA")
