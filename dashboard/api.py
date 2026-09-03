@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import data  # noqa: E402
 import data_resident  # noqa: E402(背景常駐狀態燈號,唯讀三層探測,見 data_resident.py)
 import data_stage3  # noqa: E402(P2:Stage 3 三項唯讀函式,見 data_stage3.py)
+import data_repo_guard  # noqa: E402(未推送 commit 離線保險快照的唯讀狀態,見 data_repo_guard.py)
 import data_systemd_wsl  # noqa: E402(Windows 側經 WSL 的 systemd 唯讀快照,見 data_systemd_wsl.py)
 import data_update  # noqa: E402(Hermes 更新唯讀升級預檢——階段一,見 data_update.py)
 import redact  # noqa: E402
@@ -209,7 +210,16 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
             # 〔重新整理遠端資訊〕fetch 按鈕完成後取新 refs 用;重探本身
             # 仍是純唯讀查詢,本端點維持 GET-only 零寫入。
             fresh = query.get("fresh", ["0"])[0] == "1"
-            return 200, data_update.get_update_precheck(force=fresh)
+            payload = data_update.get_update_precheck(force=fresh)
+            # 未推送 commit 的離線保險快照(批次 1 止血)——掛在同一個 payload
+            # 底下,而**不是**另開端點:兩者講的是同一件事的兩層(現在有沒有
+            # 未 push vs 萬一被吃掉救不救得回來),放一起才看得懂差別;也因此
+            # UpdatePrecheck.tsx 不需要新增取數 URL(維持第 11 項的「URL 恰
+            # 兩個字面」靜態鎖定不被放寬)。
+            # data_update 的快取物件是共用參照 → **淺拷貝再加欄位**,不就地
+            # 改寫快取。資料層零 subprocess、只讀 _latest.json,不觸發 guard
+            # 執行,故本端點仍是純唯讀。
+            return 200, {**payload, "repo_guard": data_repo_guard.get_repo_guard_status()}
         if path.startswith("/api/logs/"):
             name = path[len("/api/logs/"):]
             if ".." in name or not _LOG_NAME_RE.match(name):

@@ -295,6 +295,27 @@ button { color: inherit; }
 .update-diverge summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 .update-diverge[open] summary { margin-bottom: 6px; }
 
+/* ---- 未推送 commit 的離線保險快照(批次 1 止血;唯讀顯示,無操作元素)---- */
+/* 燈色沿用既有 token:綠 #34d399(同 .update-light-green)、黃 #fbbf24(同
+   .cred-consistency-yellow / .service-note-converging 那一顆)、灰 #6b7280。
+   **刻意沒有 orange**——橙專屬升級預檢的「未 push(ahead>0)」,兩層語意不搶色。
+   無 !important;版面/字級比照 .update-basis 那一組。 */
+.guard-panel { border: 1px solid var(--line); border-radius: 13px; background: var(--surface-2); padding: 15px 16px; display: grid; gap: 11px; border-left: 4px solid #6b7280; }
+.guard-light-green { border-left-color: #34d399; }
+.guard-light-yellow { border-left-color: #fbbf24; }
+.guard-light-gray { border-left-color: #6b7280; }
+.guard-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.guard-head b { font-size: 16px; }
+.guard-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.guard-targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 9px; }
+.guard-target { padding: 10px 11px; border: 1px solid var(--line-soft); border-left: 3px solid #6b7280; border-radius: 9px; background: #14161c; display: grid; gap: 6px; }
+.guard-target-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.guard-target-head b { flex: 1; min-width: 0; font-size: 14px; color: #d8dbe3; }
+.guard-target-summary { margin: 0; color: #c9cdd7; font-size: 14px; line-height: 1.55; }
+.guard-target-facts { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+.guard-target-facts b { color: #d8dbe3; font-size: 15px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.guard-target-refs { margin: 0; color: var(--muted-2); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; word-break: break-all; }
+
 /* ---- P3:ClaudeCode CLI(PTY 真終端機)view ---- */
 /* 不可移除警語:警示色+深色終端視覺區隔(提案 §7),無關閉/摺疊控制 */
 .terminal-warning { margin: 0 0 14px; padding: 12px 14px; border: 1px solid #5c3a1e; border-left: 4px solid #e0973f; border-radius: 11px; color: #f2b56d; background: #251d14; font-size: 13px; line-height: 1.6; }

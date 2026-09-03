@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hermes"))
 import api  # noqa: E402
 import data  # noqa: E402
 import data_resident  # noqa: E402
+import data_repo_guard  # noqa: E402
 import data_stage3  # noqa: E402
 import data_systemd_wsl  # noqa: E402
 import data_update  # noqa: E402
@@ -180,8 +181,8 @@ class ImportGuardTests(unittest.TestCase):
     # 想加東西?先想清楚它有沒有寫入能力,再來改這份白名單。
     ALLOWED_IMPORTS = {
         "argparse", "json", "re", "sys", "urllib.parse",
-        "http.server", "pathlib", "data", "data_resident", "data_stage3",
-        "data_systemd_wsl", "data_update", "redact",
+        "http.server", "pathlib", "data", "data_resident", "data_repo_guard",
+        "data_stage3", "data_systemd_wsl", "data_update", "redact",
     }
     # 已知寫入模組(防守性斷言;白名單本來就擋掉它們,雙保險)
     FORBIDDEN = {
@@ -754,6 +755,45 @@ class UpdatePrecheckEndpointTests(ApiServerTestCase):
         self.assertEqual(win["live_version"]["text"],
                          "v0.19.0 upstream 3910ab28 + local 97011887 (+12 carried commits)")
         self.assertEqual(win["live_version"]["package"], "0.19.0")
+
+    def test_update_precheck_carries_repo_guard_block(self):
+        """離線保險快照隨同一個唯讀 payload 回來(不另開端點;批次 1 止血)。
+        重點:它是**附掛**的,不得影響既有欄位,且端點不得因此變成會執行 guard。"""
+        data_update._probe = lambda: {
+            "checked_at": "t", "remote_note": "未執行 fetch", "stage": "s", "targets": [],
+        }
+        payload = self._get_json("/api/update-precheck")
+        guard = payload["repo_guard"]
+        self.assertIn("targets", guard)
+        self.assertIn("overall_light", guard)
+        self.assertFalse(guard["scheduled"], "沒有排程就要誠實標示")
+        self.assertIn("不會觸發 guard 執行", guard["note"])
+        # 燈色不得與預檢的橙撞語意
+        lights = {t["light"] for t in guard["targets"]} | {guard["overall_light"]}
+        self.assertTrue(lights <= {"green", "yellow", "gray"},
+                        f"repo_guard 不得使用 orange/red: {lights}")
+        # 既有欄位原樣保留(附掛不覆寫)
+        self.assertEqual(payload["remote_note"], "未執行 fetch")
+
+    def test_update_precheck_does_not_mutate_cached_payload(self):
+        """附掛 repo_guard 必須是淺拷貝——不得就地污染 data_update 的快取物件。"""
+        cached = {"checked_at": "t", "remote_note": "n", "stage": "s", "targets": []}
+        data_update._probe = lambda: cached
+        self._get_json("/api/update-precheck")
+        self.assertNotIn("repo_guard", cached,
+                         "端點不得就地改寫 data_update 回傳/快取的物件")
+
+    def test_update_precheck_repo_guard_failure_does_not_500(self):
+        """保險狀態讀取失敗時,整頁不得掛掉(fail-soft 鐵律)。"""
+        orig = data_repo_guard.GUARD_STORE
+        data_repo_guard.GUARD_STORE = None  # 模擬無 LOCALAPPDATA
+        try:
+            status, _, body = self._request("/api/update-precheck")
+            self.assertEqual(status, 200)
+            guard = json.loads(body)["repo_guard"]
+            self.assertEqual(guard["overall_light"], "gray")
+        finally:
+            data_repo_guard.GUARD_STORE = orig
 
     def test_update_precheck_failure_degrades_to_gray_not_500(self):
         data_update._probe = lambda: (_ for _ in ()).throw(RuntimeError("boom"))

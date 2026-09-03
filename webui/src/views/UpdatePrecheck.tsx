@@ -30,6 +30,8 @@
 import { useRef } from "react";
 import {
   apiGet,
+  type RepoGuardLight,
+  type RepoGuardStatus,
   type UpdateComparison,
   type UpdateLight,
   type UpdatePrecheckPayload,
@@ -188,6 +190,81 @@ export function UpdateTargetCard({ target }: { target: UpdateTarget }) {
   );
 }
 
+// 未推送 commit 的離線保險快照(批次 1 止血)——**唯讀顯示,零操作入口**。
+// 資料隨 /api/update-precheck 同一個 payload 回來(不另開取數 URL),後端
+// dashboard/data_repo_guard.py 只讀 guard 產出的 _latest.json,**不會觸發
+// guard 執行**;沒有排程(拍板不建 Task Scheduler),所以要誠實顯示快照多舊。
+//
+// **與上方 backup 組的橙燈不打架**:backup 組講「現在有沒有未 push」(live git,
+// ahead>0 → 橙);本區塊講「萬一被吃掉救不救得回來」(舊快照,green/yellow/gray,
+// 刻意不用 orange)。文案也明講「此為快照,不代表目前暴露狀態」。
+const GUARD_LIGHT_COLORS: Record<RepoGuardLight, string> = {
+  green: "#34d399",
+  yellow: "#fbbf24", // 沿用既有黃(.cred-consistency-yellow / .service-note-converging 同一顆)
+  gray: "#6b7280",
+};
+
+function bytesText(value: number | null | undefined): string {
+  if (value == null) return "—";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export function RepoGuardPanel({ guard }: { guard: RepoGuardStatus | null | undefined }) {
+  if (!guard) {
+    return <InfoNotice message="未取得離線保險快照狀態（後端未提供 repo_guard 欄位）。" />;
+  }
+  return (
+    <div className={`guard-panel guard-light-${guard.overall_light}`}>
+      <div className="guard-head">
+        <span
+          className="update-dot"
+          style={{ background: GUARD_LIGHT_COLORS[guard.overall_light] }}
+          aria-hidden="true"
+        />
+        <b>未推送 commit 的離線保險（bundle 快照）</b>
+        <span className="update-ref-note">
+          {guard.scheduled ? "已排程" : "無排程（手動重跑）"}
+        </span>
+      </div>
+      <p className="guard-note">{guard.note}</p>
+      <div className="guard-targets">
+        {guard.targets.map((t) => (
+          <div key={t.id} className={`guard-target guard-light-${t.light}`}>
+            <div className="guard-target-head">
+              <span
+                className="update-dot"
+                style={{ background: GUARD_LIGHT_COLORS[t.light] }}
+                aria-hidden="true"
+              />
+              <b>{t.label}</b>
+              <span className="update-badge" aria-label={`保險狀態:${t.light_text}`}>
+                {t.light_text}
+              </span>
+            </div>
+            <p className="guard-target-summary">{t.summary}</p>
+            <div className="guard-target-facts">
+              <span>
+                最近一次保險 <b>{t.age_text ?? "—"}</b>
+              </span>
+              <span>
+                當時保全 <b>{numText(t.covered_commits)}</b> 個 commit
+              </span>
+              <span>
+                bundle <b>{bytesText(t.bundle_bytes)}</b>
+              </span>
+            </div>
+            {t.covered_refs.length > 0 && (
+              <p className="guard-target-refs">涵蓋 ref：{t.covered_refs.join("、")}</p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // 兩端並列(props 注入)——render 測試主要入口。
 export function UpdatePrecheckCards({ payload }: { payload: UpdatePrecheckPayload | null }) {
   if (!payload) {
@@ -201,6 +278,7 @@ export function UpdatePrecheckCards({ payload }: { payload: UpdatePrecheckPayloa
           <UpdateTargetCard key={target.id} target={target} />
         ))}
       </div>
+      <RepoGuardPanel guard={payload.repo_guard} />
     </div>
   );
 }

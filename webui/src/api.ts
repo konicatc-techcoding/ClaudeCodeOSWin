@@ -289,11 +289,49 @@ export type UpdateTarget = {
   service?: UpdateTargetService | null;
 } & Record<string, unknown>;
 
+// 未推送 commit 的離線保險快照(批次 1 止血;資料層 dashboard/data_repo_guard.py)。
+// **語意不等於「目前有沒有未推送 commit」**——那是各端 backup 組的 ahead(橙燈)。
+// 本組回答的是「萬一被 Install 鈕 reset --hard 吃掉,救不救得回來」,資料來自
+// 上一次 guard 執行留下的 manifest,故一律附帶「這份快照有多舊」。
+// 燈只有 green(新鮮)/yellow(過期)/gray(從未執行或無法查詢)——**刻意不用 orange**,
+// 橙保留給預檢的「未 push」,兩者不搶同一顆燈色。
+export type RepoGuardLight = "green" | "yellow" | "gray";
+
+export type RepoGuardTarget = {
+  id: string;
+  label: string;
+  status: "fresh" | "stale" | "never" | "error";
+  light: RepoGuardLight;
+  light_text: string;
+  summary: string;
+  created_at: string | null;
+  age_hours: number | null;
+  age_text: string | null;
+  bundle: string | null;
+  bundle_bytes: number | null;
+  // 「當時保全的 commit 數」——不是目前暴露數(manifest 只在有暴露時才寫出)
+  covered_commits: number | null;
+  covered_refs: string[];
+  dirty_files: number | null;
+} & Record<string, unknown>;
+
+export type RepoGuardStatus = {
+  checked_at: string;
+  store_root: string | null;
+  fresh_hours: number;
+  scheduled: boolean;
+  note: string;
+  overall_light: RepoGuardLight;
+  targets: RepoGuardTarget[];
+} & Record<string, unknown>;
+
 export type UpdatePrecheckPayload = {
   checked_at: string;
   remote_note: string;
   stage: string;
   targets: UpdateTarget[];
+  // 同一個唯讀端點附帶回來(不另開取數 URL);後端讀不到時整塊可能不存在
+  repo_guard?: RepoGuardStatus | null;
 };
 
 export class ApiError extends Error {
