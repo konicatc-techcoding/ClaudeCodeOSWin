@@ -316,6 +316,34 @@ button { color: inherit; }
 .guard-target-facts b { color: #d8dbe3; font-size: 15px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .guard-target-refs { margin: 0; color: var(--muted-2); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; word-break: break-all; }
 
+/* ---- Jobs 管線新鮮度燈號(2026-09-04;唯讀顯示,零操作元素)---- */
+/* 燈色沿用既有 token:綠 #34d399、黃 #fbbf24、橙 #fb923c(同 .update-light-orange)、
+   灰 #6b7280。**刻意沒有 red**——紅在本系統是常駐/服務層級的「不可用」語意
+   (.update-light-red / 常駐燈),管線新鮮度不搶那顆燈。
+   橙在這裡代表「觸發端/執行端死了」;與升級預檢的「未 push」橙不在同一頁,
+   且 class 命名空間各自獨立(fresh-light- 與 update-light- 、guard-light- 前綴互不重疊)。
+   灰在這裡代表「進行中(正常)或無法判斷」,**不是**警示色。
+   版面/字級比照 .guard-* 那一組;無 !important。 */
+.fresh-panel { border: 1px solid var(--line); border-radius: 13px; background: var(--surface-2); padding: 15px 16px; display: grid; gap: 11px; border-left: 4px solid #6b7280; }
+.fresh-light-green { border-left-color: #34d399; }
+.fresh-light-yellow { border-left-color: #fbbf24; }
+.fresh-light-orange { border-left-color: #fb923c; }
+.fresh-light-gray { border-left-color: #6b7280; }
+.fresh-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.fresh-head b { font-size: 16px; }
+.fresh-summary { margin: 0; color: #c9cdd7; font-size: 14px; line-height: 1.55; }
+.fresh-unavailable { margin: 0; color: #df8a94; font-size: 14px; line-height: 1.55; }
+.fresh-thresholds { margin: 0; color: var(--muted-2); font-size: 13px; line-height: 1.6; }
+.fresh-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.fresh-sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 9px; }
+.fresh-source { padding: 10px 11px; border: 1px solid var(--line-soft); border-left: 3px solid #6b7280; border-radius: 9px; background: #14161c; display: grid; gap: 6px; }
+.fresh-source-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.fresh-source-head b { flex: 1; min-width: 0; font-size: 14px; color: #d8dbe3; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.fresh-source-reason { margin: 0; color: #c9cdd7; font-size: 14px; line-height: 1.55; }
+.fresh-source-facts { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+.fresh-source-facts b { color: #d8dbe3; font-size: 15px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.fresh-source-last { margin: 0; color: var(--muted-2); font-size: 13px; line-height: 1.55; }
+
 /* ---- P3:ClaudeCode CLI(PTY 真終端機)view ---- */
 /* 不可移除警語:警示色+深色終端視覺區隔(提案 §7),無關閉/摺疊控制 */
 .terminal-warning { margin: 0 0 14px; padding: 12px 14px; border: 1px solid #5c3a1e; border-left: 4px solid #e0973f; border-radius: 11px; color: #f2b56d; background: #251d14; font-size: 13px; line-height: 1.6; }

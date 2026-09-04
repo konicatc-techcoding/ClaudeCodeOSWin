@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { apiGet, ApiError, JOB_SOURCES, JOB_STATUSES, type Job, type LogTail } from "../api";
 import { ErrorNotice, InfoNotice, Panel, RefreshButton, useApiData } from "./common";
+import JobsFreshnessPanel from "./JobsFreshness";
 
 const TABLE_COLUMNS = [
   "id",
@@ -35,6 +36,11 @@ export default function JobsView() {
         <RefreshButton onClick={reload} loading={loading} />
       </div>
       {error && <ErrorNotice message={error} />}
+
+      {/* 管線新鮮度置於列表之上:這一頁本來就看得到 source/status,但**要人
+          主動去篩才看得到異常**。先給結論(哪個 source 死了/退化),再讓人往
+          下翻明細——與總覽頁共用同一個元件與同一個唯讀端點,不另起判準。 */}
+      <JobsFreshnessPanel />
 
       <Panel title="最近 Jobs">
         <div className="form-row">

@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hermes"))
 import api  # noqa: E402
 import data  # noqa: E402
 import data_resident  # noqa: E402
+import data_jobs_freshness  # noqa: E402
 import data_repo_guard  # noqa: E402
 import data_stage3  # noqa: E402
 import data_systemd_wsl  # noqa: E402
@@ -77,6 +78,8 @@ class ApiServerTestCase(unittest.TestCase):
             "memory_dir": data.MEMORY_DIR,
             "registry_dir": data.REGISTRY_DIR,
             "config_dir": data.CONFIG_DIR,
+            # 新鮮度燈號的資料來源(jobs.db)——導向臨時 DB,測試絕不碰真的 jobs.db
+            "freshness_db": data_jobs_freshness.JOBS_DB,
         }
         db_path = self._tmpdir / "jobs.db"
         data.JOBS_DB_PATH = db_path
@@ -90,6 +93,8 @@ class ApiServerTestCase(unittest.TestCase):
         data.REGISTRY_DIR.mkdir()
         data.CONFIG_DIR = self._tmpdir / "config"
         data.CONFIG_DIR.mkdir()
+        # 門檻仍讀真的 registry/jobs_watchdog.yaml(它就是唯一真相,不另造一份)
+        data_jobs_freshness.JOBS_DB = db_path
 
     def tearDown(self):
         data.JOBS_DB_PATH = self._orig["jobs_db"]
@@ -98,6 +103,7 @@ class ApiServerTestCase(unittest.TestCase):
         data.MEMORY_DIR = self._orig["memory_dir"]
         data.REGISTRY_DIR = self._orig["registry_dir"]
         data.CONFIG_DIR = self._orig["config_dir"]
+        data_jobs_freshness.JOBS_DB = self._orig["freshness_db"]
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
@@ -181,7 +187,8 @@ class ImportGuardTests(unittest.TestCase):
     # 想加東西?先想清楚它有沒有寫入能力,再來改這份白名單。
     ALLOWED_IMPORTS = {
         "argparse", "json", "re", "sys", "urllib.parse",
-        "http.server", "pathlib", "data", "data_resident", "data_repo_guard",
+        "http.server", "pathlib", "data", "data_jobs_freshness",
+        "data_resident", "data_repo_guard",
         "data_stage3", "data_systemd_wsl", "data_update", "redact",
     }
     # 已知寫入模組(防守性斷言;白名單本來就擋掉它們,雙保險)
@@ -307,6 +314,37 @@ class EndpointBehaviorTests(ApiServerTestCase):
         db.claim_next_job("worker-1")
         db.mark_completed(job_id, "done", cost_usd=0.1)
         self.assertEqual(self._get_json("/api/status-counts"), {"completed": 1})
+
+    def test_jobs_freshness_lights_and_thresholds(self):
+        """新鮮度端點:空 DB → 有排程觸發器的 source 判 trigger_dead(橙)。
+
+        這正是這次要抓的形態——「跑都沒跑」在全時段累計數字上看不出來。
+        門檻來自真的 registry/jobs_watchdog.yaml(唯一真相),不另造一份。
+        """
+        payload = self._get_json("/api/jobs-freshness")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["overall_light"], "orange")
+        states = {s["source"]: s["state"] for s in payload["sources"]}
+        self.assertEqual(states["cron"], "trigger_dead")
+        self.assertEqual(states["rss"], "trigger_dead")
+        # 事件驅動 source 零進件是正常,不得被判成故障(誤報防線)
+        self.assertEqual(states["telegram"], "healthy")
+        lights = {s["source"]: s["light"] for s in payload["sources"]}
+        self.assertEqual(lights["cron"], "orange")
+        self.assertEqual(lights["telegram"], "green")
+        # 門檻原樣回傳,UI 才能顯示「為什麼是這個燈」
+        self.assertEqual(payload["thresholds"]["min_expected_enqueued"], 1)
+        # 唯讀鐵律:回應不含任何送信/寫入痕跡
+        self.assertNotIn("sent", payload)
+
+    def test_jobs_freshness_fail_soft_when_db_missing(self):
+        """jobs.db 不存在 → 灰燈 + 明確原因,不是 500、不是假裝沒事。"""
+        data_jobs_freshness.JOBS_DB = self._tmpdir / "missing.db"
+        payload = self._get_json("/api/jobs-freshness")
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertEqual(payload["overall_light"], "gray")
+        self.assertEqual(payload["sources"], [])
+        self.assertIn("jobs.db", payload["reason"])
 
     def test_jobs_list_with_filters(self):
         db.enqueue("telegram", "a")

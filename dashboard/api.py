@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import data  # noqa: E402
 import data_resident  # noqa: E402(背景常駐狀態燈號,唯讀三層探測,見 data_resident.py)
 import data_stage3  # noqa: E402(P2:Stage 3 三項唯讀函式,見 data_stage3.py)
+import data_jobs_freshness  # noqa: E402(jobs 管線新鮮度燈號:即時唯讀評估,判準與 Slack 看門狗共用,見 data_jobs_freshness.py)
 import data_repo_guard  # noqa: E402(未推送 commit 離線保險快照的唯讀狀態,見 data_repo_guard.py)
 import data_systemd_wsl  # noqa: E402(Windows 側經 WSL 的 systemd 唯讀快照,見 data_systemd_wsl.py)
 import data_update  # noqa: E402(Hermes 更新唯讀升級預檢——階段一,見 data_update.py)
@@ -164,6 +165,22 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
             if job is None:
                 raise ApiError(404, "找不到這個 job id")
             return 200, job
+        if path == "/api/jobs-freshness":
+            # jobs 管線新鮮度燈號(2026-09-04,F5 看門狗的觀測面對應物)。
+            # **即時計算**:直接對 jobs.db 唯讀查詢,判準與門檻與
+            # scripts/jobs_freshness_watchdog.py 共用同一個 core 模組與同一份
+            # registry/jobs_watchdog.yaml——UI 與告警不會各判各的。
+            # 資料層零 subprocess(送 Slack 那一半留在 watchdog,本路徑不 import),
+            # **不會送任何告警、不寫任何東西、不觸發任何 job**;fail-soft 轉灰燈。
+            #
+            # 為什麼另開端點而不附掛(對照 repo_guard 附掛在 update-precheck):
+            # repo_guard 與升級預檢講的是同一件事的兩層,放一起才看得懂;新鮮度
+            # 則沒有語意上的宿主——/api/status-counts 的契約是
+            # `Record<string, number>`(全時段累計),塞進巢狀物件會破壞型別與
+            # 其等值測試;/api/health 講的是「API 活著嗎」,與「管線活著嗎」混為
+            # 一談正是這次事故的認知錯誤。故獨立端點。第 11 項「URL 恰兩個字面」
+            # 的靜態鎖定是針對 UpdatePrecheck.tsx,本改動未觸及該檔。
+            return 200, data_jobs_freshness.get_jobs_freshness()
         if path == "/api/cost-summary":
             return 200, data.get_cost_summary()
         if path == "/api/systemd-status":

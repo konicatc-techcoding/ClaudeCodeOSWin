@@ -10,6 +10,7 @@ import {
   type SystemdStatusPayload,
 } from "../api";
 import { ErrorNotice, InfoNotice, Metric, Panel, RefreshButton, useApiData, WarnNotice } from "./common";
+import JobsFreshnessPanel from "./JobsFreshness";
 import LocalServices from "../LocalServices";
 import ServiceControl from "../ServiceControl";
 import SchedulePanel from "./Schedule";
@@ -91,6 +92,13 @@ export default function Overview() {
       {data && !data.health.jobs_db_exists && (
         <WarnNotice message="hermes/jobs.db 尚未建立(runtime 資料,不在 git 裡)。worker 或 adapter 第一次執行後就會建立;在那之前 Jobs/成本分頁會是空的。" />
       )}
+
+      {/* Jobs 管線新鮮度(2026-09-04):**放在本頁最上方**,因為總覽是進站
+          第一頁,而「管線這幾天到底有沒有在跑」比下方任何一張卡都優先——
+          2026-08 那 31 天靜默,正是因為這個維度在 UI 上根本不存在,而
+          〔Job 狀態統計〕的全時段累計把它完全稀釋掉了。獨立取數(自帶
+          RefreshButton),API 或設定壞掉只讓這一塊變灰,不影響本頁其他區塊。 */}
+      <JobsFreshnessPanel />
 
       {/* 服務控制鍵+本機服務燈號(2026-08-03 自 sidebar 遷入,置於
           Worker/Adapter 狀態上方):兩欄 grid 左右並排,窄視窗由 auto-fit

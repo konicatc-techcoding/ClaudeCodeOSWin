@@ -365,3 +365,72 @@ export async function apiGet<T>(path: string): Promise<T> {
   }
   return (await response.json()) as T;
 }
+
+// --- jobs 管線「新鮮度」燈號(2026-09-04;資料層 dashboard/data_jobs_freshness.py)---
+// 對應 GET /api/jobs-freshness。**即時計算**:每次取數直接對 jobs.db 唯讀查詢,
+// 判準與門檻與 Slack 看門狗(scripts/jobs_freshness_watchdog.py)共用同一個
+// core 模組與同一份 registry/jobs_watchdog.yaml——UI 與告警不會各判各的,
+// 也沒有「這份資料多舊」的問題(不像 repo_guard 讀的是腳本產物 manifest)。
+// 端點唯讀:不送任何 Slack、不寫任何東西、不觸發任何 job。
+//
+// 燈色語意(後端 STATE_LIGHTS 決定,前端只渲染,不重算規則):
+//   trigger_dead / executor_dead → orange(最高嚴重度)
+//   executor_degraded            → yellow
+//   healthy                      → green
+//   inconclusive                 → gray(**正常的「還在跑」,刻意不是警示色**)
+//   端點 unavailable             → gray + reason(灰 ≠ 沒事)
+// 不使用 red:紅在本系統既有語意是常駐/服務層級的「不可用」(ResidentLight /
+// UpdateLight),管線新鮮度不搶那顆燈。
+export type FreshnessLight = "green" | "yellow" | "orange" | "gray";
+
+export type FreshnessState =
+  | "healthy"
+  | "inconclusive"
+  | "trigger_dead"
+  | "executor_dead"
+  | "executor_degraded";
+
+export type FreshnessSource = {
+  source: string;
+  description: string | null;
+  state: FreshnessState | string;
+  state_label: string;
+  state_short: string;
+  light: FreshnessLight;
+  // 是否屬於「看門狗會告警」的狀態——inconclusive/healthy 皆為 false
+  alerting: boolean;
+  reason: string;
+  expect_enqueue: boolean;
+  lookback_hours: number;
+  enqueued: number;
+  completed: number;
+  dead_letter: number;
+  stuck: number;
+  last_completed_at: string | null;
+  last_completed_age_hours: number | null;
+  last_completed_age_text: string;
+} & Record<string, unknown>;
+
+export type FreshnessThresholds = {
+  lookback_hours: number;
+  min_expected_enqueued: number;
+  stuck_backlog_hours: number;
+  dead_letter_ratio_threshold: number;
+  min_terminal_sample: number;
+};
+
+export type JobsFreshnessPayload = {
+  checked_at: string;
+  status: "ok" | "unavailable";
+  available: boolean;
+  reason: string | null;
+  note: string;
+  config_path: string;
+  jobs_db: string;
+  overall_light: FreshnessLight;
+  overall_text: string;
+  summary: string;
+  thresholds: FreshnessThresholds | null;
+  alerting_states: string[];
+  sources: FreshnessSource[];
+} & Record<string, unknown>;
