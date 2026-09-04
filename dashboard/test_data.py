@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hermes"))
 import data  # noqa: E402
+import data_jobs_snapshot  # noqa: E402
 import db  # noqa: E402
 
 
@@ -49,6 +50,13 @@ class DashboardDataTests(unittest.TestCase):
         data.CONFIG_DIR = self._tmpdir / "config"
         data.CONFIG_DIR.mkdir()
 
+        # 2026-09-04:data.py 在 runtime jobs.db 不存在時會退到「WSL 推來的
+        # 快照」(%LOCALAPPDATA%\AgentOS\jobs-snapshot)。測試必須把快照位置
+        # 隔離到 tempdir,否則本機真的有快照時,「jobs.db 不存在」那一類測試會
+        # 讀到真實資料——**測試絕不碰真實 runtime 產物**。
+        self._original_snapshot_dir = data_jobs_snapshot.SNAPSHOT_DIR
+        data_jobs_snapshot.SNAPSHOT_DIR = self._tmpdir / "snapshot"
+
     def tearDown(self):
         data.JOBS_DB_PATH = self._original_jobs_db
         db.DB_PATH = self._original_db_dbpath
@@ -56,6 +64,7 @@ class DashboardDataTests(unittest.TestCase):
         data.MEMORY_DIR = self._original_memory_dir
         data.REGISTRY_DIR = self._original_registry_dir
         data.CONFIG_DIR = self._original_config_dir
+        data_jobs_snapshot.SNAPSHOT_DIR = self._original_snapshot_dir
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 

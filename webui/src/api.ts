@@ -367,11 +367,15 @@ export async function apiGet<T>(path: string): Promise<T> {
 }
 
 // --- jobs 管線「新鮮度」燈號(2026-09-04;資料層 dashboard/data_jobs_freshness.py)---
-// 對應 GET /api/jobs-freshness。**即時計算**:每次取數直接對 jobs.db 唯讀查詢,
-// 判準與門檻與 Slack 看門狗(scripts/jobs_freshness_watchdog.py)共用同一個
-// core 模組與同一份 registry/jobs_watchdog.yaml——UI 與告警不會各判各的,
-// 也沒有「這份資料多舊」的問題(不像 repo_guard 讀的是腳本產物 manifest)。
+// 對應 GET /api/jobs-freshness。判準與門檻與 Slack 看門狗
+// (scripts/jobs_freshness_watchdog.py)共用同一個 core 模組與同一份
+// registry/jobs_watchdog.yaml——UI 與告警不會各判各的。
 // 端點唯讀:不送任何 Slack、不寫任何東西、不觸發任何 job。
+//
+// ⚠️ **資料年齡**(2026-09-04 拓撲修正):runtime jobs.db 只存在 WSL,而唯讀 API
+// 跑在 Windows,所以這裡讀的是 WSL 定期推來的**快照**。payload 的 data_* 欄位
+// 就是「這份資料多舊」,**呈現層必須顯示**——絕不能讓人以為看到的是當下狀態。
+// 快照偏舊時後端會把綠燈降黃、過期時整體轉灰(前端不重算這條規則)。
 //
 // 燈色語意(後端 STATE_LIGHTS 決定,前端只渲染,不重算規則):
 //   trigger_dead / executor_dead → orange(最高嚴重度)
@@ -409,6 +413,10 @@ export type FreshnessSource = {
   last_completed_at: string | null;
   last_completed_age_hours: number | null;
   last_completed_age_text: string;
+  // 資料年齡造成的降級(後端決定):light_before_data_age 保留原本的燈色,
+  // 讓「為什麼變黃/變灰」可被追溯;data_stale=true 代表這一列的結論算自舊快照。
+  light_before_data_age?: FreshnessLight | null;
+  data_stale?: boolean;
 } & Record<string, unknown>;
 
 export type FreshnessThresholds = {
@@ -419,7 +427,27 @@ export type FreshnessThresholds = {
   min_terminal_sample: number;
 };
 
-export type JobsFreshnessPayload = {
+// 資料來源與年齡(dashboard/data_jobs_snapshot.py 判定;Jobs/成本/新鮮度共用)。
+export type JobsDataSourceKind = "runtime" | "snapshot" | "missing";
+export type JobsDataStatus = "live" | "fresh" | "stale" | "expired" | "never" | "error";
+
+export type JobsDataAge = {
+  data_source?: JobsDataSourceKind;
+  data_status?: JobsDataStatus;
+  data_captured_at?: string | null;
+  data_age_hours?: number | null;
+  data_age_text?: string | null;
+  data_age_label?: string;
+  data_trusted?: boolean;
+  data_summary?: string;
+  data_note?: string;
+  data_fresh_hours?: number;
+  data_expire_hours?: number;
+  data_snapshot_dir?: string | null;
+  data_jobs_count?: number | null;
+};
+
+export type JobsFreshnessPayload = JobsDataAge & {
   checked_at: string;
   status: "ok" | "unavailable";
   available: boolean;

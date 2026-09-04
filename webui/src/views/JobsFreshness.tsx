@@ -8,6 +8,11 @@
 // 唯讀邊界:本卡片零操作入口(除了共用的讀取型 RefreshButton),取數只經
 // apiGet;端點本身不送 Slack、不寫任何東西、不觸發任何 job。
 //
+// ⚠️ 資料年齡(2026-09-04):Windows 側讀的是 WSL 推來的 jobs.db 快照(runtime db
+// 只在 WSL,經 UNC 直接讀會被 WAL 鎖擋下)。**快照年齡已進入判準**:偏舊時後端把
+// 綠燈降黃、過期時整體轉灰——前端不重算這條規則,只負責把年齡明確顯示出來
+// (DataAgeBanner),因為「6 小時前的快照算出來的綠燈」就是假的。
+//
 // 燈色**完全由後端給**(dashboard/data_jobs_freshness.STATE_LIGHTS),前端只
 // 渲染,不在這裡重算判準或門檻——UI 與 Slack 看門狗共用同一份 core 判準與
 // 同一份 registry/jobs_watchdog.yaml。五態 → 色:
@@ -20,6 +25,7 @@ import {
   type JobsFreshnessPayload,
 } from "../api";
 import { ErrorNotice, InfoNotice, Panel, RefreshButton, useApiData } from "./common";
+import { DataAgeBanner } from "./JobsDataAge";
 
 // 沿用既有 token(同 .update-light-* / .guard-light-* 的四顆);不新增色彩系統。
 // 刻意不含 red——紅在本系統是常駐/服務層級的「不可用」語意,不搶那顆燈。
@@ -89,8 +95,10 @@ export function JobsFreshnessCard({ payload }: { payload: JobsFreshnessPayload |
         <span className="update-badge" aria-label={`整體新鮮度:${payload.overall_text}`}>
           {payload.overall_text}
         </span>
-        <i className="update-ref-note">即時計算（非快照）</i>
       </div>
+      {/* 資料年齡:讀的是 WSL 推來的快照時,**必須先講清楚資料多舊**,
+          再談燈號結論——不能讓人以為這是當下狀態(2026-09-04 拓撲修正)。 */}
+      <DataAgeBanner data={payload} />
       <p className="fresh-summary">{payload.summary}</p>
       {/* unavailable:灰燈 + 誠實原因。灰 ≠ 沒事,文案上必須講清楚。 */}
       {!payload.available && payload.reason && (
@@ -126,7 +134,7 @@ export default function JobsFreshnessPanel() {
   return (
     <Panel
       title="Jobs 管線新鮮度"
-      caption="回答「這條管線最近有沒有在跑」——這是全時段累計數字看不出來的維度（2026-08 的 31 天靜默就是這樣被埋掉的）。即時對 jobs.db 唯讀計算，判準與門檻與 Slack 看門狗共用同一份 registry/jobs_watchdog.yaml。橙＝觸發端或執行端死了；黃＝死信比例超標；綠＝健康；灰＝進行中或無法判斷（灰不等於沒事）。"
+      caption="回答「這條管線最近有沒有在跑」——這是全時段累計數字看不出來的維度（2026-08 的 31 天靜默就是這樣被埋掉的）。判準與門檻與 Slack 看門狗共用同一份 registry/jobs_watchdog.yaml；Windows 側讀的是 WSL 定期推來的 jobs.db 快照，**快照年齡已納入判準**（偏舊→綠燈降黃、過期→整體轉灰）。橙＝觸發端或執行端死了；黃＝死信比例超標；綠＝健康；灰＝進行中或無法判斷（灰不等於沒事）。"
       actions={<RefreshButton onClick={reload} loading={loading} />}
     >
       {error && <ErrorNotice message={error} />}

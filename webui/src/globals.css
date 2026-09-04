@@ -344,6 +344,17 @@ button { color: inherit; }
 .fresh-source-facts b { color: #d8dbe3; font-size: 15px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .fresh-source-last { margin: 0; color: var(--muted-2); font-size: 13px; line-height: 1.55; }
 
+/* ---- jobs 資料年齡橫幅(2026-09-04):Windows 側讀的是 WSL 推來的快照,
+   Jobs/成本/新鮮度三處一律先講「資料多舊」。沿用既有燈色 token,不新增色彩系統;
+   刻意不含 red(紅是常駐/服務層級「不可用」的既有語意)。 ---- */
+.data-age { margin: 0 0 12px; padding: 9px 12px; display: grid; gap: 4px; border: 1px solid var(--line-soft); border-left: 3px solid #6b7280; border-radius: 9px; background: #14161c; color: var(--muted-2); font-size: 13px; line-height: 1.6; }
+.data-age b { color: #d8dbe3; font-size: 13px; }
+.data-age-stamp { color: var(--muted); font-style: normal; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.data-age-note { color: var(--muted); font-style: normal; }
+.data-age-green { border-left-color: #34d399; }
+.data-age-yellow { border-left-color: #fbbf24; }
+.data-age-gray { border-left-color: #6b7280; }
+
 /* ---- P3:ClaudeCode CLI(PTY 真終端機)view ---- */
 /* 不可移除警語:警示色+深色終端視覺區隔(提案 §7),無關閉/摺疊控制 */
 .terminal-warning { margin: 0 0 14px; padding: 12px 14px; border: 1px solid #5c3a1e; border-left: 4px solid #e0973f; border-radius: 11px; color: #f2b56d; background: #251d14; font-size: 13px; line-height: 1.6; }

@@ -14,9 +14,13 @@ import contextlib
 import json
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import data_jobs_snapshot  # noqa: E402（jobs.db 來源與資料年齡的單一判定處）
 
 ROOT = Path(__file__).resolve().parent.parent
 JOBS_DB_PATH = ROOT / "hermes" / "jobs.db"
@@ -28,17 +32,44 @@ CONFIG_DIR = ROOT / "hermes" / "config"
 JOB_STATUSES = ["queued", "running", "completed", "failed", "dead_letter"]
 
 
+def jobs_source() -> dict:
+    """這台機器上「jobs 資料從哪來、有多舊」的唯一判定處（見
+    data_jobs_snapshot.py）。呈現層一律據此顯示資料年齡——**讀到快照時絕不可以
+    讓使用者以為是即時資料**。"""
+    return data_jobs_snapshot.resolve_jobs_source(runtime_db=JOBS_DB_PATH)
+
+
+def resolve_jobs_db() -> Path:
+    """實際要查的 db 路徑。
+
+    2026-09-04 拓撲修正：runtime `hermes/jobs.db` **只存在 WSL 部署複本**，而這支
+    唯讀 API 跑在 Windows——先前 Jobs 頁／成本頁／status-counts 一直是空的正是
+    因為這裡只看 runtime 路徑。現在的順序是：本機有 runtime 就用 runtime（WSL
+    側或未來 API 搬家皆適用），否則退到 WSL 定期推來的快照
+    （`%LOCALAPPDATA%\\AgentOS\\jobs-snapshot\\jobs.snapshot.db`）。
+    兩者都沒有 → 維持回傳 runtime 路徑（不存在），查詢函式照舊回空結果。
+    """
+    if JOBS_DB_PATH.exists():
+        return JOBS_DB_PATH
+    info = data_jobs_snapshot.resolve_jobs_source(runtime_db=JOBS_DB_PATH)
+    if info["usable"] and info["db_path"]:
+        return Path(info["db_path"])
+    return JOBS_DB_PATH
+
+
 def jobs_db_exists() -> bool:
-    """jobs.db 是 runtime 資料（gitignored），由 worker/adapter 第一次執行
-    init_db() 時建立。環境搬遷後（macOS → Windows）檔案還不存在是正常狀態：
-    mode=ro 開不存在的檔案會直接 OperationalError，所以查詢函式都先走這個
-    檢查、回傳空結果。dashboard 維持唯讀，不自己建檔——建檔是 hermes 的責任。"""
-    return JOBS_DB_PATH.exists()
+    """有沒有可查詢的 jobs 資料（runtime db 或快照）。
+
+    jobs.db 是 runtime 資料（gitignored），由 worker/adapter 第一次執行 init_db()
+    時建立；Windows 側永遠不會有它，所以這裡也認快照（快照壞掉時
+    data_jobs_snapshot 的探測會把 usable 判成 False，等同「沒有」，
+    而不是讓查詢在半路 500）。dashboard 維持唯讀，不自己建檔。"""
+    return resolve_jobs_db().exists()
 
 
 def _ro_connection() -> sqlite3.Connection:
     """開一個唯讀連線——任何 INSERT/UPDATE/DELETE 都會被 SQLite 直接拒絕。"""
-    conn = sqlite3.connect(f"file:{JOBS_DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{resolve_jobs_db()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 

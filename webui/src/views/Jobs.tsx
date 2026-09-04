@@ -4,6 +4,7 @@ import { useState } from "react";
 import { apiGet, ApiError, JOB_SOURCES, JOB_STATUSES, type Job, type LogTail } from "../api";
 import { ErrorNotice, InfoNotice, Panel, RefreshButton, useApiData } from "./common";
 import JobsFreshnessPanel from "./JobsFreshness";
+import JobsDataAgePanel from "./JobsDataAge";
 
 const TABLE_COLUMNS = [
   "id",
@@ -41,6 +42,10 @@ export default function JobsView() {
           主動去篩才看得到異常**。先給結論(哪個 source 死了/退化),再讓人往
           下翻明細——與總覽頁共用同一個元件與同一個唯讀端點,不另起判準。 */}
       <JobsFreshnessPanel />
+
+      {/* 表格是最容易被誤讀成「即時狀態」的東西:Windows 側這些列來自 WSL
+          推來的快照,故在表格正上方再標一次資料年齡(獨立取數,失敗不影響表格)。 */}
+      <JobsDataAgePanel />
 
       <Panel title="最近 Jobs">
         <div className="form-row">

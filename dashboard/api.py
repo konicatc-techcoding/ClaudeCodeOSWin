@@ -145,7 +145,14 @@ class ReadOnlyAPIHandler(BaseHTTPRequestHandler):
 
         # endpoint 一對一對應 data.py 既有函式(提案 §4.2 第 2 項)
         if path == "/api/health":
-            return 200, {"ok": True, "readonly": True, "jobs_db_exists": data.jobs_db_exists()}
+            # jobs_db_source（2026-09-04）:Windows 側讀的是 WSL 推來的快照而非
+            # runtime db,故健康檢查一併回「資料從哪來、有多舊」——**不能讓
+            # 呼叫端以為 jobs_db_exists=True 就等於即時資料**。判定住在
+            # data_jobs_snapshot.py(經 data.jobs_source(),api.py 不新增 import,
+            # 白名單維持不變)。
+            return 200, {"ok": True, "readonly": True,
+                         "jobs_db_exists": data.jobs_db_exists(),
+                         "jobs_db_source": data.jobs_source()}
         if path == "/api/status-counts":
             return 200, data.get_status_counts()
         if path == "/api/jobs":

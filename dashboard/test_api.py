@@ -37,6 +37,7 @@ import api  # noqa: E402
 import data  # noqa: E402
 import data_resident  # noqa: E402
 import data_jobs_freshness  # noqa: E402
+import data_jobs_snapshot  # noqa: E402
 import data_repo_guard  # noqa: E402
 import data_stage3  # noqa: E402
 import data_systemd_wsl  # noqa: E402
@@ -80,6 +81,9 @@ class ApiServerTestCase(unittest.TestCase):
             "config_dir": data.CONFIG_DIR,
             # 新鮮度燈號的資料來源(jobs.db)——導向臨時 DB,測試絕不碰真的 jobs.db
             "freshness_db": data_jobs_freshness.JOBS_DB,
+            # 快照落點也隔離到 tempdir(2026-09-04):data.py/freshness 在 runtime
+            # db 不存在時會退到 WSL 推來的快照,測試不得讀到真實產物。
+            "snapshot_dir": data_jobs_snapshot.SNAPSHOT_DIR,
         }
         db_path = self._tmpdir / "jobs.db"
         data.JOBS_DB_PATH = db_path
@@ -95,6 +99,7 @@ class ApiServerTestCase(unittest.TestCase):
         data.CONFIG_DIR.mkdir()
         # 門檻仍讀真的 registry/jobs_watchdog.yaml(它就是唯一真相,不另造一份)
         data_jobs_freshness.JOBS_DB = db_path
+        data_jobs_snapshot.SNAPSHOT_DIR = self._tmpdir / "snapshot"
 
     def tearDown(self):
         data.JOBS_DB_PATH = self._orig["jobs_db"]
@@ -104,6 +109,7 @@ class ApiServerTestCase(unittest.TestCase):
         data.REGISTRY_DIR = self._orig["registry_dir"]
         data.CONFIG_DIR = self._orig["config_dir"]
         data_jobs_freshness.JOBS_DB = self._orig["freshness_db"]
+        data_jobs_snapshot.SNAPSHOT_DIR = self._orig["snapshot_dir"]
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 

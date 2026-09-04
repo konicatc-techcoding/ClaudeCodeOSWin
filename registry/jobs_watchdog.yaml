@@ -82,3 +82,24 @@ alert:
   # message-key 命名空間。實際 key＝<prefix>:<date>:<state fingerprint>，
   # 同一天同一組狀態重跑不會重複投遞（hermes send ledger 第二層冪等）。
   message_key_prefix: agentos-watchdog
+
+# ---------------------------------------------------------------------------
+# 快照年齡門檻（2026-09-04 新增；消費者＝dashboard/data_jobs_snapshot.py）
+#
+# 為什麼需要它：Windows 觀測面讀的不是 runtime jobs.db（那個只在 WSL），而是
+# WSL 定期以 SQLite 線上備份 API 推來的快照。**快照年齡必須進入燈號判準**——
+# 拿 6 小時前的資料算出「rss 9 分鐘前成功」是假結論。
+#
+#   fresh_hours   在此之內視為新鮮，照常判定。1.5＝掛在每 30 分鐘的
+#                 hermes-rss.service 上產出，容忍連續錯過兩輪。
+#   expire_hours  超過就**整體轉灰、不下結論**（不是拿舊資料算綠燈）。
+#                 6＝約錯過 12 輪，已不可能只是偶發。
+#
+# 中間帶（fresh < age <= expire）＝stale：綠燈降黃「僅供參考」，橙／黃維持
+# ——壞消息不會因為資料舊而失效，但「現在還好」是關於當下的斷言，舊資料證不了。
+#
+# 註：Slack 看門狗跑在 WSL 側、讀 runtime db，**不受本區塊影響**（它沒有資料
+# 年齡問題，也因此仍是權威告警路徑）。
+snapshot:
+  fresh_hours: 1.5
+  expire_hours: 6

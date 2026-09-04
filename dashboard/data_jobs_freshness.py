@@ -9,15 +9,34 @@
 cron dead_letter 混在 758 筆歷史 completed 裡，數字上一點都不刺眼。本模組補
 的就是「打開 UI 能不能一眼看出來」。
 
-## 與 repo_guard 卡片刻意不同的作法：即時計算，不讀狀態檔
+## 資料來源：Windows 側讀的是**快照**，不是 runtime db（2026-09-04 拓撲修正）
 
-`data_repo_guard.py` 讀 `_latest.json`、還得誠實標示資料年齡，因為那是腳本
-產物。新鮮度不一樣——看門狗**不寫任何狀態檔**（即時評估完就送 Slack），而
-dashboard 本來就有 jobs.db 的唯讀權限。所以這裡直接呼叫
-`scripts/jobs_freshness_core.py` 的判準函式**即時計算**：
+原本這裡寫著「即時計算，沒有資料多舊的問題」——**那句話在實際部署位置上是錯的**。
+runtime `jobs.db` 只存在 WSL 部署複本，而這支 API 跑在 Windows：先前
+`jobs_db_exists()` 一路回 False，燈號其實一直是灰的（Jobs／成本／status-counts
+也一直是空的）。現在改為：WSL 側定期以 SQLite 線上備份 API 推一份快照到
+`%LOCALAPPDATA%\AgentOS\jobs-snapshot\`，本模組讀那一份。
 
-- 門檻只有一份真相（registry/jobs_watchdog.yaml），UI 與告警不會各判各的；
-- 永遠反映當下，不依賴看門狗上次何時跑過（沒有「資料多舊」的問題）。
+判準與門檻仍只有一份真相（registry/jobs_watchdog.yaml ＋
+`scripts/jobs_freshness_core.py`），UI 與 Slack 看門狗不會各判各的（看門狗在
+WSL 側跑，讀的是 runtime db——**它才是權威告警路徑**）。
+
+### 快照年齡必須進入判準（本次改動的重點）
+
+「rss 9 分鐘前成功」若是從 6 小時前的快照算出來的，那個結論就是假的。故：
+
+| 資料狀態 | 對燈號的處理 |
+|----------|--------------|
+| `live`（本機有 runtime db）／`fresh` | 照常判定 |
+| `stale`（超過 fresh 門檻） | **綠燈降黃**、文字註明「僅供參考」；橙／黃不動——
+  壞消息不會因為資料舊而失效（那件事確實發生過），但「一切正常」是關於**現在**
+  的斷言，舊資料證不了它 |
+| `expired`（超過 expire 門檻） | **整體轉灰、每列轉灰、不下任何結論**，但把當時
+  看到的異常寫進 summary 文字（不靠顏色，也不假裝沒事） |
+| `error`／`never`（快照壞掉／不存在） | 灰燈 + 誠實原因（fail-soft） |
+
+資料年齡的判定住在 `dashboard/data_jobs_snapshot.py`（單一判定處，data.py 的
+Jobs／成本／status-counts 也用它），本模組只消費它的結論。
 
 ## 唯讀 / 零副作用
 
@@ -59,6 +78,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 # jobs_freshness_watchdog（那一半持有 subprocess 與 Slack 送信）。
 import jobs_freshness_core as core  # noqa: E402
 
+import data_jobs_snapshot  # noqa: E402（jobs 資料來源與資料年齡的單一判定處）
+
 CONFIG_PATH = core.DEFAULT_CONFIG
 JOBS_DB = core.DEFAULT_JOBS_DB
 
@@ -84,12 +105,23 @@ _STATE_SHORT = {
 }
 
 NOTE = (
-    "此區塊是**即時計算**（每次載入直接對 jobs.db 唯讀查詢），不是讀某次腳本"
-    "留下的檔案，故沒有「資料多舊」的問題。判準與門檻與 Slack 看門狗"
-    "（scripts/jobs_freshness_watchdog.py）共用同一份 registry/jobs_watchdog.yaml，"
-    "兩者不會各判各的。本端點唯讀：不送任何通知、不寫任何東西、不觸發任何 job。"
-    "灰燈的「進行中」是正常狀態（有進件、還沒有終結結果），不是警告。"
+    "判準與門檻與 Slack 看門狗（scripts/jobs_freshness_watchdog.py）共用同一份 "
+    "registry/jobs_watchdog.yaml，兩者不會各判各的。**資料年齡**見上方標示："
+    "Windows 觀測面讀的是 WSL 定期推來的 jobs.db 快照（runtime db 只存在 WSL，"
+    "經 UNC 直接讀會被 WAL 鎖擋下），快照偏舊時綠燈會降級、過期時整體轉灰——"
+    "舊資料可以證明「出過事」，但證明不了「現在還好」。本端點唯讀：不送任何通知、"
+    "不寫任何東西、不觸發任何 job。灰燈的「進行中」是正常狀態（有進件、還沒有"
+    "終結結果），不是警告。"
 )
+
+# 資料年齡對「結論」的處理（理由見檔頭表格）。這裡只有語意，沒有門檻數字
+# ——門檻住在 data_jobs_snapshot.py／registry/jobs_watchdog.yaml。
+_DATA_STALE_NOTE = (
+    "⚠️ 這份結論算自偏舊的快照：異常（橙／黃）仍然成立（那件事確實發生過），"
+    "但「健康」只降級為黃色的『僅供參考』——舊資料證明不了現在還好。")
+_DATA_EXPIRED_NOTE = (
+    "⚠️ 資料已過期，**整體轉灰、不下任何結論**。連快照產出本身可能都停了"
+    "（WSL 沒開？掛載快照的單元沒跑？）。下方數字只能當歷史追溯看。")
 
 
 def _age_text(hours: float) -> str:
@@ -114,9 +146,28 @@ def _last_completed_age(value, now: datetime) -> tuple[float | None, str]:
     return round(hours, 2), _age_text(hours)
 
 
-def _unavailable(reason: str, now: datetime) -> dict:
-    """fail-soft 出口:灰燈 + 明確說明。**灰 ≠ 沒事**，文案上必須講清楚。"""
+def _data_block(info: dict) -> dict:
+    """把資料來源/年齡攤平成 payload 欄位（呈現層一律顯示，不可省略）。"""
     return {
+        "data_source": info["kind"],            # runtime | snapshot | missing
+        "data_status": info["status"],          # live | fresh | stale | expired | never | error
+        "data_captured_at": info["captured_at"],
+        "data_age_hours": info["age_hours"],
+        "data_age_text": info["age_text"],
+        "data_age_label": info["age_label"],
+        "data_trusted": info["trusted_for_verdict"],
+        "data_summary": info["summary"],
+        "data_note": info["note"],
+        "data_fresh_hours": info["fresh_hours"],
+        "data_expire_hours": info["expire_hours"],
+        "data_snapshot_dir": info["snapshot_dir"],
+        "data_jobs_count": info["jobs_count"],
+    }
+
+
+def _unavailable(reason: str, now: datetime, info: dict | None = None) -> dict:
+    """fail-soft 出口:灰燈 + 明確說明。**灰 ≠ 沒事**，文案上必須講清楚。"""
+    payload = {
         "checked_at": now.isoformat(),
         "status": "unavailable",
         "available": False,
@@ -131,6 +182,10 @@ def _unavailable(reason: str, now: datetime) -> dict:
         "alerting_states": list(core.ALERTING_STATES),
         "sources": [],
     }
+    if info is not None:
+        payload.update(_data_block(info))
+        payload["jobs_db"] = info["db_path"] or payload["jobs_db"]
+    return payload
 
 
 def _source_row(finding: dict, now: datetime) -> dict:
@@ -145,6 +200,10 @@ def _source_row(finding: dict, now: datetime) -> dict:
         "state_short": _STATE_SHORT.get(state, state),
         # 燈色由後端決定（與看門狗五態一對一）；UI 只渲染，不重算規則。
         "light": STATE_LIGHTS.get(state, "gray"),
+        # 資料年齡造成的降級（見檔頭表格）由呼叫端覆寫這兩欄；預設是「沒降級」。
+        # 保留原始燈色，讓「為什麼變黃/變灰」可被追溯，而不是無聲改掉。
+        "light_before_data_age": None,
+        "data_stale": False,
         "alerting": state in core.ALERTING_STATES,
         "reason": finding["reason"],
         "expect_enqueue": finding["expect_enqueue"],
@@ -168,21 +227,28 @@ def get_jobs_freshness(*, jobs_db: Path | None = None,
     hermes/jobs.db。**永不送告警、永不寫入。**
     """
     now = now or datetime.now(timezone.utc)
-    db_path = Path(jobs_db) if jobs_db else JOBS_DB
+    # 資料從哪來、有多舊：單一判定處（data_jobs_snapshot）。呼叫端顯式指定
+    # jobs_db 時仍走同一支——它若存在就會被判成 runtime/live，測試因此不受影響。
+    info = data_jobs_snapshot.resolve_jobs_source(
+        runtime_db=Path(jobs_db) if jobs_db else JOBS_DB, now=now)
+    if not info["usable"]:
+        # 沒有可查的資料（Windows 無 runtime、快照從未產出／壞掉／不見了）。
+        return _unavailable(
+            info["reason"] or "找不到任何可查詢的 jobs.db（本機無 runtime db，也沒有 WSL 推來的快照）",
+            now, info)
+    db_path = Path(info["db_path"])
     cfg_path = Path(config_path) if config_path else CONFIG_PATH
     try:
         config = core.load_config(cfg_path)
         findings = core.evaluate(db_path, config, now)
     except core.WatchdogError as exc:
-        return _unavailable(str(exc), now)
+        return _unavailable(str(exc), now, info)
     except Exception as exc:  # 任何非預期問題也不許讓整頁掛掉（fail-soft）
-        return _unavailable(f"評估時發生非預期錯誤（{exc.__class__.__name__}）", now)
+        return _unavailable(f"評估時發生非預期錯誤（{exc.__class__.__name__}）", now, info)
 
     sources = [_source_row(f, now) for f in findings]
-    overall = "gray"
-    if sources:
-        overall = max((s["light"] for s in sources), key=lambda c: _SEVERITY.get(c, 0))
     bad = [s for s in sources if s["alerting"]]
+    data_status = info["status"]
     if bad:
         overall_text = f"{len(bad)}／{len(sources)} 個 source 異常"
         summary = "；".join(f"{s['source']}：{s['state_short']}" for s in bad)
@@ -190,8 +256,41 @@ def get_jobs_freshness(*, jobs_db: Path | None = None,
     else:
         overall_text = f"{len(sources)} 個 source 皆無異常"
         summary = "所有受監控 source 都沒有「跑都沒跑／全部失敗」的跡象。"
+
+    # --- 快照年齡進入判準（見檔頭表格）---
+    if data_status == "expired":
+        # 過期：整體與每一列都轉灰、不下結論；但異常內容照樣寫在文字裡。
+        for row in sources:
+            row["light_before_data_age"] = row["light"]
+            row["light"] = "gray"
+            row["data_stale"] = True
+        overall = "gray"
+        overall_text = "資料過期，無法判斷"
+        seen = ("；".join(f"{s['source']}：{s['state_short']}" for s in bad)
+                if bad else "當時所有 source 都沒有異常跡象")
+        summary = (f"{info['summary']} {_DATA_EXPIRED_NOTE} "
+                   f"快照當時看到的狀態：{seen}。"
+                   "權威判定請看 WSL 側 Slack 看門狗（它讀的是 runtime db）。")
+    elif data_status == "stale":
+        # 偏舊：綠降黃（「現在還好」證不了），橙／黃維持（壞消息不會過期）。
+        for row in sources:
+            row["data_stale"] = True
+            if row["light"] == "green":
+                row["light_before_data_age"] = "green"
+                row["light"] = "yellow"
+                row["state_short"] = f"{row['state_short']}（資料偏舊，僅供參考）"
+        overall = max((s["light"] for s in sources),
+                      key=lambda c: _SEVERITY.get(c, 0)) if sources else "gray"
+        summary = f"{info['summary']} {_DATA_STALE_NOTE} {summary}"
+    else:
+        overall = max((s["light"] for s in sources),
+                      key=lambda c: _SEVERITY.get(c, 0)) if sources else "gray"
+        if info["kind"] == "snapshot":
+            summary = f"（依據 {info['age_text']}的快照）{summary}"
+
     defaults = config["defaults"]
     return {
+        **_data_block(info),
         "checked_at": now.isoformat(),
         "status": "ok",
         "available": True,

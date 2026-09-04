@@ -2,6 +2,7 @@
 // 依 source 分組(長條圖+表格)。
 import { apiGet, type CostSummary } from "../api";
 import { ErrorNotice, InfoNotice, Metric, Panel, RefreshButton, useApiData } from "./common";
+import JobsDataAgePanel from "./JobsDataAge";
 
 export default function CostView() {
   const { data, error, loading, reload } = useApiData(() => apiGet<CostSummary>("/api/cost-summary"), []);
@@ -14,6 +15,9 @@ export default function CostView() {
         <RefreshButton onClick={reload} loading={loading} />
       </div>
       {error && <ErrorNotice message={error} />}
+      {/* 成本數字同樣來自 jobs.db 快照(Windows 側沒有 runtime db)——
+          先講資料多舊,再看數字。 */}
+      <JobsDataAgePanel />
       {data && (
         <Panel title="成本統計">
           <div className="metric-row">

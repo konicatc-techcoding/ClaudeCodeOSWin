@@ -24,6 +24,7 @@ ROOT = DASHBOARD_DIR.parent
 sys.path.insert(0, str(DASHBOARD_DIR))
 
 import data_jobs_freshness as freshness  # noqa: E402
+import data_jobs_snapshot  # noqa: E402
 
 NOW = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -58,6 +59,11 @@ CREATE TABLE jobs (
 class FreshnessTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        # 快照落點隔離(2026-09-04):jobs_db 指到不存在的檔時,資料層會退到
+        # 「WSL 推來的快照」;測試必須把那個位置導到 tempdir,否則本機真有快照
+        # 時 fail-soft 測試會讀到真實資料。
+        self._orig_snapshot_dir = data_jobs_snapshot.SNAPSHOT_DIR
+        data_jobs_snapshot.SNAPSHOT_DIR = self.tmp / "snapshot"
         self.db = self.tmp / "jobs.db"
         self.config = self.tmp / "jobs_watchdog.yaml"
         self.config.write_text(CONFIG, encoding="utf-8")
@@ -68,6 +74,7 @@ class FreshnessTestCase(unittest.TestCase):
         self._n = 0
 
     def tearDown(self):
+        data_jobs_snapshot.SNAPSHOT_DIR = self._orig_snapshot_dir
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -247,6 +254,7 @@ class ReadOnlyStaticTests(unittest.TestCase):
     """唯讀鐵律的靜態鎖定：這條路徑上不存在送信/寫入能力。"""
 
     FILES = (DASHBOARD_DIR / "data_jobs_freshness.py",
+             DASHBOARD_DIR / "data_jobs_snapshot.py",
              ROOT / "scripts" / "jobs_freshness_core.py")
 
     def test_no_spawn_primitives(self):
