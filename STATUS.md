@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-09-04(二次)
+**最後更新**:2026-09-04(收工)
 
 ---
 
@@ -163,6 +163,39 @@
   drop 前已進 bundle)。
 - **`git push` 與 `sync_to_wsl.sh --apply` 都被 Claude Code auto mode 權限分類器擋下**,
   由使用者自行執行。下次遇到同類操作直接請使用者跑,不要浪費一輪。
+
+### 後半段:觀測面 jobs 資料層(`1081cd6` `14f0cfc` `b17a886` `11c0b63`)
+
+- **新鮮度燈號**(`1081cd6`):那場故障沒被發現的機制性原因是 UI 有資料、沒有「新鮮度」
+  這個維度——`/api/status-counts` 是全時段累計,28 筆 cron dead_letter 混在 758 筆歷史
+  completed 裡毫不刺眼。抽出 `scripts/jobs_freshness_core.py` 作為判準單一真相
+  (**零 subprocess、只 stdlib+pyyaml**,所以 dashboard 走這條路時「路徑上根本不存在
+  送 Slack 的能力」,不是靠紀律),看門狗改為從 core 匯入後再匯出、28 個測試零改動。
+  五態→燈刻意**不使用 red**(紅在本系統既有語意是常駐/服務層級的不可用);
+  `inconclusive` 為 gray 且嚴重度排序讓 gray < green,「還在跑」不會把整面板拉灰。
+- **★ 但它上線後是灰的**——runtime `jobs.db` 只在 WSL、API 跑 Windows,經 UNC 以
+  `mode=ro` 開啟實測 `database is locked`(WAL 跨 SMB 拿不到讀鎖)。**連帶發現
+  Jobs 頁/成本頁/`status-counts` 在 Windows 觀測面本來就一直是空的**,只是沒人注意到。
+- **jobs.db 快照(方案 b,`11c0b63`)**:`scripts/jobs_db_snapshot.py` 在 WSL 側以
+  SQLite 官方 `Connection.backup()` 產出快照到 `%LOCALAPPDATA%\AgentOS\jobs-snapshot\`。
+  **不沿用既有的三檔複製法**——`session_adapter` 那套是在跟寫入端賽跑,忙時段必輸
+  (STATUS 記的那個現象);backup API 的一致性由引擎保證。三個只會在真實部署炸的坑
+  都先擋掉:backup 產物繼承 WAL 模式→落地前 `journal_mode=DELETE`、不讓 sqlite 直接
+  寫 `/mnt/c`(DrvFs 鎖語意)、db 與 manifest 皆先寫 `.tmp` 再 `os.replace`。
+  **失敗時不寫 manifest**,讀端因此顯示「資料變舊」而不是被騙成剛更新。
+- **年齡納入判準採不對稱兩級**(engineering 對我指示的細化,已採納):`stale`(1.5–6h)
+  **只把綠燈降黃**、橙/黃維持——**壞消息不因資料舊而失效,但「一切正常」是關於現在的
+  斷言,舊資料證不了**;`expired`(>6h)全部轉灰不下結論,但把當時看到的異常寫進 summary
+  (轉灰不等於閉嘴),原燈色留在 `light_before_data_age` 供追溯。
+- **排程已掛(09-04 13:35 實證)**:`hermes-rss.service` 的 systemd drop-in,用
+  **`ExecStopPost` 而非 `ExecStartPost`**——後者只在 ExecStart 成功時跑,而「rss 這輪
+  失敗」正是最需要把資料推到觀測面的時候;前綴 `-` 讓快照失敗不把 rss 標成 failed。
+  原始 unit 從未被修改。**每 30 分鐘自動更新**,實測 attempts=1 / 92ms。
+- 看門狗排程亦已掛(`HermesBridgeDaily` 尾端第四段,每日 08:05,unit 為 `linked` 非
+  `enabled`——它沒有 `.timer`,不該被 enable 成常駐)。**兩層防護皆已生效。**
+- 一個過程中的失誤:`14f0cfc` 的腳本漏寫 `newline=''`,把 STATUS.md 整檔寫成 `
+`
+  (434 個),已於 `b17a886` 修回 LF,內容未遺失。
 
 ## 3. 卡住/未決的問題
 
