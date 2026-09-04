@@ -193,11 +193,16 @@
   原始 unit 從未被修改。**每 30 分鐘自動更新**,實測 attempts=1 / 92ms。
 - 看門狗排程亦已掛(`HermesBridgeDaily` 尾端第四段,每日 08:05,unit 為 `linked` 非
   `enabled`——它沒有 `.timer`,不該被 enable 成常駐)。**兩層防護皆已生效。**
-- 一個過程中的失誤:`14f0cfc` 的腳本漏寫 `newline=''`,把 STATUS.md 整檔寫成 `
-`
-  (434 個),已於 `b17a886` 修回 LF,內容未遺失。
+- 一個過程中的失誤:`14f0cfc` 的腳本漏寫 `newline=''`,Python 在寫入時把已是 CRLF 的
+  內容再翻一次,整檔 434 處變成「CR + CRLF」,已於 `b17a886` 修回 LF,內容未遺失。
 
 ## 3. 卡住/未決的問題
+
+- **快照/看門狗共用一個殘餘失效面(09-04 新增,知情接受)**:兩者都住在 WSL——
+  **WSL 整體停擺時,Windows UI 會正確轉灰,但 Slack 不會叫**(看門狗也在裡面)。
+  這與「看門狗掛在 `HermesBridgeDaily` 上、該 task 自己失效就沉默」是同一形狀。
+  要補需要一個獨立於 WSL 與 Task Scheduler 之外的觸發源,本次未處理。
+  現有被動面:`HermesWslKeepAlive` 的 TimeTrigger PT15M backstop 會把 WSL 拉回來。
 
 - **★★ `consolidate-memory` 在 headless 排程下結構性做不到(09-04 發現,批次 4 議程)**:
   09-04 08:00 `daily-memory-check` 是 08-03 以來第一筆 `completed`(一次 attempt、
@@ -212,20 +217,6 @@
   **三個方向待拍板**:(a) cron 只做偵測+通知「請開互動 session」;(b) 為
   consolidate-memory 開受控的 headless 寫入例外(牴觸現有邊界,要重審);
   (c) 維持現狀但**至少停止每天燒 $0.98**。
-- **★ 新鮮度燈號在 Windows 觀測面是灰的(09-04 發現,燈號實質未生效)**:
-  runtime `jobs.db` **只存在 WSL 部署複本**,Windows repo 沒有這個檔
-  (`dashboard/data.py:JOBS_DB_PATH = ROOT/hermes/jobs.db`),而 API 跑在 Windows。
-  實測經 UNC(`\wsl.localhost\Ubuntu\...`,檔案確實看得到、4.27MB)以
-  `mode=ro` 開啟會 **`database is locked`**——WSL 側 worker 持有 WAL 鎖,
-  **SQLite WAL 跨 SMB 拿不到讀鎖**,是拓撲限制不是程式 bug。
-  **連帶影響**:Jobs 頁、成本頁、`/api/status-counts` 在 Windows 觀測面**本來就
-  一直是空的**(`jobs_db_exists()` 直接回 False),只是沒人注意到。
-  三個方向:(a) API 改跑 WSL(架構大改);(b) 定期快照 jobs.db 到 Windows
-  (**有既有前例**——bridge 就是走 `/mnt/c` 快照);(c) **讓已在 WSL 08:05 執行的
-  看門狗把結果 JSON 寫到 Windows 可讀路徑,燈號改讀它**——等於回到
-  `repo_guard` 那個「讀 `_latest.json` + 誠實標示資料年齡」的模式。
-  ⚠️ **engineering 當初明確反對照抄 repo_guard 模式(理由是語意上沒有宿主),
-  推理本身站得住,但沒有拿部署拓撲驗證,所以設計在實際部署位置上不成立。**
 - **rss 死信率 41% 貼著門檻(09-04 新增)**:`33/80`,離 `dead_letter_ratio_threshold`
   0.5 只差 9 個百分點,目前判**綠**是照規則走的。但該門檻是在「cron 常態失敗率遠低於
   此」的假設下訂的,rss 常態明顯高一檔——**綠燈但長期半殘**。建議 per-source 門檻
@@ -439,32 +430,30 @@
 
 ## 4. 下一步(可直接執行的第一步)
 
-- **① 明早(09-05)08:00 看三件事**——這是 cron 那條恢復後的第一個樣本:
-  ① `daily-memory-check` 能不能跑完(rss 已證明鏈活了,cron 還沒有樣本);
-  ② `memory/inbox/` 那 2 筆有沒有被整併掉(順帶驗 N-gate 與分派 `knowledge` 那段);
-  ③ STATUS 觀察項 (a) 的 relay 閘門終於能取得第一個樣本。
-- **② 把看門狗掛上排程**(見第 3 節第二項)——**沒掛就等於沒有防復發**。
-  在 `HermesBridgeDaily` 動作字串尾端加第四段 + WSL `ln -sf` + `daemon-reload`。
-- **③ 批次 3｜規則引擎:性質已改變,起草前先拍板**。脈絡包已備齊在
-  `memory/hermes-task-category-model-routing-preference.md`(18 條既有決策、額度約束
-  的機器可讀性判定、三個現存陷阱、15 項缺口)。要拍的兩題見第 3 節。
-- **④ 批次 4｜集中拍板(60–90 分,避開 07:30–08:30)**:議程第 0 項=模型路由的循環
-  依賴與「建議 vs 強制」;接著 `/cos`+Telegram 出口格式(合併議)、headless 記憶失效
-  (傾向做)、launcher `-Restart`、systemd 雙軌、以及 planning 建議結案那 6 項的確認。
-  **09-04 新增兩項議程,現為九項**:**consolidate-memory 在 headless 下結構性做不到**
-  (每天燒 $0.98 是硬成本,三個方向見第 3 節第一項);**新鮮度燈號讀不到 jobs.db**
-  (拓撲限制,三個方向見第 3 節第二項)。
-- **⑤ 批次 5/6**:執行拍板結果;低優先收尾(三項 UI 小修打包、Hermes UI 設定維護
-  獨立 session、Tavily key、bridge/PTY `/code-review ultra`)。
+- **① 明早(09-05)08:00–08:10 四個觀察點**:
+  ① `daily-memory-check` 能否再次跑完(09-04 那次是 08-03 以來第一筆 completed);
+  ② **它的整併有沒有落盤——預期「不會」**(結構性矛盾見第 3 節),重點是確認回報內容
+  與 09-04 一致,不是期待它突然成功;
+  ③ STATUS 觀察項 (a) 的 relay 閘門樣本;
+  ④ **看門狗(08:05)第一次真實排程執行——叫或不叫都是資訊**。
+- **② 批次 4｜集中拍板(60–90 分,避開 07:30–08:30)——下一個正式 session**。
+  **九項議程**,第 0 項=模型路由的循環依賴與「建議 vs 強制」。它是唯一會解鎖下游的
+  節點,而待拍板項至今仍是**零**。
+- **③ 批次 5/6**:執行拍板結果;低優先收尾(三項 UI 小修打包、Hermes UI 設定維護
+  獨立 session、**Tavily key 明文——planning 建議從低優先桶抽出,那是憑證外洩面**、
+  bridge/PTY `/code-review ultra`)。
+- **批次 3 建議直接刪除**(planning 09-04 判斷):前置條件已查證不成立,降級成批次 4
+  的一個決策項即可;若拍板結果是「維持建議制」,整個批次 3 自然消失,不必保留空殼
+  批次在 roadmap 上製造心理負擔。
 
-**與 AIChain 那條線的插隊項**(時效已過三天):確認 09-02/03/04 三次
-`cron + claude_cli` 的實際結果——看 Slack `#ai-chainresearch` 有沒有東西;失敗證據在
-`AIChainOrchestrator\logs\<run_id>_aichain_claude_daily_auto.log` 的 stderr,回滾一行
-(`claude_provider.yaml` 改回 `provider: anthropic_api`,即時生效)。
-**注意:AIChain 那條 cron 不在 B2 看門狗的監控範圍內。**
+**與 AIChain 那條線的插隊項**(時效已過三天,planning 判定為「唯一有資格插隊」的項目):
+確認 09-02/03/04 三次 `cron + claude_cli` 的實際結果——看 Slack `#ai-chainresearch`;
+失敗證據在 `AIChainOrchestrator\logs\<run_id>_aichain_claude_daily_auto.log` 的 stderr,
+回滾一行(`claude_provider.yaml` 改回 `provider: anthropic_api`,即時生效)。
+**⚠️ AIChain 那條 cron 不在 B2 看門狗的監控範圍內**,修好觀測面也不會順帶覆蓋它。
 
-**零星未清**(各約 10 分鐘):`hermes/README.md:3` 有與 ROADMAP 同源的錯句
-(「Windows 排程尚未實作」);`docs/hermes-integration-roadmap.md:840` 的 07-19 殘留;
-`dispatch_domain.py:849` 的 `--help` 字串與 `:305` 註解仍帶 phase 標籤、且指向一份
-不在 repo 內的完工回報(死連結);`registry/capability_lanes.yaml:21` 同批標籤;
-`execute_native_or_openrouter()` 是唯一還在流通的 OpenRouter 命名殘留。
+**零星未清**(各約 10 分鐘,附掛在之後任一 session 尾巴即可,不值得單獨排):
+`hermes/README.md:3` 有與 ROADMAP 同源的錯句;`docs/hermes-integration-roadmap.md:840`
+的 07-19 殘留;`dispatch_domain.py:849` 的 `--help` 字串與 `:305` 死連結註解仍帶 phase
+標籤;`registry/capability_lanes.yaml:21` 同批標籤;`execute_native_or_openrouter()`
+是唯一還在流通的 OpenRouter 命名殘留。
