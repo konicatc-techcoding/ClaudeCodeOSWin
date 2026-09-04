@@ -5,7 +5,7 @@
 > 歷史細節與證據一律連結到權威文件(ROADMAP.md、docs/hermes-integration-roadmap.md、
 > memory/),不在這裡重複展開。本檔永遠只反映「最新一次收工時」的狀態。
 
-**最後更新**:2026-09-03
+**最後更新**:2026-09-04
 
 ---
 
@@ -53,6 +53,7 @@
   遺留與待拍板議題(見第 3 節),**已有帶優先序的開工順序**(2026-09-03 由 `planning` 產出,
   補掉 08-15 起掛著的議程項):清場(0) → 止血(1) → 校正脈絡(2) → 規則引擎(3)
   → 集中拍板(4) → 執行(5) → 收尾(6),序列執行。
+  **批次 0/1/2 已於 09-03~04 結案**;批次 3 性質已改變(起草前先拍板,見第 3 節)。
 - **Hermes-agent 兩側已升 v0.19.1 且對齊(08-04,首次完整走受控升級流程)**:
   兩側 HEAD 皆 `aa65ff286`(= 客製 tip × 官方 tag `v2026.7.30` 受控 merge,
   engineering 隔離 worktree 產出),live 驗證全過(doctor/allowlist 負面
@@ -98,56 +99,103 @@
 
 ## 2. 上一個 session 做了什麼
 
-(2026-09-03,單一 session,主題是**系統面盤點與開工順序規劃**——規劃層推進一大格,
-執行層零推進。本次唯一的檔案變更是 `memory/` 兩個檔;webui 那四項未 commit 變更
-第四次刻意未帶入。)
+(2026-09-03~04,單一長 session。主題:**系統面盤點 → 七批次規劃 → 批次 0/1/2 執行**,
+中途插隊處理一場活的 31 天靜默故障。8 個 commit `ae1eff1`…`5bf9372`,工作樹乾淨。)
 
-### 系統面完整盤點(28 項,分六類)
+### 批次 0｜清場(`ae1eff1` `3d14da8` `d3dac97`)
 
-- 依第 3 節與**實際開檔核對 ROADMAP.md** 產出:需拍板 7、可直接動手 11(合計約半天)、
-  結構性風險 4、觀察待觸發 5、文件過時 1 份、工作樹雜項 2。
-- **核對出 ROADMAP.md 四處與現實脫節**:開頭仍寫「Windows 側 bridge／Task Scheduler
-  是未來選項、**尚未實作**」(實際已上線數月且是主要 runtime,最會誤導新 session 的一句)、
-  Milestone 表停在 `v0.1-beta`(2026-07-04)、「下一步」段落過時、「已知技術債」四項從未複查。
-- 判讀:**系統面沒有任何「做到一半」的實作,全部卡在決策層**。
+- **擱置 19 天的 webui 排版 patch 落地**:純呈現層(中文優先字型、字級 10-11px→12px
+  起跳、`--muted` 提亮解 3.5:1 對比、表頭去 uppercase、導覽三組分群)。套用時未做完
+  驗收,收尾補修三個測試紅燈與兩個缺口。**拍板兩件**:①「CLI 位於總覽與 Jobs 之間」
+  是拍板過的約定(`ui-static.test.mjs:80` 鎖著),**推翻拍板需要新的拍板、維持它不需要**
+  ——terminal 移回〔觀測〕組第二位,與三組結構並存;② 兩條 cascade 測試只更新期望值、
+  斷言一條沒刪(測試斷言的正是這次刻意要改的東西)。
+  規格與三個落地時才發現的坑寫進
+  [docs/webui-typography-proposal.md](docs/webui-typography-proposal.md);
+  素材包移出 repo 至 `~/dev/_archive/agentos-ui-patch-20260815/`。
+- inbox 整併、Stage 0.5 三項殘項查證後全數過時結案、觀察類 5 項補上到期日
+  (07-19 首次觸發直接結案)。
 
-### 開工順序規劃(planning 產出)
+### 批次 1｜止血(`40bb858` `eaceaca`)
 
-- 七批次序列,核心判斷是 **A 類 7 項不該是 7 個 session**,而是 1 個起草 + 1 個集中拍板。
-  拍板排第四不是拖延——前三批要先給它乾淨的工作樹、正確的 runtime 脈絡與草案。
-- **建議 6 項直接結案**(28→22,尚未生效,要等批次 4 拍板):更新按鈕階段二判死
-  (0.19.1 實戰已否證其價值前提)、Lane `provider` 正名改為文件註記、黃燈精準度降級為
-  觀察項、lane session 觀測缺口下半關閉、keepalive watchdog 補「三個月內再發生一次
-  WSL 靜默死亡即升級」的重啟條件、白天撞 WAL 關閉待辦。
-- 產出兩份規劃 artifact(盤點清單、開工順序),**不在版控內**。
+- **push 紀律由事後偵測升級為離線止血層**:選 (c) bundle。不選 (b) pre-Install hook
+  的理由是 **git 沒有 `pre-reset` hook,攔截點不存在——做不到就不假裝做到**;不選
+  (a) 自動 push 的理由是它的失敗模式(離線/token 過期)會**靜默留下暴露窗口**,正是
+  要消滅的那種失效。
+- 暴露狀態接進 `/api/update-precheck` 的 `repo_guard` 欄位(不另開端點,因此
+  `security_check` 第 11 項的 URL 靜態鎖定不必放寬,維持 13 項)。**欄位名用
+  `covered_commits` 而非「目前暴露」**——manifest 只在有暴露時才寫出,拿它當現況
+  會說謊;guard 刻意不用橙色(橙專屬預檢的「未 push」),兩層各講各的。
+- 順手修的裸 import 實際牽出四個檔(`data_stage3`→`data_systemd_wsl`→`data_resident`
+  全是裸 top-level import,只修一行下一層仍會炸)。
 
-### 模型路由脈絡包落地(knowledge)
+### 批次 2｜脈絡校正(`02537d1`)
 
-- `memory/hermes-task-category-model-routing-preference.md` 由 14 行擴為約 190 行
-  (+214/-6):18 條既有決策表(「什麼情況 → 選了什麼 → 為什麼」)、現況機制實際值、
-  額度約束的「寫在哪裡／機器可讀與否」判定、三個現存陷阱、15 項脈絡缺口。
-- 四個最有價值的判斷寫在檔案最前面:**既有決策已經是事實上的規則**(草案該形式化而非
-  另起爐灶)、**D8 是唯一「按任務性質選模型」的先例且不應假設可推廣**、**D18「不強制
-  路由」與自動選模型引擎有直接張力**、**額度約束全無機器可讀形式**(配額耗盡的既有
-  處理方式實質上就是使用者當場手改 `config.yaml`)。
-- `memory/MEMORY.md` 索引同步一行,把三個警訊直接放進索引本身,讓下次 recall 掃索引即可見。
+- ROADMAP.md 四處翻修。最誤導的一句「Windows 側 bridge/Task Scheduler 是未來選項、
+  **尚未實作**」(實際已上線數月且是主要 runtime)已更正,並以 ⚠️ 保留更正註記讓看過
+  舊版的人知道自己被誤導過。Milestone 表補齊 Stage 0–5。
+- **新增 phase 編號警語**:`Phase 2a–2h` 是 07-20/21 事後貼的流水帳編號,`2c` 零命中、
+  `2e`/`2f` 一號多義、從未進 commit message。**這次差點害我們去等一個不存在的里程碑。**
+- 技術債四項判定:1/2/3 仍成立(第 1 項範圍已因 OpenRouter 移除而縮小),**第 4 項
+  原敘述作廢**——`daily-memory-check` 早就涵蓋 inbox 整併,真正的問題是它掛了(見下)。
+- `dispatch_domain.py` docstring 去除全部 phase 編號,改成誠實描述現況(唯一觸發途徑
+  是手動 CLI),並補上三個查證所得:`--category` 不參與 lane 選擇、`fallback_lane`
+  是死路徑、`validate_lane()` 對 `execution=route_model` 的 OpenRouter 殘留驗證。
 
-### ★ Phase 2f 查證(engineering 唯讀)——推翻了一個假前提
+### ★ 插隊:CoS 呼叫鏈 31 天靜默故障(`fc5d8d4` `5bf9372`)
 
-- **「Phase 2f」在專案裡沒有權威定義**。它是 07-20/21 一次長 session 事後貼上的臨時編號,
-  **在三份文件裡指三件不同的事**(`capability_lanes.yaml:298` financialresearch 憑證清理／
-  roadmap:659 lane 轉 active+補文件／使用者自己註解的「讓 subagent 真正呼叫」)。
-  `Phase 2c` 全 repo 零命中;編號從未進過任何 commit message。
-- **前置條件後半明確不成立**:`logs/dispatch_domain/` 共 14 筆、成功率 11/14、
-  **最後一筆 2026-08-03,至今整整一個月零執行**、**14 筆全部帶明確 `--lane` override,
-  自動選路徑一次都沒被走過**、全部是驗證/測試性質,沒有一筆是自然發生的日常任務。
-- **真正的死結是循環依賴**:「工具存在但沒人用」從來沒被排進任何 phase;要累積使用經驗
-  得先有「什麼情況該走 lane」的判準,而那正是規則引擎本身。
-- 附帶澄清:`dispatch_domain.py` docstring 的「不被 CoS／worker.py 呼叫」**今天依然
-  字面為真**(全 repo 無自動呼叫點),與 STATUS 的「端到端驗證有效」不矛盾——兩者描述
-  不同層次(人工觸發跑得通 vs 沒有自動呼叫點)。
+- 批次 2 順帶挖出:`daily-memory-check` 自 08-04 起連續 28 輪 dead_letter。查下去
+  發現**不只 memory 那條,是整條 CoS 呼叫鏈**——所有 source 共用 `invoke_cos.sh`,
+  **rss 1321 筆全滅**。根因=WSL 側 Claude Code 掉登入(**與 0.19.1 升級無關,時序證偽**)。
+- **為什麼 28 天查不出原因**:`claude -p --output-format json` 把錯誤寫在 stdout 的
+  JSON 裡、stderr 真的是空的,而 `worker.py` 只取 stderr → DB 裡 28 筆錯誤訊息全空白。
+  錯誤原文一直躺在 job log 裡。
+- 修復:使用者 `/login` → rss 實測兩筆 completed。防復發做 F2(失敗訊息帶 stdout,
+  且 `result` 只在 payload 自稱失敗時才入庫——成功 payload 的 result 正是 CoS 給
+  使用者的完整答案)+ F5(五態新鮮度看門狗)。
+- 兩側部署對齊(`sync_to_wsl.sh --apply`,停服務→同步→重啟),F2 已確認在 WSL 生效
+  (worker 啟動時間晚於檔案 mtime)。`jobs.db`/`state/`/`logs/` 排除項驗證未被動。
+
+### 其他
+
+- 兩個 repo 暴露歸零:11 個 commit 已 push、hermes-agent 那筆擱置兩個月的 autostash
+  已 drop(內容=1162 個 CRLF 雜訊 + 1 個上游已刪除的 esbuild 產物,零客製價值;
+  drop 前已進 bundle)。
+- **`git push` 與 `sync_to_wsl.sh --apply` 都被 Claude Code auto mode 權限分類器擋下**,
+  由使用者自行執行。下次遇到同類操作直接請使用者跑,不要浪費一輪。
 
 ## 3. 卡住/未決的問題
+
+- **★ CoS 呼叫鏈曾靜默死亡 31 天,09-04 已修復——但復發風險仍在**:
+  2026-08-04 03:44 WSL 側 Claude Code 掉登入(`~/.claude/.credentials.json` 被
+  重寫成 238 bytes),此後每次 `claude -p` 在 ~180ms 內回 `Not logged in` 且
+  exit 1。**與 hermes-agent v0.19.1 升級無關**(憑證失效在 WSL 升級之前 6 小時,
+  且 hermes-agent 對 `.claude/.credentials` 零程式路徑命中)。損失:**rss 1321 筆**、
+  cron 28 筆、其他 8 筆 job 全滅,零金錢損失(全部秒退)。09-04 使用者重新 `/login`
+  後 rss 實測兩筆 completed,鏈已恢復。
+  **殘餘風險:這是會復發的單點**——OAuth token 會再過期,headless 無自動續期保證。
+  改用 `ANTHROPIC_API_KEY` 注入 service 環境可解,但與「分析改走訂閱制」的拍板
+  相牴觸,**待議**。
+- **看門狗尚未掛排程(09-04 新增,阻斷 F5 生效)**:`scripts/jobs_freshness_watchdog.py`
+  已完成並實測(五態判別、門檻在 `registry/jobs_watchdog.yaml`、對 jobs.db 唯讀、
+  自身失敗時 best-effort 送出「我壞了」)。`hermes/systemd/hermes-jobs-watchdog.service`
+  刻意**不附 `.timer`**,設計為掛在既有 Windows Task `HermesBridgeDaily` 動作字串
+  尾端加第四段 + WSL `ln -sf` + `daemon-reload`(**不要用 `install.sh`**,它看到沒有
+  .timer 會把單元當常駐服務 enable --now,語意錯)。**沒掛就等於沒有防復發。**
+  掛上當天會叫一則(cron 目前仍是 `executor_dead`,明早 08:00 跑完才轉綠)。
+  殘餘縫隙:掛在 `HermesBridgeDaily` 上,該 task 自己失效時看門狗也沉默。
+- **F3/F4 評估後不做(09-04,知情接受)**:F3=認證失敗 fail-fast(現在確定性錯誤
+  仍跑滿 3 次 attempt,本次約 4000 次無謂 subprocess);F4=擴大 notifier 偵測範圍
+  (`bridge_notifier.py:_fetch_lifecycle_jobs()` 寫死只掃 triage/dispatch 兩個 source,
+  cron/rss/hermes/telegram 的 dead_letter 完全不在偵測範圍——**28 次零通知是設計
+  的必然結果**)。F4 未做的原因是會瞬間對 1357 筆歷史死信爆量發 Slack
+  (message_key 冪等只擋重送、不擋首送)。**因此看門狗是抓這類故障的唯一機制。**
+- **`memory/.archive/` 從未建立(09-04 發現)**:retention review 自 07-30 提案
+  上線至今**一次都沒真正跑過**,先前被「掛在 dead_letter」掩蓋。實質損失接近零
+  (本來就在冷啟動保護中,跑了也只記一行 skip),但 **2026-10-28 是硬期限**。
+- ⚠️ **不要把兩個 cron 搞混**:B2 看門狗監控的是 **AgentOS 自己的 `hermes/jobs.db`**;
+  下方「cron 這個月只跑了 14 天」講的是 **AIChain 晨報那條外部排程**,兩者不同源,
+  **看門狗不涵蓋後者**。
 
 - **★ 模型路由規則引擎:兩個必須先拍的板(09-03 新增,阻斷批次 3)**:
   (a) **循環依賴**——「工具存在但沒人用」從未被排進任何 phase,要累積使用經驗得先有
@@ -156,9 +204,6 @@
   路由**」,一個「自動選」的引擎要不要覆蓋這條,尚未拍板。這一題會反過來改寫其他議題
   的形狀,**必須先於批次 4 的其他議程**。脈絡正本已備齊在
   `memory/hermes-task-category-model-routing-preference.md`。
-- **`scripts/dispatch_domain.py` docstring 措辭過時(09-03 新增)**:檔頭「接線是
-  Phase 2」與第 2 行「v0.1(Phase 1)」標籤從未更新——2a–2h 全做完,卻沒有一個 phase
-  真的做接線。建議併入批次 2(脈絡校正)與 ROADMAP 一起修。
 - **phase 編號體系本身不可信(09-03 新增)**:2a–2h 是流水帳式事後編號,`2c` 不存在、
   `2e`/`2f` 一號多義、從未進 commit message。**日後引用 phase 編號前先查證語意**。
 
@@ -218,10 +263,14 @@
   沒發揮」——實際上**該功能從未存在**(`resolved_count` 只是在數有幾筆不是轉址)。真正
   的槓桿是 `content_enricher`(對直連 100% 成功、對 Google News 轉址 100% 失敗)。
 
-- **防重演有一個結構性弱點(持續性風險,務必知道)**:`reset --hard origin/main`
-  是 no-op 的前提是 `main == origin/main`。**一旦有客製 commit 沒 push 到私有
-  備份,桌面 Install 鈕就會吃掉它們**——中和繫於「每次客製後都要 push」的人為
-  紀律,不是結構保證。升級預檢已會在 `ahead > 0` 時亮橙告警。
+- **防重演弱點已加上離線止血層(09-03,批次 1)**:`reset --hard origin/main`
+  在 `main != origin/main` 時會吃掉未 push 的客製 commit(07-24 真實發生過)。
+  現有 `scripts/repo_guard_bundle.ps1` 打增量 bundle 到 `%LOCALAPPDATA%\AgentOS  repo-guard\`,保護範圍 `--branches --tags refs/stash --not --remotes`(比預檢多
+  涵蓋 tag 與 stash),對目標 repo 唯讀、離線零憑證,已通過比 Install 鈕更狠的
+  破壞性還原測試。**殘餘風險**:(a) 它只做到「可還原」不是「不會被吃」——git 無
+  `pre-reset` hook,攔截點不存在;(b) **使用者刻意未建排程**,所以只在有人跑它時
+  才更新,webui 預檢頁的 `repo_guard` 卡片會據 `_latest.json` 誠實顯示資料年齡
+  (fresh/stale/never 三態)。目前兩個 repo 皆零暴露。
 - **遺留/待拍板議題清單(08-15 盤點;09-03 已由 `planning` 排成帶優先序的七批次順序,
   本項僅留作索引)**:
   待拍板=telegram-cos-realtime 草案(併 Telegram 出口格式缺口)、headless session
@@ -243,13 +292,6 @@
   仍是 `exhausted`,那就不是「設計如此」而是欄位更新有 bug,改開 engineering 修;
   若在 2026-12-31 前都沒有任何真實呼叫發生,直接結案刪除本項——一條一整季沒人用的
   lane,它的憑證燈號本來就不值得追。)
-- **`dashboard/data_stage3.py:76` 裸 `import data_systemd_wsl`**(08-15 engineering
-  附帶觀察):從 repo 根 `import dashboard.data_stage3` 會 `ModuleNotFoundError`,
-  現行 api.py 在 `dashboard/` 目錄下起所以沒事;之後有人從 repo 根 import 會踩到。
-  一行可修,未排。
-- **Streamlit 退役後 WSL 部署複本尚未同步**:`app.py`/`test_app.py` 要等下次
-  `scripts/sync_to_wsl.sh`(rsync `--delete`)才會在 WSL 側消失;venv 內 streamlit
-  套件刻意未 uninstall(無害)。
 - **憑證頁殘留邊界(三項皆小,知情接受)**:(a) 同頁 Capability Lane 治理表的
   `provider` 欄**未跟著正名**(屬 registry 語意,刻意不動)——若兩表並置仍會
   混淆再開小改;(b) **黃燈只看「整個 store 有無 exhausted 條目」,不區分耗盡的
@@ -332,33 +374,29 @@
 
 ## 4. 下一步(可直接執行的第一步)
 
-**照批次順序走,序列執行(ROADMAP「不同時開兩個能力」)。**
-
-- **批次 0｜清場——✅ 已完成(2026-09-03)**,四項全數結案,`git status` 乾淨:
-  ① webui 那四項未 commit 變更(擱置 19 天)——`App.tsx`/`globals.css` 加上收尾修復
-  隨 commit `ae1eff1` 上線(156/156 綠、typecheck 零錯誤、零新增 `!important`);
-  規格與落地經驗整理成
-  [docs/webui-typography-proposal.md](docs/webui-typography-proposal.md)
-  (含三個規格書沒寫到的坑與兩項未解);素材包 `agentos-ui-patch/` 與根目錄逐字
-  複本 `CLAUDE-CODE-PROMPT.md` 已移出 repo 至
-  `~/dev/_archive/agentos-ui-patch-20260815/`(MD5 一致性驗證後刪除複本)。
-  **engineering 批次的前置已解除。**
-  ② `memory/inbox/` 已清空(commit `3d14da8`),兩份歸檔進 `.processed/`;
-  ③ Stage 0.5 三項殘項查證後全數過時、已結案移除(見第 3 節);
-  ④ 觀察類 5 項全補上到期日/觸發條件,其中 07-19 首次自動觸發直接結案。
-- **批次 1｜止血**:把「預檢 `ahead>0` 亮橙」升級為主動保護(未 push 的客製 commit 不能被
-  桌面 Install 鈕靜默吃掉);順手修 `dashboard/data_stage3.py:76` 裸 import。
-  **這是清單裡唯一會造成不可逆損失的項目。**
-- **批次 2｜脈絡校正**:ROADMAP.md 四處翻修 + 技術債四項判定,**併入 `dispatch_domain.py`
-  docstring**。要在拍板之前做完。
-- **批次 3｜規則引擎**:性質已改變,**起草前先拍板**(見第 3 節第一項)。脈絡已備齊。
-- **批次 4｜集中拍板(60–90 分)**:議程第 0 項=模型路由的循環依賴與「建議 vs 強制」;
-  接著 `/cos`+Telegram 出口格式(合併議)、headless 記憶失效(傾向做)、launcher `-Restart`、
-  systemd 雙軌、以及 6 項建議結案的確認。**避開 07:30–08:30**(搶晨報訂閱額度)。
-- **批次 5｜執行拍板結果**;**批次 6｜低優先收尾**(三項 UI 小修打包、Hermes UI 設定維護
+- **① 明早(09-05)08:00 看三件事**——這是 cron 那條恢復後的第一個樣本:
+  ① `daily-memory-check` 能不能跑完(rss 已證明鏈活了,cron 還沒有樣本);
+  ② `memory/inbox/` 那 2 筆有沒有被整併掉(順帶驗 N-gate 與分派 `knowledge` 那段);
+  ③ STATUS 觀察項 (a) 的 relay 閘門終於能取得第一個樣本。
+- **② 把看門狗掛上排程**(見第 3 節第二項)——**沒掛就等於沒有防復發**。
+  在 `HermesBridgeDaily` 動作字串尾端加第四段 + WSL `ln -sf` + `daemon-reload`。
+- **③ 批次 3｜規則引擎:性質已改變,起草前先拍板**。脈絡包已備齊在
+  `memory/hermes-task-category-model-routing-preference.md`(18 條既有決策、額度約束
+  的機器可讀性判定、三個現存陷阱、15 項缺口)。要拍的兩題見第 3 節。
+- **④ 批次 4｜集中拍板(60–90 分,避開 07:30–08:30)**:議程第 0 項=模型路由的循環
+  依賴與「建議 vs 強制」;接著 `/cos`+Telegram 出口格式(合併議)、headless 記憶失效
+  (傾向做)、launcher `-Restart`、systemd 雙軌、以及 planning 建議結案那 6 項的確認。
+- **⑤ 批次 5/6**:執行拍板結果;低優先收尾(三項 UI 小修打包、Hermes UI 設定維護
   獨立 session、Tavily key、bridge/PTY `/code-review ultra`)。
 
-**與 AIChain 那條線的插隊項**(不在批次內,但時效已過):先確認 09-02/09-03 兩次
+**與 AIChain 那條線的插隊項**(時效已過三天):確認 09-02/03/04 三次
 `cron + claude_cli` 的實際結果——看 Slack `#ai-chainresearch` 有沒有東西;失敗證據在
 `AIChainOrchestrator\logs\<run_id>_aichain_claude_daily_auto.log` 的 stderr,回滾一行
 (`claude_provider.yaml` 改回 `provider: anthropic_api`,即時生效)。
+**注意:AIChain 那條 cron 不在 B2 看門狗的監控範圍內。**
+
+**零星未清**(各約 10 分鐘):`hermes/README.md:3` 有與 ROADMAP 同源的錯句
+(「Windows 排程尚未實作」);`docs/hermes-integration-roadmap.md:840` 的 07-19 殘留;
+`dispatch_domain.py:849` 的 `--help` 字串與 `:305` 註解仍帶 phase 標籤、且指向一份
+不在 repo 內的完工回報(死連結);`registry/capability_lanes.yaml:21` 同批標籤;
+`execute_native_or_openrouter()` 是唯一還在流通的 OpenRouter 命名殘留。
